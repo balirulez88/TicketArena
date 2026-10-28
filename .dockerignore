@@ -1,0 +1,3 @@
+# The image needs only its entrypoint; the repo itself is cloned at runtime from the mount.
+*
+!scripts/sandbox-entrypoint.sh

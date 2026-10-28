@@ -1,0 +1,7 @@
+# Normalize to LF everywhere. Biome enforces `lineEnding: lf`, and shell scripts
+# executed inside the Linux sandbox break on CRLF, so Windows checkouts must not convert.
+* text=auto eol=lf
+*.sh text eol=lf
+*.png binary
+*.ico binary
+*.woff2 binary

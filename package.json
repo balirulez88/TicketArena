@@ -1,0 +1,29 @@
+{
+  "name": "ticketarena",
+  "version": "0.0.0",
+  "private": true,
+  "description": "High-traffic ticket booking platform with a digital waiting room, built with an agentic TDD workflow.",
+  "license": "MIT",
+  "packageManager": "pnpm@12.15.0",
+  "engines": {
+    "node": ">=24.0.0",
+    "pnpm": ">=12.0.0"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "biome ci --error-on-warnings .",
+    "format": "biome check --write .",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "check": "pnpm run lint && pnpm run typecheck && pnpm run test",
+    "db:generate": "turbo run db:generate",
+    "ralph": "bash ./ralph-loop.sh",
+    "sandbox": "bash ./scripts/sandbox.sh"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.3",
+    "turbo": "2.11.10",
+    "typescript": "6.0.3"
+  }
+}

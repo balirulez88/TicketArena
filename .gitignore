@@ -1,0 +1,36 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+.next/
+out/
+dist/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+
+# generated code (rebuilt by `pnpm db:generate`)
+**/src/generated/
+
+# env files: only the example is committed
+.env
+.env.*
+!.env.example
+
+# test & coverage
+coverage/
+
+# Ralph harness run artifacts
+.ralph/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Claude Code per-user settings
+.claude/settings.local.json

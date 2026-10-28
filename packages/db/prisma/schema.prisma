@@ -1,0 +1,44 @@
+// Domain models (Event, Seat, Order, ...) are intentionally absent: they will be shaped by the
+// /grill-me -> /to-spec -> /to-tickets workflow and added slice by slice under TDD.
+// Only the cross-cutting infrastructure table that the architecture mandates lives here.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum OutboxStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+}
+
+/// Transactional Outbox.
+/// Business writes and their integration events are committed in the SAME Postgres
+/// transaction, which removes the dual-write problem (DB commit succeeds, broker publish
+/// fails, or vice versa). A separate relay process polls PENDING rows and publishes them to
+/// the broker, giving at-least-once delivery; consumers must therefore be idempotent and
+/// deduplicate on `id`.
+model OutboxEvent {
+  id            String       @id @default(uuid()) @db.Uuid
+  /// Aggregate type + id identify the stream; the relay preserves order per aggregate.
+  aggregateType String
+  aggregateId   String
+  /// Broker subject/topic name, e.g. "booking.confirmed".
+  eventType     String
+  payload       Json
+  status        OutboxStatus @default(PENDING)
+  attempts      Int          @default(0)
+  lastError     String?
+  createdAt     DateTime     @default(now())
+  publishedAt   DateTime?
+
+  // Supports the relay's hot query: "oldest PENDING events first".
+  @@index([status, createdAt])
+  @@index([aggregateType, aggregateId])
+  @@map("outbox_events")
+}

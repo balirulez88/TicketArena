@@ -86,7 +86,8 @@ For each ticket whose `**Status:**` is `ready-for-agent` and whose blockers are 
 A ticket that cannot get through RED, GREEN, DOCS, REVIEW or VERIFY is **rejected**: its failing work is
 committed to a quarantine branch `rejected/<NN>-<slug>-<run-id>` (never to a slice branch or
 `main`), the ticket is marked `blocked` on `main`, and the loop stops for a human to look.
-Agent transcripts and gate output are kept in `.ralph/logs/<run-id>/` (git-ignored).
+Agent transcripts, gate output and review reports are kept in `.ralph/logs/<run-id>/`
+(git-ignored).
 
 ## Independent review
 
@@ -120,6 +121,14 @@ never touches the host working tree, and host-native `node_modules` (e.g. Window
 never mix with Linux ones. Green results are pushed back to the host repo's branches.
 The image also contains Postgres 17, Redis 7 and nats-server (checksum-verified), started by the
 entrypoint before the loop, so every slice is judged on real infrastructure.
+**Failed runs keep their evidence on the host.** The host's `.ralph/logs/` is mounted into the
+container, so logs land there as they are written, even if the run crashes. A rejection pushes the
+quarantine branch `rejected/<NN>-<slug>-<run-id>` and the base branch with the ticket marked
+`blocked`. The base branch only fast-forwards and the host repo refuses the push while it has
+local changes (`receive.denyCurrentBranch=updateInstead`); the blocked status then lands on
+`ralph/blocked-<run-id>` instead, to merge by hand. `pnpm test:sandbox` (Docker; also a CI job)
+proves both cases through the real sandbox. On Linux hosts the container user (uid 1000) must be
+able to write the repository and `.ralph/logs`.
 `pnpm sandbox --verify` runs just the gate inside the sandbox (no agent, no API key): use it after
 changing the image. Set `RALPH_BASE_BRANCH` to verify a branch other than `main`.
 The agent runs with permission prompts disabled **only** inside the container

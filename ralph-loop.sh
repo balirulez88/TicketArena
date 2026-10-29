@@ -35,7 +35,9 @@
 #   RALPH_REVIEW_BLOCKING    severities that block the merge (default: CRITICAL,HIGH)
 #   RALPH_REVIEW_TIMEOUT     seconds per reviewer process (default: 1800)
 #   RALPH_BASE_BRANCH    integration branch (default: main)
-#   RALPH_PUSH_REMOTE    if set, push slice + base branch there after each merge
+#   RALPH_PUSH_REMOTE    if set, push slice + base branch there after each merge, and the
+#                        quarantine branch + blocked status after a rejection
+#   RALPH_LOG_ROOT       where run logs go (default: .ralph/logs); the sandbox mounts the host's
 #   RALPH_SANDBOX=1      set by the Docker image; required for permission-skipping agents
 #   RALPH_ALLOW_HOST=1   explicit, conscious override of the sandbox requirement
 
@@ -59,7 +61,7 @@ readonly REVIEW_SCHEMA="${REPO_ROOT}/skills/code-review/report.schema.json"
 readonly REVIEW_GATE="${REPO_ROOT}/scripts/ralph-review.mjs"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 readonly RUN_ID
-readonly LOG_DIR="${REPO_ROOT}/.ralph/logs/${RUN_ID}"
+readonly LOG_DIR="${RALPH_LOG_ROOT:-${REPO_ROOT}/.ralph/logs}/${RUN_ID}"
 readonly FEEDBACK_LINES=150
 readonly ALLOWED_COMMIT_TYPES="feat fix refactor perf test docs chore"
 
@@ -532,6 +534,25 @@ reject_slice() {
   git commit --quiet -m "chore(issues): block ${ticket} after rejected agent run" \
     -m "Failing attempt preserved on ${quarantine}. Logs: .ralph/logs/${RUN_ID}/"
   log "  evidence on '${quarantine}', logs in ${LOG_DIR}"
+  [[ -z "${PUSH_REMOTE}" ]] || push_rejection "${quarantine}"
+}
+
+# In the sandbox the clone dies with the container, so the evidence must reach the host. The
+# quarantine branch is new and cannot clobber anything. The base branch only moves by fast-forward,
+# and a non-bare host repo (receive.denyCurrentBranch=updateInstead) refuses it while the host has
+# local changes; the blocked status then goes to a side branch instead of being lost.
+push_rejection() {
+  local quarantine=$1 side="ralph/blocked-${RUN_ID}"
+  git push --quiet "${PUSH_REMOTE}" "${quarantine}" ||
+    log "  ERROR: could not push ${quarantine} to ${PUSH_REMOTE}"
+  if git push --quiet "${PUSH_REMOTE}" "${BASE_BRANCH}"; then
+    log "  pushed ${quarantine} and the blocked status on ${BASE_BRANCH} to ${PUSH_REMOTE}"
+  elif git push --quiet "${PUSH_REMOTE}" "${BASE_BRANCH}:refs/heads/${side}"; then
+    log "  ${PUSH_REMOTE} refused ${BASE_BRANCH} (local changes or diverged); blocked status" \
+      "is on ${side}: merge it into ${BASE_BRANCH} when ready"
+  else
+    log "  ERROR: could not push the blocked status to ${PUSH_REMOTE}"
+  fi
 }
 
 # ---------------------------------------------------------------------------------------------

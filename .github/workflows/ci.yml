@@ -55,3 +55,16 @@ jobs:
       - name: Stop services
         if: always()
         run: docker compose down --volumes
+
+  sandbox:
+    name: Sandbox rejection recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Builds the sandbox image and runs a rejected ticket through scripts/sandbox.sh; checks
+      # that logs, the quarantine branch and the blocked status survive on the host.
+      - name: Rejected run leaves its evidence on the host
+        run: bash scripts/sandbox.test.sh

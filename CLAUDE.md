@@ -22,6 +22,7 @@ pnpm run typecheck  # tsc strict in every workspace
 pnpm run test       # vitest
 pnpm run test:harness  # ralph-loop review policy + review gate (bash, node:test)
 pnpm run check      # all of the above
+pnpm test:sandbox   # Docker: a rejected sandbox run keeps logs, branch and status on the host
 pnpm infra:up       # local Postgres/Redis/NATS for integration tests (TEST_* in .env.test)
 pnpm run format     # auto-fix formatting + import order
 ```

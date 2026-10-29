@@ -34,7 +34,9 @@ None yet. Each slice that emits an event adds a row here:
 | Event type | Producer | Consumers | Payload version |
 | ---------- | -------- | --------- | --------------- |
 
-## Open
+## Decided, not yet built
 
-Broker choice (Kafka vs NATS JetStream) and relay hosting are open decisions; see
-[system map](../index.md#open-decisions-input-for-grill-me).
+Broker: NATS JetStream behind a `MessageBus` port ([ADR 0004](../adr/0004-nats-jetstream-message-bus.md)).
+Retries, DLQ and consumer recovery: [ADR 0011](../adr/0011-delivery-retry-dlq-recovery.md).
+Planned subjects and the envelope: [MVP spec, Messaging](../specs/ticketarena-mvp.md#messaging).
+The catalogue above is filled in as slices emit events.

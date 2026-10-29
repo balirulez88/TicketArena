@@ -26,11 +26,15 @@ capacity by orders of magnitude within seconds. The system must:
                  └──────────────────────────────────────────────────────────────────────────────────┘
                                                     │ relay polls PENDING rows
                                                     ▼
-                                     Message broker (Kafka or NATS: open)
+                          apps/worker relay ──► NATS JetStream (MessageBus port)
                                           │                         │
                                           ▼                         ▼
                                   Payment service           Notification service
+                                  (worker module)           (worker module)
 ```
+
+The diagram shows the target of the [MVP spec](specs/ticketarena-mvp.md); "What exists today"
+below shows what is built.
 
 | Area                | Status      | Map                                    |
 | ------------------- | ----------- | -------------------------------------- |
@@ -38,8 +42,8 @@ capacity by orders of magnitude within seconds. The system must:
 | Database & Prisma   | outbox only | [database/](database/index.md)         |
 | Async messaging     | designed    | [messaging/](messaging/index.md)       |
 | Agent workflow & CI | operational | [workflow/](workflow/index.md)         |
-| Decisions (ADRs)    | 3 accepted  | [adr/](adr/index.md)                   |
-| Feature specs       | none yet    | [specs/](specs/index.md)               |
+| Decisions (ADRs)    | 13 accepted | [adr/](adr/index.md)                   |
+| Feature specs       | MVP ready   | [specs/](specs/index.md)               |
 | Domain vocabulary   | seeded      | [glossary.md](glossary.md)             |
 
 ## What exists today
@@ -50,22 +54,26 @@ capacity by orders of magnitude within seconds. The system must:
 - `packages/db`: Prisma 7 on the Neon serverless adapter; the `outbox_events` table.
 - Quality gate: Biome (warnings fail), strict `tsc`, Vitest, enforced by `ralph-loop.sh`.
 
-No domain features yet. They arrive as tickets produced by `/grill-me` → `/to-spec` → `/to-tickets`.
+No domain features yet. They arrive as tickets split from the
+[MVP spec](specs/ticketarena-mvp.md) by `/to-tickets`.
 
-## Open decisions (input for `/grill-me`)
+## Decisions
 
-1. **Broker:** Kafka (log retention, replay, partitions) vs NATS JetStream (lighter ops, subjects).
-2. **Outbox relay hosting:** a long-running worker app vs scheduled polling vs Postgres logical
-   replication (CDC). Serverless Next.js cannot host a long-lived poller.
-3. **Waiting-room admission:** strict FIFO vs a randomised pre-queue for buyers who arrive before
-   the on-sale; admission rate (fixed tokens/sec vs adaptive to checkout capacity).
-4. **Queue position delivery:** client polling vs SSE. Upstash's REST API offers no long-lived
-   pub/sub connection, which constrains push.
-5. **Seat holds:** Redis TTL locks vs Postgres rows with `expires_at` and `SKIP LOCKED`;
-   hold duration; behaviour when a hold expires mid-payment.
-6. **Overselling guarantee:** which store is the source of truth for seat state, and where the
-   uniqueness constraint lives.
-7. **Payments:** real provider sandbox vs simulated payment service; idempotency key design.
-8. **Identity:** auth provider, guest checkout, per-account ticket limits, bot mitigation.
-9. **Deployment & load testing:** Vercel + Neon + Upstash, worker host, and how we prove
-   capacity (e.g. k6 scenarios).
+The `/grill-me` session settled every former open decision; see the
+[MVP spec](specs/ticketarena-mvp.md) and [ADRs 0004–0013](adr/index.md):
+
+| Former open decision        | Settled by                                                                                                                                     |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Broker                      | NATS JetStream behind `MessageBus` ([0004](adr/0004-nats-jetstream-message-bus.md))                                                            |
+| Outbox relay hosting        | Polling relay in one worker app on Fly.io ([0013](adr/0013-deployment-topology.md))                                                            |
+| Admission order and rate    | Random pre-queue, then FIFO; token bucket + `maxActive` ([0008](adr/0008-waiting-room-admission.md))                                           |
+| Queue position delivery     | Client polling every 3s ([0008](adr/0008-waiting-room-admission.md))                                                                           |
+| Seat holds, oversell        | Postgres rows, ordered `FOR UPDATE`, buyer advisory lock ([0005](adr/0005-postgres-seat-state-row-locks.md))                                   |
+| Payments, idempotency       | Simulated provider, saga + ledger, three layers ([0006](adr/0006-booking-saga-payment-ledger.md), [0007](adr/0007-three-layer-idempotency.md)) |
+| Identity                    | Anonymous sessions behind `IdentityService` ([0012](adr/0012-identity-service-seam.md))                                                        |
+| Deployment and load testing | Vercel, Neon, Upstash, Fly.io; k6 locally ([0013](adr/0013-deployment-topology.md))                                                            |
+
+## Open decisions
+
+None for the MVP. Phase-2 topics (authentication, payment retry UI, provider reconciliation,
+dynamic queue activation, bot mitigation) are listed under "Out of Scope" in the spec.

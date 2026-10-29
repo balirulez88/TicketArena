@@ -1,6 +1,6 @@
 # 0002: Waiting room queue in Upstash Redis
 
-- **Status:** Accepted (admission policy details open, see system map)
+- **Status:** Accepted (admission policy refined by [ADR 0008](0008-waiting-room-admission.md))
 - **Date:** 2026-10-28
 
 ## Context

@@ -4,7 +4,6 @@
 
 Product specs (PRDs) written by `/to-spec`, one file per feature: `<feature-slug>.md`.
 
-| Spec | Status | Tickets |
-| ---- | ------ | ------- |
-
-None yet. The first one comes out of the `/grill-me` session.
+| Spec                                  | Status          | Tickets                       |
+| ------------------------------------- | --------------- | ----------------------------- |
+| [TicketArena MVP](ticketarena-mvp.md) | ready-for-agent | not yet split (`/to-tickets`) |

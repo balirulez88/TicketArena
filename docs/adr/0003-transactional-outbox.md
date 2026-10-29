@@ -1,6 +1,6 @@
 # 0003: Transactional outbox for async integrations
 
-- **Status:** Accepted (broker choice open: Kafka vs NATS JetStream)
+- **Status:** Accepted (broker choice settled by [ADR 0004](0004-nats-jetstream-message-bus.md))
 - **Date:** 2026-10-28
 
 ## Context

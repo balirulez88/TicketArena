@@ -51,6 +51,8 @@ Integration tests run against real **Postgres 17, Redis 7 and NATS JetStream**, 
   - `setupTestNats()`: a unique stream-name prefix and root subject token; streams deleted after.
 - Versions are pinned identically in `docker-compose.yml` and the sandbox `Dockerfile`; NATS
   uses one shared config (`infra/nats/nats.conf`, JetStream with `sync_interval: always`).
+- Compose publishes Postgres on host port **55432**, not 5432, so a natively installed Postgres
+  cannot shadow it. Redis and NATS keep their default ports.
 - Stale template databases from old migration sets accumulate harmlessly; `pnpm infra:reset`
   wipes all local service data.
 

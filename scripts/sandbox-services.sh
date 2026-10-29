@@ -36,7 +36,7 @@ sandbox_start_services() {
     --logfile "${SANDBOX_STATE}/redis.log"
   sandbox_wait_for redis redis-cli -h 127.0.0.1 ping
 
-  # Same config file as Docker Compose; only the JetStream store directory differs.
+  # Same config file as Docker Compose; each passes its own JetStream store directory.
   nats-server --config /etc/nats/nats.conf --store_dir "${SANDBOX_STATE}/nats" \
     >"${SANDBOX_STATE}/nats.log" 2>&1 &
   sandbox_wait_for nats curl --fail --silent "http://127.0.0.1:8222/healthz?js-enabled-only=true"

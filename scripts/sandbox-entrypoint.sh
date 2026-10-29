@@ -28,8 +28,10 @@ if [[ "${verify_only}" == false && -z "${ANTHROPIC_API_KEY:-}" && -z "${CLAUDE_C
   exit 1
 fi
 
-# The bind mount is owned by the host user, which git treats as untrusted by default.
+# The bind mount is owned by the host user, which git treats as untrusted by default. A local
+# clone checks the `.git` directory itself, so both paths must be trusted.
 git config --global --add safe.directory "${HOST_REPO}"
+git config --global --add safe.directory "${HOST_REPO}/.git"
 git config --global user.name "${GIT_AUTHOR_NAME:-Ralph Loop}"
 git config --global user.email "${GIT_AUTHOR_EMAIL:-ralph@localhost}"
 

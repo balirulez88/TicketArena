@@ -7,8 +7,8 @@ this directory is the single source of truth and stays readable for any agent or
 ## Workflow
 
 ```text
-/grill-me ──► /to-spec ──► /to-tickets ──► ralph-loop.sh (per ticket: /implement + /tdd ──► /update-docs)
- decisions     docs/specs/    issues/NN-*.md   red → green → refactor, gated by Biome + tsc + Vitest
+/grill-me ──► /to-spec ──► /to-tickets ──► ralph-loop.sh (per ticket: /implement + /tdd ──► /update-docs ──► /code-review)
+ decisions     docs/specs/    issues/NN-*.md   red → green → refactor → docs → review → fix, gated by Biome + tsc + Vitest
 ```
 
 | Skill            | Role                                                                 | Origin  |
@@ -20,12 +20,21 @@ this directory is the single source of truth and stays readable for any agent or
 | `implement.md`   | Implements a ticket via TDD, then code review                        | vendored |
 | `tdd.md` (+ `tdd-tests.md`, `tdd-mocking.md`) | Red → green rules, seams, anti-patterns | vendored |
 | `update-docs.md` | Keeps the `/docs` architecture maps current after each green slice   | native  |
+| `code-review/`   | Two-axis review (Standards, Spec) in independent sub-agents; portable | vendored |
 
 ## Provenance
 
 Vendored files are copied from [mattpocock/skills](https://github.com/mattpocock/skills) at
 commit `59db609eb1e18aaf59b63284d0e52255aff0c63c` under the MIT License (see
 [`UPSTREAM-LICENSE`](UPSTREAM-LICENSE)). Each file names its upstream path in a header comment.
+
+`code-review/` is vendored from the same repository at commit
+`7739eaed7f8f3915437a8def198a6d0d7206dbc7` as a whole directory (its upstream layout), because it
+is meant to be copied into other projects unchanged. Its **[local]** extensions are generic (no
+TicketArena knowledge) and listed in [`code-review/README.md`](code-review/README.md), which also
+explains how to install it elsewhere. TicketArena's review rules live in
+[`docs/workflow/code-review.md`](../docs/workflow/code-review.md); Ralph's merge policy lives in
+`ralph-loop.sh` and `scripts/ralph-review.mjs`.
 
 Upstream text is kept verbatim. Every local deviation is marked **[local]** inline, so a diff
 against upstream shows only these intentional changes:
@@ -38,6 +47,8 @@ against upstream shows only these intentional changes:
   slices that pass the gate.
 - **Unattended seams:** under the harness, the seams agreed in the spec count as confirmed.
 - **Docs step:** `implement` ends with `update-docs`.
+- **Review under the harness:** `implement` skips its own `code-review` call; Ralph runs the
+  review with fresh, read-only reviewers instead.
 
 `skills/` and `.claude/skills/` are excluded from Biome so the formatter never rewrites
 vendored text and the upstream diff stays clean.

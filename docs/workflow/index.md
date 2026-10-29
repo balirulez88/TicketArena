@@ -11,12 +11,14 @@
 | 3    | `/to-tickets`                  | `issues/<NN>-<slug>.md`             |
 | 4    | `ralph-loop.sh` (in sandbox)   | One green, atomic commit per ticket |
 | 5    | `/update-docs` (inside step 4) | Updated `/docs` maps                |
+| 6    | `/code-review` (inside step 4) | Standards + Spec reports, per slice |
 
 Skill sources and provenance: [`skills/README.md`](../../skills/README.md).
 
 ## Quality gate
 
-`pnpm run check` = `lint` → `typecheck` → `test`. All three must pass with zero warnings:
+`pnpm run check` = `lint` → `typecheck` → `test` → `test:harness`. All must pass with zero
+warnings:
 
 - **Biome** (`biome ci --error-on-warnings`): lint, formatting, import order. A warning is a
   failure. Fix with `pnpm run format`; never by loosening `biome.json` or `biome-ignore`.
@@ -28,6 +30,8 @@ Skill sources and provenance: [`skills/README.md`](../../skills/README.md).
   `noPropertyAccessFromIndexSignature`.
 - **Vitest** behaviour tests at agreed seams: unit **and** integration tests in one gate
   ([ADR 0010](../adr/0010-real-infrastructure-tests.md)).
+- **Harness tests** (`test:harness`): `node:test` for the review gate and bash scenarios that
+  run `ralph-loop.sh` with stub agents and reviewers, proving the merge policy below.
 
 ## Integration test infrastructure
 
@@ -73,13 +77,40 @@ For each ticket whose `**Status:**` is `ready-for-agent` and whose blockers are 
    is fed into the next one, up to `RALPH_MAX_ATTEMPTS`.
 4. **REFACTOR + DOCS:** the agent runs the code-review/refactor pass and `update-docs`. The gate
    must stay green. If it does not, the refactor is discarded and the green state kept.
-5. Squash into **one** Conventional Commit, mark the ticket `done` in the same commit, merge
+5. **REVIEW:** two independent reviewers judge the whole changeset (see below). Blocking
+   findings go back to the agent (**FIX**, gated like GREEN), then a fresh review round.
+6. **VERIFY:** the full gate runs once more on the approved tree.
+7. Squash into **one** Conventional Commit, mark the ticket `done` in the same commit, merge
    `--no-ff` into `main` so dependent tickets build on it, and optionally push.
 
-A ticket that cannot get through RED, GREEN or DOCS is **rejected**: its failing work is
+A ticket that cannot get through RED, GREEN, DOCS, REVIEW or VERIFY is **rejected**: its failing work is
 committed to a quarantine branch `rejected/<NN>-<slug>-<run-id>` (never to a slice branch or
 `main`), the ticket is marked `blocked` on `main`, and the loop stops for a human to look.
 Agent transcripts and gate output are kept in `.ralph/logs/<run-id>/` (git-ignored).
+
+## Independent review
+
+Ralph runs the portable [`code-review`](../../skills/code-review/README.md) skill in its
+non-interactive mode. TicketArena's rules for reviewers are in [code-review.md](code-review.md).
+
+- **Two axes, two processes.** The Standards and Spec reviewers run in parallel as separate,
+  fresh `claude -p` processes; neither sees the other or the implementing agent's context. Their
+  reports stay separate in `.ralph/logs/<run-id>/<slug>.review-<round>.md`.
+- **Read-only by construction.** Reviewers get only Read, Grep and Glob (`--restricted`,
+  `--strict-mcp-config`). If a review round leaves the repository changed anyway, the changes are
+  discarded and the round fails.
+- **What they review.** The complete changeset `git diff main...HEAD`, committed by the harness
+  right before the review so new files are included, plus the ticket and the spec and ADRs it
+  references.
+- **Structured, validated reports.** Each reviewer must return JSON matching
+  `skills/code-review/report.schema.json`: severity, file and line, rule, problem, impact,
+  recommendation. `scripts/ralph-review.mjs` validates both reports and applies the policy.
+- **Merge policy.** `CRITICAL` and `HIGH` findings block the merge (`RALPH_REVIEW_BLOCKING`);
+  `MEDIUM` and `LOW` are logged, not blocking. A crashed or timed-out reviewer, an error result,
+  invalid JSON, a skipped axis or a tampered tree is a **failed** review, never an approval.
+- **Bounded.** Up to `RALPH_MAX_REVIEW_ROUNDS` (default 3) rounds; each round except the last
+  may trigger a fix. A slice still blocked, or without a valid approval, after the last round is
+  rejected and quarantined like any other failure.
 
 ## Sandbox
 

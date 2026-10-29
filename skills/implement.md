@@ -24,6 +24,8 @@ Commit your work to the current branch.
 >   and `pnpm run test`. Run `pnpm run format` before declaring done; never weaken
 >   `biome.json` or add `biome-ignore` comments to get green.
 > - After the slice is green, call the Skill tool with "update-docs".
+> - When running under `ralph-loop.sh` (env `RALPH_TICKET` is set), skip the `code-review`
+>   step: the harness runs it itself, with fresh read-only reviewers, after the docs phase.
 > - When running under `ralph-loop.sh` (env `RALPH_TICKET` is set), the harness owns git:
 >   **do not commit, branch, stash or push**. It commits the slice itself only after the gate
 >   passes. Outside the harness, commit as above using Conventional Commits.

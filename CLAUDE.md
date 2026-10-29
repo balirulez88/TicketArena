@@ -10,7 +10,8 @@ Agent instructions for TicketArena. Humans: see `README.md`.
 
 ## Workflow
 
-`/grill-me` → `/to-spec` → `/to-tickets` → `ralph-loop.sh` (`/implement` + `/tdd`) → `/update-docs`.
+`/grill-me` → `/to-spec` → `/to-tickets` → `ralph-loop.sh` (`/implement` + `/tdd` → `/update-docs`
+→ independent `/code-review` → fix → merge).
 Skill sources live in `skills/`; `.claude/skills/*` are thin wrappers.
 
 ## Quality gate (all must pass, zero warnings)
@@ -19,7 +20,8 @@ Skill sources live in `skills/`; `.claude/skills/*` are thin wrappers.
 pnpm run lint       # biome ci --error-on-warnings
 pnpm run typecheck  # tsc strict in every workspace
 pnpm run test       # vitest
-pnpm run check      # all three
+pnpm run test:harness  # ralph-loop review policy + review gate (bash, node:test)
+pnpm run check      # all of the above
 pnpm infra:up       # local Postgres/Redis/NATS for integration tests (TEST_* in .env.test)
 pnpm run format     # auto-fix formatting + import order
 ```
@@ -43,6 +45,13 @@ skipped tests, or edits that relax `biome.json` / `tsconfig.base.json`.
   Redis alone.
 - Named exports only, except where Next.js requires default exports (pages, layouts, configs).
 - Conventional Commits: `type(scope): subject`.
+
+## Code review
+
+`/code-review <fixed-point>` runs the generic two-axis review (`skills/code-review/`). Its
+TicketArena-specific rules live in [`docs/workflow/code-review.md`](docs/workflow/code-review.md):
+reviewers must read that file. Ralph reviews every slice before merging; `CRITICAL`/`HIGH`
+findings block the merge.
 
 ## Layout
 

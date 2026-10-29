@@ -26,7 +26,38 @@ Skill sources and provenance: [`skills/README.md`](../../skills/README.md).
   unvalidated env access stands out.
 - **TypeScript** strict, plus `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`,
   `noPropertyAccessFromIndexSignature`.
-- **Vitest** behaviour tests at agreed seams.
+- **Vitest** behaviour tests at agreed seams: unit **and** integration tests in one gate
+  ([ADR 0010](../adr/0010-real-infrastructure-tests.md)).
+
+## Integration test infrastructure
+
+Integration tests run against real **Postgres 17, Redis 7 and NATS JetStream**, never mocks.
+
+| Where         | Services come from                                        | `TEST_*` variables come from   |
+| ------------- | --------------------------------------------------------- | ------------------------------ |
+| Developer     | `pnpm infra:up` (`docker-compose.yml`)                    | `.env.test` (copy the example) |
+| CI            | the same `docker-compose.yml` in GitHub Actions           | the workflow                   |
+| Ralph sandbox | native processes started by `scripts/sandbox-services.sh` | the entrypoint                 |
+- `TEST_DATABASE_URL`, `TEST_REDIS_URL`, `TEST_NATS_URL` are required. A missing one **fails**
+  the run with a message naming it; integration tests are never skipped.
+- `@ticketarena/test-infra` (test-only package, the one place test code reads the environment)
+  provides the isolation helpers; packages with integration tests register its global setup.
+- **Isolation per test file**, so files run in parallel:
+  - `setupTestDatabase()`: a fresh database cloned from a migrated template. The global setup
+    builds the template once per migration set (its name hashes the migrations) by applying the
+    committed migration SQL; clones and template builds are serialized by a Postgres advisory
+    lock. The clone is dropped after the file.
+  - `setupTestRedis()`: a unique key prefix, deleted after the file.
+  - `setupTestNats()`: a unique stream-name prefix and root subject token; streams deleted after.
+- Versions are pinned identically in `docker-compose.yml` and the sandbox `Dockerfile`; NATS
+  uses one shared config (`infra/nats/nats.conf`, JetStream with `sync_interval: always`).
+- Stale template databases from old migration sets accumulate harmlessly; `pnpm infra:reset`
+  wipes all local service data.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push and pull request: install, `docker compose up
+--wait`, `pnpm run check`. Actions are pinned to commit SHAs.
 
 ## Ralph loop (`ralph-loop.sh`)
 
@@ -54,5 +85,9 @@ Agent transcripts and gate output are kept in `.ralph/logs/<run-id>/` (git-ignor
 and runs the loop against a **clone** of the repo inside the container. The agent therefore
 never touches the host working tree, and host-native `node_modules` (e.g. Windows binaries)
 never mix with Linux ones. Green results are pushed back to the host repo's branches.
+The image also contains Postgres 17, Redis 7 and nats-server (checksum-verified), started by the
+entrypoint before the loop, so every slice is judged on real infrastructure.
+`pnpm sandbox --verify` runs just the gate inside the sandbox (no agent, no API key): use it after
+changing the image. Set `RALPH_BASE_BRANCH` to verify a branch other than `main`.
 The agent runs with permission prompts disabled **only** inside the container
 (`RALPH_SANDBOX=1`); the script refuses to do so elsewhere unless explicitly overridden.

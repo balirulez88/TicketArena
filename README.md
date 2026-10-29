@@ -32,14 +32,16 @@ Architecture map: [`docs/index.md`](docs/index.md). Decisions: [`docs/adr/`](doc
 
 ## Getting started
 
-Requires Node 24 and pnpm 12 (`corepack enable pnpm`).
+Requires Node 24, pnpm 12 (`corepack enable pnpm`) and Docker (for the test services).
 
 ```bash
 pnpm install
 cp .env.example .env          # fill in Neon + Upstash credentials
 pnpm db:generate              # generate the Prisma client
 pnpm dev                      # http://localhost:3000
-pnpm check                    # lint + typecheck + test
+pnpm infra:up                 # Postgres 17, Redis 7, NATS JetStream (docker compose)
+cp .env.test.example .env.test
+pnpm check                    # lint + typecheck + unit and integration tests
 ```
 
 ## How it is built: agentic TDD

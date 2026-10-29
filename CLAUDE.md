@@ -20,6 +20,7 @@ pnpm run lint       # biome ci --error-on-warnings
 pnpm run typecheck  # tsc strict in every workspace
 pnpm run test       # vitest
 pnpm run check      # all three
+pnpm infra:up       # local Postgres/Redis/NATS for integration tests (TEST_* in .env.test)
 pnpm run format     # auto-fix formatting + import order
 ```
 

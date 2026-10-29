@@ -19,7 +19,10 @@
     "check": "pnpm run lint && pnpm run typecheck && pnpm run test",
     "db:generate": "turbo run db:generate",
     "ralph": "bash ./ralph-loop.sh",
-    "sandbox": "bash ./scripts/sandbox.sh"
+    "sandbox": "bash ./scripts/sandbox.sh",
+    "infra:up": "docker compose up --detach --wait",
+    "infra:down": "docker compose down",
+    "infra:reset": "docker compose down --volumes"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.3",

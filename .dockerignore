@@ -1,3 +1,6 @@
-# The image needs only its entrypoint; the repo itself is cloned at runtime from the mount.
+# The image needs only its scripts and the NATS config; the repo itself is cloned at runtime
+# from the mount.
 *
 !scripts/sandbox-entrypoint.sh
+!scripts/sandbox-services.sh
+!infra/nats/nats.conf

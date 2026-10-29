@@ -7,11 +7,16 @@
 - **Neon** serverless PostgreSQL. Use the **pooled** connection string at runtime because
   serverless functions open many short-lived connections.
 - **Prisma 7** with the `prisma-client` generator (output `packages/db/src/generated/prisma`,
-  git-ignored) and the `@prisma/adapter-neon` driver adapter.
+  git-ignored) and an injected driver adapter.
 - Configuration in `packages/db/prisma.config.ts`; the schema lives in
-  `packages/db/prisma/schema.prisma`.
-- `createPrismaClient(connectionString)` is the only way to build a client. The caller injects
-  the URL, so the package never reads env and tests can target a disposable Neon branch.
+  `packages/db/prisma/schema.prisma`; committed migrations in `packages/db/prisma/migrations`.
+- `createPrismaClient({ connectionString, driver })` is the only way to build a client. The
+  caller injects both, so the package never reads env:
+  - `driver: "pg"` (`@prisma/adapter-pg`, TCP): local development, tests, the worker.
+  - `driver: "neon"` (`@prisma/adapter-neon`): Vercel functions.
+- Tests get a fresh, migrated database per file from `@ticketarena/test-infra`
+  (see [workflow](../workflow/index.md#integration-test-infrastructure)). Migrations must
+  therefore be committed SQL: the test template is built by applying them in order.
 
 ## Tables
 

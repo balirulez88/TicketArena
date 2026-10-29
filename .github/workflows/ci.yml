@@ -45,7 +45,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Quality gate (lint, typecheck, test)
+      - name: Quality gate (lint, typecheck, test, harness tests)
         run: pnpm run check
 
       - name: Service logs

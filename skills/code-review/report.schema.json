@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Code review report (one axis)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["axis", "status", "summary", "findings"],
+  "properties": {
+    "axis": { "type": "string", "enum": ["standards", "spec"] },
+    "status": { "type": "string", "enum": ["reviewed", "skipped"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "file",
+          "line",
+          "rule",
+          "title",
+          "problem",
+          "impact",
+          "recommendation"
+        ],
+        "properties": {
+          "severity": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
+          "file": { "type": "string", "minLength": 1 },
+          "line": { "type": "integer", "minimum": 0 },
+          "rule": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "problem": { "type": "string", "minLength": 1 },
+          "impact": { "type": "string", "minLength": 1 },
+          "recommendation": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

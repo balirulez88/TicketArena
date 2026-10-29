@@ -79,6 +79,8 @@ run_harness() {
   shift
   (
     cd "${dir}"
+    # The caller's harness settings (e.g. RALPH_BASE_BRANCH inside the sandbox) must not leak in.
+    while read -r name; do unset "${name}"; done < <(compgen -e | grep '^RALPH_' || true)
     export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
     export RALPH_AGENT_CMD="bash ${WORK}/agent.sh" RALPH_REVIEW_CMD="bash ${WORK}/reviewer.sh"
     export RALPH_MAX_ATTEMPTS=1 STUB_CALLS="${dir}.calls" "$@"

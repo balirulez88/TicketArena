@@ -1,0 +1,54 @@
+# Local and CI infrastructure: the same three services the Ralph sandbox runs natively.
+# `pnpm infra:up` starts them and waits until every healthcheck passes.
+name: ticketarena
+
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_USER: ticketarena
+      POSTGRES_PASSWORD: ticketarena
+      POSTGRES_DB: ticketarena
+    # Host port 55432, not 5432: a natively installed Postgres would otherwise shadow this one
+    # on localhost and the tests would fail authentication against the wrong server.
+    ports:
+      - "55432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticketarena -d ticketarena"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.4.12-alpine
+    # Ephemeral by design: Redis holds only the waiting room, never the source of truth.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  nats:
+    image: nats:2.15.2-alpine
+    command: ["--config", "/etc/nats/nats.conf", "--store_dir", "/data"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - ./infra/nats/nats.conf:/etc/nats/nats.conf:ro
+      - nats-data:/data
+    healthcheck:
+      # Fails until JetStream itself is ready, not just the client port.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres-data:
+  nats-data:

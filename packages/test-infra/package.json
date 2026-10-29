@@ -1,0 +1,28 @@
+{
+  "name": "@ticketarena/test-infra",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Test-only helpers: real Postgres/Redis/NATS per test file, isolated and parallel-safe.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./global-setup": "./src/global-setup.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@nats-io/jetstream": "3.4.0",
+    "@nats-io/transport-node": "3.4.0",
+    "pg": "8.23.1",
+    "redis": "6.3.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "@types/pg": "8.23.1",
+    "typescript": "6.0.3",
+    "vitest": "5.0.5"
+  }
+}

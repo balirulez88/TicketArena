@@ -10,16 +10,20 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@neondatabase/serverless": "1.2.0",
     "@prisma/adapter-neon": "7.10.1",
+    "@prisma/adapter-pg": "7.10.1",
     "@prisma/client": "7.10.1"
   },
   "devDependencies": {
+    "@ticketarena/test-infra": "workspace:*",
     "@types/node": "26.6.5",
     "prisma": "7.10.1",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "vitest": "5.0.5"
   }
 }

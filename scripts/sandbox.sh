@@ -2,6 +2,7 @@
 #
 # Builds the sandbox image and runs ralph-loop.sh inside it. Arguments are forwarded to the
 # loop, e.g. `./scripts/sandbox.sh --once` or `./scripts/sandbox.sh --ticket 03`.
+# `./scripts/sandbox.sh --verify` only runs the quality gate on real services (no agent, no key).
 set -Eeuo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,7 +13,7 @@ command -v docker >/dev/null || {
   echo "sandbox: docker is required" >&2
   exit 1
 }
-if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+if [[ "${1:-}" != "--verify" && -z "${ANTHROPIC_API_KEY:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
   echo "sandbox: export ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN first" >&2
   exit 1
 fi

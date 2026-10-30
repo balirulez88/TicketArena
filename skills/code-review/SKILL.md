@@ -184,6 +184,10 @@ its axis, the fixed point, the changeset, the spec (Spec axis) and a JSON schema
 - Do steps 2, 3 and [Project discovery](#local-project-discovery) yourself for your axis; you
   are the sub-agent from step 4, so the brief for your axis applies.
 - Do not modify any file and do not ask questions: there is nobody to answer.
+- Read the changeset you were given, all of it. If it ends with a `review-token: <value>` line,
+  put that value in `changeset_token`: it proves to the harness that you read the changeset to
+  the end, so never guess it. If you cannot open the changeset, do not review other files
+  instead: say so in `summary` and leave `changeset_token` empty, which fails the review.
 - Return one report matching [`report.schema.json`](report.schema.json): `axis`, `status`
   (`reviewed`, or `skipped` only when the Spec axis truly has no spec), `summary` and `findings`.
   The 400-word limit is replaced by the schema; keep each field short and specific.

@@ -102,7 +102,11 @@ non-interactive mode. TicketArena's rules for reviewers are in [code-review.md](
   discarded and the round fails.
 - **What they review.** The complete changeset `git diff main...HEAD`, committed by the harness
   right before the review so new files are included, plus the ticket and the spec and ADRs it
-  references.
+  references. The changeset file lives in the git-ignored `.ralph/review/<run-id>/` inside the
+  workspace (the reviewers' file access is confined to it), with a copy in the run logs.
+- **Proof of reading.** The changeset ends with a random `review-token` line. Each report must
+  echo it as `changeset_token`; a missing or wrong token makes the review invalid, so a reviewer
+  that could not open the changeset cannot approve by reviewing other files instead.
 - **Structured, validated reports.** Each reviewer must return JSON matching
   `skills/code-review/report.schema.json`: severity, file and line, rule, problem, impact,
   recommendation. `scripts/ralph-review.mjs` validates both reports and applies the policy.

@@ -50,44 +50,42 @@ const QUEUE_WINDOW_MS = 60 * 60_000;
  */
 export async function seedCatalog(prisma: PrismaClient, now: Date): Promise<void> {
   for (const plan of VENUES) {
-    const venue =
-      (await prisma.venue.findFirst({ where: { name: plan.name } })) ??
-      (await prisma.venue.create({ data: { name: plan.name } }));
+    // INSERT … ON CONFLICT DO NOTHING everywhere: Prisma's upsert is a check-then-write that
+    // still loses the race between concurrent seed runs on a unique key.
+    await prisma.venue.createMany({ data: [{ name: plan.name }], skipDuplicates: true });
+    const venue = await prisma.venue.findUniqueOrThrow({ where: { name: plan.name } });
     for (const sectionPlan of plan.sections) {
-      const section = await prisma.section.upsert({
-        where: { venueId_name: { venueId: venue.id, name: sectionPlan.name } },
-        create: {
-          venueId: venue.id,
-          name: sectionPlan.name,
-          priceMinor: sectionPlan.priceMinor,
-        },
-        update: {},
+      await prisma.section.createMany({
+        data: [{ venueId: venue.id, name: sectionPlan.name, priceMinor: sectionPlan.priceMinor }],
+        skipDuplicates: true,
       });
-      for (const label of sectionPlan.rows) {
-        await prisma.row.upsert({
-          where: { sectionId_label: { sectionId: section.id, label } },
-          create: { sectionId: section.id, label },
-          update: {},
-        });
-      }
+      const section = await prisma.section.findUniqueOrThrow({
+        where: { venueId_name: { venueId: venue.id, name: sectionPlan.name } },
+      });
+      await prisma.row.createMany({
+        data: sectionPlan.rows.map((label) => ({ sectionId: section.id, label })),
+        skipDuplicates: true,
+      });
     }
   }
 
   for (const plan of EVENTS) {
-    const venue = await prisma.venue.findFirstOrThrow({ where: { name: plan.venue } });
+    const venue = await prisma.venue.findUniqueOrThrow({ where: { name: plan.venue } });
     const onSaleAt = new Date(now.getTime() + plan.onSaleInDays * DAY_MS);
-    const event = await prisma.event.upsert({
-      where: { name: plan.name },
-      create: {
-        venueId: venue.id,
-        name: plan.name,
-        onSaleAt,
-        queueOpensAt: new Date(onSaleAt.getTime() - QUEUE_LEAD_MS),
-        queueClosesAt: new Date(onSaleAt.getTime() + QUEUE_WINDOW_MS),
-        demo: plan.demo,
-      },
-      update: {},
+    await prisma.event.createMany({
+      data: [
+        {
+          venueId: venue.id,
+          name: plan.name,
+          onSaleAt,
+          queueOpensAt: new Date(onSaleAt.getTime() - QUEUE_LEAD_MS),
+          queueClosesAt: new Date(onSaleAt.getTime() + QUEUE_WINDOW_MS),
+          demo: plan.demo,
+        },
+      ],
+      skipDuplicates: true,
     });
+    const event = await prisma.event.findUniqueOrThrow({ where: { name: plan.name } });
     const rows = await prisma.row.findMany({
       where: { section: { venueId: venue.id } },
       include: { section: true },

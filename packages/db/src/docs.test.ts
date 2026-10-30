@@ -25,4 +25,15 @@ describe("docs/database", () => {
     expect(rows.length).toBeGreaterThanOrEqual(6);
     expect(rows.map((row) => row.table_name).filter((name) => !documented.has(name))).toEqual([]);
   });
+
+  it("names every index and unique constraint the migrations create", async () => {
+    prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
+    const rows = await prisma.$queryRaw<{ name: string }[]>`
+      SELECT indexname AS name FROM pg_indexes
+      WHERE schemaname = 'public' AND indexname NOT LIKE '%\_pkey' AND indexname NOT LIKE '\_prisma%'`;
+    const doc = readFileSync(resolve(__dirname, "../../../docs/database/index.md"), "utf8");
+
+    expect(rows.length).toBeGreaterThanOrEqual(6);
+    expect(rows.map((row) => row.name).filter((name) => !doc.includes(`\`${name}\``))).toEqual([]);
+  });
 });

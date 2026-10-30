@@ -5,7 +5,10 @@ import {
   HoldExpiredError,
   HoldNotActiveError,
   HoldNotFoundError,
+  HoldSeatSetMissingError,
   IdempotencyKeyReusedError,
+  InvalidSeatSelectionError,
+  MixedCurrencyError,
   SeatUnavailableError,
 } from "@ticketarena/booking";
 import type { PrismaClient } from "@ticketarena/db";
@@ -78,6 +81,9 @@ export const bookingRouter = createTRPCRouter({
         if (error instanceof SeatUnavailableError) {
           throw new TRPCError({ code: "CONFLICT", message: error.message, cause: error });
         }
+        if (error instanceof InvalidSeatSelectionError) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: error.message, cause: error });
+        }
         throw error;
       }
     }),
@@ -119,6 +125,8 @@ export const bookingRouter = createTRPCRouter({
         }
         if (
           error instanceof HoldNotActiveError ||
+          error instanceof HoldSeatSetMissingError ||
+          error instanceof MixedCurrencyError ||
           error instanceof IdempotencyKeyReusedError ||
           error instanceof SeatUnavailableError
         ) {

@@ -38,10 +38,32 @@ enum carries `@@schema("public")`).
 Catalog data is seeded, never edited through the API. `seedCatalog(prisma, now)`
 (`packages/db/src/seed.ts`, run with `pnpm --filter @ticketarena/db db:seed`) only inserts
 missing rows, so re-running it keeps seat state. Seats are unique on `(eventId, rowId, number)`
-and indexed on `(eventId, status)`.
+and indexed on `(eventId, status)` and on `holdId`. `venues.name` is unique, so `seedCatalog` upserts venues
+and concurrent seed runs leave one row per venue.
+
+### Indexes and unique constraints
+
+`packages/db/src/docs.test.ts` fails when a migration creates one that is not named here.
+
+| Name                                          | On                                          | Why                                              |
+| --------------------------------------------- | ------------------------------------------- | ------------------------------------------------ |
+| `venues_name_key`                             | `venues(name)` unique                       | Seed upserts; one row per venue                  |
+| `sections_venueId_name_key`                   | `sections(venueId, name)` unique            | Seed upserts                                     |
+| `rows_sectionId_label_key`                    | `rows(sectionId, label)` unique             | Seed upserts                                     |
+| `events_name_key`                             | `events(name)` unique                       | Seed upserts                                     |
+| `seats_eventId_rowId_number_key`              | `seats(eventId, rowId, number)` unique      | One seat per event position                      |
+| `seats_eventId_status_idx`                    | `seats(eventId, status)`                    | Seat map and availability                        |
+| `seats_holdId_idx`                            | `seats(holdId)`                             | `getHold` and hold lifecycle updates (FK lookup) |
+| `holds_eventId_buyerKey_idx`                  | `holds(eventId, buyerKey)`                  | Per-buyer lookups                                |
+| `orders_holdId_key`                           | `orders(holdId)` unique                     | A hold yields at most one order                  |
+| `orders_sessionId_idempotencyKey_key`         | `orders(sessionId, idempotencyKey)` unique  | Idempotent `placeOrder`                          |
+| `order_lines_orderId_seatId_key`              | `order_lines(orderId, seatId)` unique       | One line per seat                                |
+| `outbox_events_status_createdAt_idx`          | `outbox_events(status, createdAt)`          | Relay polling                                    |
+| `outbox_events_aggregateType_aggregateId_idx` | `outbox_events(aggregateType, aggregateId)` | Aggregate lookup                                 |
 
 Booking: `booking.holdSeats` (one seat for now) and `booking.getHold` (owner only, else
-`NOT_FOUND`) delegate to `BookingService` (`packages/booking`). `holdSeats` runs one transaction:
+`NOT_FOUND`) delegate to `BookingService` (`packages/booking`). `holdSeats` rejects an empty or duplicated `seatIds` list with `INVALID_SEAT_SELECTION` (tRPC
+`BAD_REQUEST`) before writing, then runs one transaction:
 `SELECT … FOR UPDATE` on the seat, then `T = clock.now()` read **after** the lock, then the `holds`
 row (`holdExpiresAt = T + 10 min`, fresh `correlationId`), the seat set `HELD`, and a `seat.held`
 row in `outbox_events` whose `payload` is the full event envelope and whose `id` is the envelope
@@ -54,7 +76,9 @@ Orders: `booking.placeOrder` (no admission required) and `booking.getOrder` (own
 `BuyerKey` (else `NOT_FOUND`), `T < holdExpiresAt` (else `HOLD_EXPIRED`, tRPC
 `PRECONDITION_FAILED`) and every seat still `HELD` with this `holdId`; the expected seat set is
 read from the hold's `seat.held` outbox event, so a seat that lost its `holdId` fails with
-`SEAT_UNAVAILABLE`. It then writes the `orders`
+`SEAT_UNAVAILABLE`. A non-`HELD` hold is refused (`HOLD_NOT_ACTIVE`) before the event is read, and a
+missing `seat.held` event is `HOLD_SEAT_SET_MISSING` (`CONFLICT`). Lines, total and the `IN_CHECKOUT`
+update use exactly that seat set; seats of mixed currencies fail with `MIXED_CURRENCY`. It then writes the `orders`
 row (`PENDING_PAYMENT`, `paymentDeadline = T + 5 min`, the hold's `correlationId`) with
 `order_lines` copying seat prices, sets the hold `ORDERED` and seats `IN_CHECKOUT`, and writes an
 `order.placed` outbox row. Idempotency: a repeated `(sessionId, idempotencyKey)` returns the

@@ -36,10 +36,10 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 2      | 15  | 17    |
-| PLANNED       | 0        | 0    | 6      | 4   | 10    |
+| OPEN          | 0        | 0    | 3      | 16  | 19    |
+| PLANNED       | 0        | 0    | 2      | 2   | 4     |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
-| RESOLVED      | 0        | 0    | 0      | 0   | 0     |
+| RESOLVED      | 0        | 0    | 4      | 2   | 6     |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 ## Entries
@@ -65,7 +65,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-002: Venue seeding is check-then-create on a non-unique column
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** MEDIUM
 - **Escalation:** none
 - **Source:** ticket 03 (`03-seeded-catalog-and-seat-map-api`)
@@ -76,12 +76,13 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** Only concurrent seed runs trigger it, and no deployment runs the seed yet; fixed before ticket 38 (deployment) can run seeds from deploy hooks.
 - **Remediation:** Add @@unique on Venue.name (with a migration) and use upsert with update: {} like the other entities.
 - **Target:** ticket 41 (`issues/41-booking-and-catalog-correctness-fixes.md`)
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** Venues are inserted with `createMany(skipDuplicates)` (ON CONFLICT DO NOTHING) on the new unique `venues.name` (migration `20261030030000`); sections, rows and events use the same atomic insert because Prisma `upsert` still raced.
+- **Verification:** `packages/db/src/seed.test.ts::seedCatalog concurrent runs leave exactly one row per venue`
 - **Fingerprints:** `packages/db/src/seed.ts#venue-seeding-is-check-then-create-on-a-non-unique-column`
 - **History:**
   - 2026-10-30: recorded: MEDIUM defect at `packages/db/src/seed.ts:53`, standards axis (ticket 03 review-2 standards, run 20261030-132411)
   - 2026-10-30: planned for ticket 41 (`issues/41-booking-and-catalog-correctness-fixes.md`) (correctness review of tickets 03-05, 2026-10-30)
+  - 2026-10-30: resolution verified: quality gate green and independent review approved (ticket 41 review-1, run 20261030-175150)
 
 ### TD-003: Every request now requires DATABASE_URL, even procedures that do not use the db
 
@@ -256,7 +257,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-012: No index on seats.holdId, which is now a foreign key and a lookup key
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** MEDIUM
 - **Escalation:** none
 - **Source:** ticket 04 (`04-hold-one-seat`)
@@ -267,12 +268,13 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** Seat tables are small until load tests; fixed before ticket 39 (load tests) exercises getHold and expiry at scale.
 - **Remediation:** Add @@index([holdId]) to Seat in schema.prisma and CREATE INDEX "seats_holdId_idx" ON "seats"("holdId") in the migration.
 - **Target:** ticket 41 (`issues/41-booking-and-catalog-correctness-fixes.md`)
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** `@@index([holdId])` on Seat and `seats_holdId_idx` in migration `20261030030000`.
+- **Verification:** `packages/db/src/seed.test.ts::seedCatalog has an index on seats.holdId`
 - **Fingerprints:** `packages/db/prisma/migrations/20261030010000_holds/migration.sql#no-index-on-seats-holdid-which-is-now-a-foreign-key-and-a-lo`
 - **History:**
   - 2026-10-30: recorded: MEDIUM defect at `packages/db/prisma/migrations/20261030010000_holds/migration.sql:22`, standards axis (ticket 04 review-1 standards, run 20261030-134316)
   - 2026-10-30: planned for ticket 41 (`issues/41-booking-and-catalog-correctness-fixes.md`) (correctness review of tickets 03-05, 2026-10-30)
+  - 2026-10-30: resolution verified: quality gate green and independent review approved (ticket 41 review-1, run 20261030-175150)
 
 ### TD-013: Lazy hold expiry is not implemented; expired holds block seats until a sweeper exists
 
@@ -299,7 +301,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-014: Duplicate seat ids are not rejected at the service level
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** LOW
 - **Escalation:** none
 - **Source:** ticket 04 (`04-hold-one-seat`)
@@ -310,12 +312,13 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** Unreachable today: the router accepts exactly one seat id. Must be closed before ticket 11 relaxes the router to 1-6 seats.
 - **Remediation:** Dedupe or reject duplicate and empty seatIds at the start of holdSeats, and add a test.
 - **Target:** ticket 41 (`issues/41-booking-and-catalog-correctness-fixes.md`)
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** `holdSeats` throws `InvalidSeatSelectionError` for an empty or duplicated `seatIds` before the transaction; the router maps it to `BAD_REQUEST`.
+- **Verification:** `packages/booking/src/booking-service.test.ts::holdSeats seat selection rejects a duplicated seatIds list before writing anything`
 - **Fingerprints:** `packages/booking/src/booking-service.ts#duplicate-seat-ids-are-not-rejected-at-the-service-level`
 - **History:**
   - 2026-10-30: recorded: LOW defect at `packages/booking/src/booking-service.ts:74`, standards axis (ticket 04 review-1 standards, run 20261030-134316)
   - 2026-10-30: planned for ticket 41 (`issues/41-booking-and-catalog-correctness-fixes.md`) (correctness review of tickets 03-05, 2026-10-30)
+  - 2026-10-30: resolution verified: quality gate green and independent review approved (ticket 41 review-1, run 20261030-175150)
 
 ### TD-015: Envelope type hand-duplicates the schema shape
 
@@ -395,7 +398,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-019: Order lines priced from a different seat set than the one validated
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** MEDIUM
 - **Escalation:** Money correctness: the amount charged (order.placed amountMinor, consumed by ticket 08) can differ from the validated, locked seat set, and an unlocked seat row can be mutated.
 - **Source:** ticket 05 (`05-place-order`)
@@ -406,13 +409,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** Needs a seat whose holdId disagrees with the hold's seat.held set, which no current code path produces; fixed before ticket 08 charges the order total.
 - **Remediation:** Price by `id = ANY(expectedSeatIds)`, and update seats by the same id list with a `status = HELD` guard, so lines, total and mutation all use the one locked set.
 - **Target:** ticket 41 (`issues/41-booking-and-catalog-correctness-fixes.md`)
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** `placeOrder` prices by `id = ANY(expectedSeatIds)` and moves seats to `IN_CHECKOUT` by the same id list with a `status = HELD` guard.
+- **Verification:** `packages/booking/src/place-order.test.ts::placeOrder acceptance: lock order and consistency neither prices nor mutates a seat that carries the hold's id but is outside its seat.held set`
 - **Fingerprints:** `packages/booking/src/booking-service.ts#order-lines-priced-from-a-different-seat-set-than-the-one-va`
 - **History:**
   - 2026-10-30: recorded: MEDIUM defect at `packages/booking/src/booking-service.ts:386`, standards axis (ticket 05 review-2 standards, run 20261030-135423)
   - 2026-10-30: escalation flagged (correctness review of tickets 03-05, 2026-10-30)
   - 2026-10-30: planned for ticket 41 (`issues/41-booking-and-catalog-correctness-fixes.md`) (correctness review of tickets 03-05, 2026-10-30)
+  - 2026-10-30: resolution verified: quality gate green and independent review approved (ticket 41 review-1, run 20261030-175150)
 
 ### TD-020: placeOrder has no lock timeout, retry or BOOKING_BUSY mapping
 
@@ -475,7 +479,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-023: Hard-coded EUR fallback and repeated inline line shape
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** LOW
 - **Escalation:** none
 - **Source:** ticket 05 (`05-place-order`)
@@ -486,12 +490,13 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** Unreachable while every section is EUR; fixed with TD-019 because the same code computes the total.
 - **Remediation:** Throw on an empty priced set rather than defaulting. Define one `OrderLineView` type and use it in both places.
 - **Target:** ticket 41 (`issues/41-booking-and-catalog-correctness-fixes.md`)
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** The currency comes from the priced seats; an empty or mixed set throws `MixedCurrencyError` (router `CONFLICT`). One `OrderLineView` type replaces the inline shapes.
+- **Verification:** `packages/booking/src/place-order.test.ts::placeOrder acceptance: lock order and consistency fails with a domain error when the held seats are priced in different currencies`
 - **Fingerprints:** `packages/booking/src/booking-service.ts#hard-coded-eur-fallback-and-repeated-inline-line-shape`
 - **History:**
   - 2026-10-30: recorded: LOW maintainability at `packages/booking/src/booking-service.ts:390`, standards axis (ticket 05 review-2 standards, run 20261030-135423)
   - 2026-10-30: planned for ticket 41 (`issues/41-booking-and-catalog-correctness-fixes.md`) (correctness review of tickets 03-05, 2026-10-30)
+  - 2026-10-30: resolution verified: quality gate green and independent review approved (ticket 41 review-1, run 20261030-175150)
 
 ### TD-024: SEAT_UNAVAILABLE names no seat when the hold has no seats
 
@@ -552,7 +557,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-027: placeOrder fails with an unhandled error once the hold's seat.held outbox row is gone
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** MEDIUM
 - **Escalation:** none
 - **Source:** correctness review of tickets 03-05, 2026-10-30 (ticket 05 code)
@@ -563,9 +568,49 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** No outbox row is deleted yet (no relay or retention job exists before ticket 06); fixed before the retention job can exist.
 - **Remediation:** Refuse a non-HELD hold before reading the event, and map a missing seat.held event to a domain error instead of a 500, with a test.
 - **Target:** ticket 41 (`issues/41-booking-and-catalog-correctness-fixes.md`)
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** `placeOrder` refuses a non-HELD hold before reading the event and maps a missing `seat.held` event to `HoldSeatSetMissingError` (router `CONFLICT`).
+- **Verification:** `packages/booking/src/place-order.test.ts::placeOrder acceptance: lock order and consistency a HELD hold whose seat.held event is gone is a domain error`
 - **Fingerprints:** none
 - **History:**
   - 2026-10-30: backfilled from an earlier review round; confirmed still present on main at 2513586 (correctness review of tickets 03-05, 2026-10-30)
+  - 2026-10-30: resolution verified: quality gate green and independent review approved (ticket 41 review-1, run 20261030-175150)
+
+### TD-028: Unique index on venues.name fails if duplicate venues already exist
+
+- **Status:** OPEN
+- **Severity:** MEDIUM
+- **Escalation:** none
+- **Source:** ticket 41 (`41-booking-and-catalog-correctness-fixes`)
+- **Evidence:** `.ralph/logs/20261030-175150/41-booking-and-catalog-correctness-fixes.review-1.standards.json`
+- **Components:** `packages/db/prisma/migrations/20261030030000_venue_name_unique_seat_hold_index/migration.sql:2`
+- **Problem:** The migration creates a UNIQUE INDEX on venues(name) without removing duplicates first. The old seed was a check-then-create on a non-unique column (TD-002), and that race is the reason for this fix. A database where concurrent seed runs already inserted duplicate venues cannot take the migration.
+- **Impact:** prisma migrate deploy fails on such a database and blocks the deploy. The Ticket 38 deploy hooks that run seeds could hit this. Once the index exists the problem cannot recur.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Before CREATE UNIQUE INDEX, merge or delete duplicate venue rows. This means repointing sections and events to the surviving row. Alternatively, document that the migration assumes a database with no duplicates and fail early with a clear message.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/db/prisma/migrations/20261030030000_venue_name_unique_seat_hold_index/migration.sql#unique-index-on-venues-name-fails-if-duplicate-venues-alread`
+- **History:**
+  - 2026-10-30: recorded: MEDIUM regression_risk at `packages/db/prisma/migrations/20261030030000_venue_name_unique_seat_hold_index/migration.sql:2`, standards axis (ticket 41 review-1 standards, run 20261030-175150)
+
+### TD-029: MixedCurrencyError doubles as the empty-set error
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 41 (`41-booking-and-catalog-correctness-fixes`)
+- **Evidence:** `.ralph/logs/20261030-175150/41-booking-and-catalog-correctness-fixes.review-1.standards.json`
+- **Components:** `packages/booking/src/booking-service.ts:215`
+- **Problem:** priceSeats throws MixedCurrencyError when the priced set is empty. The message is then 'seats are priced in ' with nothing after it, and the error name does not describe the problem. This also leaves the empty case with no test.
+- **Impact:** If the unreachable branch is ever reached (for example a seat row vanishing between the lock and the pricing), the client gets a misleading MIXED_CURRENCY CONFLICT and the logs point at the wrong cause.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Throw a distinct error (or SeatUnavailableError) for an empty priced set, and keep MixedCurrencyError only for length > 1. Also consider asserting priced.length === seatIds.length.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/booking/src/booking-service.ts#mixedcurrencyerror-doubles-as-the-empty-set-error`; `packages/booking/src/booking-service.ts#empty-priced-set-reported-as-mixedcurrencyerror-with-an-empt`
+- **History:**
+  - 2026-10-30: recorded: LOW maintainability at `packages/booking/src/booking-service.ts:215`, standards axis (ticket 41 review-1 standards, run 20261030-175150)
+  - 2026-10-30: seen again: LOW maintainability at `packages/booking/src/booking-service.ts:215`, spec axis (ticket 41 review-1 spec, run 20261030-175150)
 <!-- ralph-debt:end -->

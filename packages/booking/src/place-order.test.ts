@@ -8,7 +8,9 @@ import {
   HoldExpiredError,
   HoldNotActiveError,
   HoldNotFoundError,
+  HoldSeatSetMissingError,
   IdempotencyKeyReusedError,
+  MixedCurrencyError,
   SeatUnavailableError,
 } from "./booking-service";
 
@@ -231,6 +233,81 @@ describe("placeOrder acceptance: lock order and consistency", () => {
       service().placeOrder(alice, hold.id, contact, randomUUID()),
     ).rejects.toBeInstanceOf(SeatUnavailableError);
     expect(await db().order.count({ where: { holdId: hold.id } })).toBe(0);
+  });
+
+  test("neither prices nor mutates a seat that carries the hold's id but is outside its seat.held set", async () => {
+    const { hold, seatId } = await heldSeat();
+    const stray = await db().seat.findFirstOrThrow({
+      where: { eventId: hold.eventId, status: "AVAILABLE", id: { not: seatId } },
+      orderBy: { id: "asc" },
+    });
+    await db().seat.update({
+      where: { id: stray.id },
+      data: { status: "HELD", holdId: hold.id, claimBuyerKey: alice.buyerKey },
+    });
+
+    const order = await service().placeOrder(alice, hold.id, contact, randomUUID());
+
+    expect(order.lines.map((line) => line.seatId)).toEqual([seatId]);
+    const priced = await db().seat.findUniqueOrThrow({
+      where: { id: seatId },
+      include: { row: { include: { section: true } } },
+    });
+    expect(order.totalMinor).toBe(priced.row.section.priceMinor);
+    expect((await db().seat.findUniqueOrThrow({ where: { id: seatId } })).status).toBe(
+      "IN_CHECKOUT",
+    );
+    expect((await db().seat.findUniqueOrThrow({ where: { id: stray.id } })).status).toBe("HELD");
+  });
+
+  test("refuses a hold that is not HELD before reading its seat.held event", async () => {
+    const { hold } = await heldSeat();
+    await db().outboxEvent.deleteMany({ where: { aggregateId: hold.id } });
+    await db().hold.update({ where: { id: hold.id }, data: { status: "RELEASED" } });
+
+    await expect(
+      service().placeOrder(alice, hold.id, contact, randomUUID()),
+    ).rejects.toBeInstanceOf(HoldNotActiveError);
+  });
+
+  test("a HELD hold whose seat.held event is gone is a domain error", async () => {
+    const { hold } = await heldSeat();
+    await db().outboxEvent.deleteMany({ where: { aggregateId: hold.id } });
+
+    await expect(
+      service().placeOrder(alice, hold.id, contact, randomUUID()),
+    ).rejects.toBeInstanceOf(HoldSeatSetMissingError);
+    expect(await db().order.count({ where: { holdId: hold.id } })).toBe(0);
+  });
+
+  test("fails with a domain error when the held seats are priced in different currencies", async () => {
+    const event = await db().event.findFirstOrThrow({ where: { demo: true } });
+    const sections = await db().section.findMany({
+      where: { rows: { some: { seats: { some: { eventId: event.id, status: "AVAILABLE" } } } } },
+      orderBy: { id: "asc" },
+    });
+    const [first, second] = sections;
+    if (first === undefined || second === undefined) {
+      throw new Error("seed needs two sections with available seats");
+    }
+    const seatIn = (sectionId: string) =>
+      db().seat.findFirstOrThrow({
+        where: { eventId: event.id, status: "AVAILABLE", row: { sectionId } },
+        orderBy: { id: "asc" },
+      });
+    const a = await seatIn(first.id);
+    const b = await seatIn(second.id);
+    const hold = await service().holdSeats(alice, event.id, [a.id, b.id]);
+    await db().section.update({ where: { id: second.id }, data: { currency: "USD" } });
+
+    try {
+      await expect(
+        service().placeOrder(alice, hold.id, contact, randomUUID()),
+      ).rejects.toBeInstanceOf(MixedCurrencyError);
+      expect(await db().order.count({ where: { holdId: hold.id } })).toBe(0);
+    } finally {
+      await db().section.update({ where: { id: second.id }, data: { currency: first.currency } });
+    }
   });
 
   test("refuses when a seat of the hold is no longer HELD", async () => {

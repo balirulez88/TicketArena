@@ -6,6 +6,8 @@
 
 **Status:** done
 
+**Completed:** 2026-10-30 by slice/02-guest-session-identity (merge a807a04)
+
 - [x] The Next.js 16 `proxy.ts` issues `ta_session` (random 128-bit id, HMAC-signed with `SESSION_SECRET`, `httpOnly`, `Secure`, `SameSite=Lax`, 7 days) on first visit.
 - [x] A cookie with an invalid signature yields a new session; the old value is never trusted.
 - [x] `IdentityService.resolve` returns `{ kind: "guest", sessionId }` and never throws for a guest; the result is placed on the tRPC context.

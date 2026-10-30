@@ -16,7 +16,7 @@
     "format": "biome check --write .",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "test:harness": "node --test \"scripts/*.test.mjs\" && bash scripts/ralph-loop.test.sh",
+    "test:harness": "node --test \"scripts/*.test.mjs\" && bash scripts/ralph-loop.test.sh && bash scripts/ralph-sessions.test.sh",
     "test:sandbox": "bash scripts/sandbox.test.sh",
     "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run test:harness",
     "db:generate": "turbo run db:generate",

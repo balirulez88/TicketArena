@@ -8,6 +8,8 @@
 
 **Status:** done
 
+**Completed:** 2026-10-29 by hand, before the harness (e133126)
+
 - [x] Docker Compose provides Postgres 17, Redis 7 and NATS with JetStream enabled (`sync_interval: always`).
 - [x] The sandbox image installs Postgres, Redis and nats-server; the entrypoint starts them and exports `TEST_DATABASE_URL`, `TEST_REDIS_URL`, `TEST_NATS_URL`.
 - [x] Integration tests fail loudly (never skip) when any `TEST_*` variable is missing.

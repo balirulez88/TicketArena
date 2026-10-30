@@ -60,7 +60,8 @@ findings block the merge.
 apps/web          Next.js App Router + tRPC API
 packages/db       Prisma schema, migrations, client factory (Neon adapter)
 docs/             architecture memory (keep current via skills/update-docs.md)
-issues/           local ticket tracker (contract: issues/README.md)
+issues/           local ticket tracker (contract: issues/README.md); issues/done/ = completed
+                  tickets, history only: read one only when the current ticket refers to it
 skills/           workflow skills (vendored from mattpocock/skills + local)
 ralph-loop.sh     autonomous TDD harness; runs inside the Docker sandbox
 ```

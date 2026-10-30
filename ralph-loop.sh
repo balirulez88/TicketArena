@@ -442,6 +442,8 @@ brief for the ${axis^} axis. You run in a fresh context, independent of the othe
 - Changed files (account for every one in \`files\`):
 $(git diff --name-only "${BASE_BRANCH}...HEAD" | sed 's/^/  /')
 - Every finding names one of those files and a line inside one of its hunks (0: whole file).
+  Lines are the file's own line numbers at HEAD (the "+" side of the @@ hunk headers), never
+  line numbers within the changeset file.
 - Commits: $(git log --oneline "${BASE_BRANCH}..HEAD" | tr '\n' ';')
 - Spec: the ticket ${ticket} and the spec and ADRs it references. Acceptance criteria:
 $(numbered_criteria "${ticket}")

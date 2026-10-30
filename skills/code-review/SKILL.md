@@ -197,7 +197,8 @@ its axis, the fixed point, the changeset, the spec (Spec axis) and a JSON schema
   - `files`: every changed file exactly once, `reviewed` or `not_relevant` with the reason in
     `note` (e.g. generated code, a status line in a ticket).
   - `findings`: each names a changed `file` and a `line` inside one of that file's diff hunks
-    (new side; 0 for the whole file), a `kind`, and severity, rule, problem, impact and fix.
+    (the file's own line number on the new side, never a line of the diff file; 0 for the whole
+    file), a `kind`, and severity, rule, problem, impact and fix.
     Report missing tests, unverified assumptions and regression risks as findings of those
     kinds; they are what a green test suite hides.
   - `criteria` (Spec axis; empty for Standards): one outcome per acceptance criterion id you

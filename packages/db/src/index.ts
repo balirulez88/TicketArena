@@ -2,7 +2,16 @@ import { PrismaNeon } from "@prisma/adapter-neon";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "./generated/prisma/client";
 
-export type { OutboxEvent, OutboxStatus } from "./generated/prisma/client";
+export type {
+  Event,
+  OutboxEvent,
+  OutboxStatus,
+  Seat,
+  SeatStatus,
+  Section,
+  Venue,
+} from "./generated/prisma/client";
+export { seedCatalog } from "./seed";
 export { PrismaClient };
 
 /**

@@ -4,10 +4,10 @@
 
 ## Module boundaries
 
-| Workspace     | Responsibility                                                  | Depends on |
-| ------------- | --------------------------------------------------------------- | ---------- |
-| `apps/web`    | Next.js App Router UI and the tRPC API (the only public entry)  | (none yet) |
-| `packages/db` | Prisma schema, migrations, client factory over the Neon adapter | (none)     |
+| Workspace     | Responsibility                                                  | Depends on    |
+| ------------- | --------------------------------------------------------------- | ------------- |
+| `apps/web`    | Next.js App Router UI and the tRPC API (the only public entry)  | `packages/db` |
+| `packages/db` | Prisma schema, migrations, client factory over the Neon adapter | (none)        |
 
 Planned (created by tickets, not up front): a waiting-room module (Redis queue logic), a booking
 module (seat state, holds, orders), an outbox relay worker, and payment/notification consumers.
@@ -29,7 +29,7 @@ New modules are added when a slice needs them, not speculatively.
 
 ## Request path today
 
-`Browser → proxy.ts (ensures ta_session) → TRPCReactProvider (httpBatchLink, superjson) → /api/trpc/[trpc] → createTRPCContext (resolves Principal) → appRouter → procedure(ctx)`
+`Browser → proxy.ts (ensures ta_session) → TRPCReactProvider (httpBatchLink, superjson) → /api/trpc/[trpc] → createTRPCContext (resolves Principal, attaches `db`) → appRouter → procedure(ctx)`
 
 ## Identity
 
@@ -53,6 +53,14 @@ Decision: [ADR 0012](../adr/0012-identity-service-seam.md). Code: `apps/web/src/
 - **Known MVP limitation:** clearing cookies yields a new guest session, so per-session guest
   limits (e.g. the 6-ticket limit) can be bypassed until authentication exists.
 - **API:** `session.whoami` returns the caller's principal.
+
+## Catalog API
+
+Routers in `apps/web/src/server/routers/`: `events` (`list`, `get`) and `seats` (`map`), sharing
+zod schemas in `catalog-schemas.ts`. They read through `ctx.db`, a process-wide Prisma client
+created lazily from `DATABASE_URL` (`parseDatabaseEnv` validates only that variable). A missing
+event is a `NOT_FOUND` tRPC error. Integration tests run against real Postgres. See
+[database](../database/index.md).
 
 ## Children
 

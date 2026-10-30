@@ -11,6 +11,8 @@ const serverEnvSchema = z.object({
 
 const sessionEnvSchema = serverEnvSchema.pick({ SESSION_SECRET: true });
 
+const databaseEnvSchema = serverEnvSchema.pick({ DATABASE_URL: true });
+
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
 
 type EnvSource = Readonly<Record<string, string | undefined>>;
@@ -39,4 +41,9 @@ export function parseServerEnv(source: EnvSource): ServerEnv {
  */
 export function parseSessionEnv(source: EnvSource): Pick<ServerEnv, "SESSION_SECRET"> {
   return parseEnv(sessionEnvSchema, source, "session");
+}
+
+/** Validates only the database URL, for the tRPC context, which needs nothing else yet. */
+export function parseDatabaseEnv(source: EnvSource): Pick<ServerEnv, "DATABASE_URL"> {
+  return parseEnv(databaseEnvSchema, source, "database");
 }

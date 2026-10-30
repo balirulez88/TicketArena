@@ -3,12 +3,66 @@
   "title": "Code review report (one axis)",
   "type": "object",
   "additionalProperties": false,
-  "required": ["axis", "status", "summary", "findings"],
+  "required": ["axis", "status", "reviewer", "changeset", "summary", "files", "criteria", "findings"],
   "properties": {
     "axis": { "type": "string", "enum": ["standards", "spec"] },
     "status": { "type": "string", "enum": ["reviewed", "skipped"] },
-    "summary": { "type": "string", "minLength": 1 },
-    "changeset_token": { "type": "string" },
+    "reviewer": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Who reviewed: role and agent, e.g. 'Spec sub-agent (model name)'."
+    },
+    "changeset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base", "head", "token"],
+      "properties": {
+        "base": { "type": "string", "description": "Fixed point commit, as given." },
+        "head": { "type": "string", "description": "Reviewed head commit, as given." },
+        "token": {
+          "type": "string",
+          "description": "Value of the changeset's last 'review-token:' line; empty if none or unreadable."
+        }
+      }
+    },
+    "summary": { "type": "string", "minLength": 1, "description": "What changed and what was examined." },
+    "files": {
+      "type": "array",
+      "description": "Every changed file exactly once.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "status", "note"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["reviewed", "not_relevant"] },
+          "note": { "type": "string", "description": "Required justification when not_relevant." }
+        }
+      }
+    },
+    "criteria": {
+      "type": "array",
+      "description": "Spec axis: one outcome per acceptance criterion id. Standards axis: empty.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "evidence", "tests", "note"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "status": {
+            "type": "string",
+            "enum": ["met", "partial", "unmet", "unverifiable", "not_applicable"]
+          },
+          "evidence": { "type": "string", "description": "Where the implementation satisfies it." },
+          "tests": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Tests that verify it: 'path' or 'path::test name'."
+          },
+          "note": { "type": "string", "description": "Required unless met: what is missing or why." }
+        }
+      }
+    },
     "findings": {
       "type": "array",
       "items": {
@@ -16,6 +70,7 @@
         "additionalProperties": false,
         "required": [
           "severity",
+          "kind",
           "file",
           "line",
           "rule",
@@ -26,8 +81,26 @@
         ],
         "properties": {
           "severity": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
-          "file": { "type": "string", "minLength": 1 },
-          "line": { "type": "integer", "minimum": 0 },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "defect",
+              "security",
+              "architecture",
+              "maintainability",
+              "missing_test",
+              "unverified_assumption",
+              "regression_risk",
+              "spec_gap",
+              "scope_creep"
+            ]
+          },
+          "file": { "type": "string", "minLength": 1, "description": "A changed file." },
+          "line": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "A line inside one of the file's diff hunks (new side), or 0 for the whole file."
+          },
           "rule": { "type": "string", "minLength": 1 },
           "title": { "type": "string", "minLength": 1 },
           "problem": { "type": "string", "minLength": 1 },

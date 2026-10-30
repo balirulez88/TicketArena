@@ -59,9 +59,14 @@ readonly REVIEW_BLOCKING="${RALPH_REVIEW_BLOCKING:-CRITICAL,HIGH}"
 readonly REVIEW_TIMEOUT="${RALPH_REVIEW_TIMEOUT:-1800}"
 readonly REVIEW_SCHEMA="${REPO_ROOT}/skills/code-review/report.schema.json"
 readonly REVIEW_GATE="${REPO_ROOT}/scripts/ralph-review.mjs"
+readonly ARTIFACTS="${REPO_ROOT}/scripts/ralph-artifacts.mjs"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 readonly RUN_ID
-readonly LOG_DIR="${RALPH_LOG_ROOT:-${REPO_ROOT}/.ralph/logs}/${RUN_ID}"
+# Temporary: changesets for the reviewers, inside the workspace they are confined to.
+readonly REVIEW_ROOT="${REPO_ROOT}/.ralph/review"
+# Persistent: everything needed to investigate a run later (scripts/ralph-artifacts.mjs).
+readonly LOG_ROOT="${RALPH_LOG_ROOT:-${REPO_ROOT}/.ralph/logs}"
+readonly LOG_DIR="${LOG_ROOT}/${RUN_ID}"
 readonly FEEDBACK_LINES=150
 readonly ALLOWED_COMMIT_TYPES="feat fix refactor perf test docs chore"
 
@@ -70,6 +75,7 @@ DRY_RUN=false
 ONLY_TICKET=""
 CURRENT_BRANCH=""
 REVIEW_FEEDBACK=""
+RUN_STATUS=failed
 
 # ---------------------------------------------------------------------------------------------
 # Utilities
@@ -127,7 +133,8 @@ preflight() {
   command -v pnpm >/dev/null || die "pnpm is not installed"
   command -v node >/dev/null || die "node is not installed"
   command -v timeout >/dev/null || die "timeout (coreutils) is not installed"
-  [[ -f "${REVIEW_SCHEMA}" && -f "${REVIEW_GATE}" ]] || die "review skill or gate script missing"
+  [[ -f "${REVIEW_SCHEMA}" && -f "${REVIEW_GATE}" && -f "${ARTIFACTS}" ]] ||
+    die "review skill, review gate or artifact script missing"
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git repository"
 
   local branch
@@ -155,7 +162,33 @@ preflight() {
       die "refusing to run a permission-skipping agent outside the sandbox; use ./scripts/sandbox.sh"
     fi
   fi
+}
+
+# ---------------------------------------------------------------------------------------------
+# Run artifacts (retention policy: scripts/ralph-artifacts.mjs)
+# ---------------------------------------------------------------------------------------------
+
+# Expired artifacts of earlier runs go first; this run is marked active, which protects it from
+# any concurrent cleanup until it finishes.
+start_run() {
+  node "${ARTIFACTS}" init --root "${REVIEW_ROOT}"
+  node "${ARTIFACTS}" init --root "${LOG_ROOT}"
+  node "${ARTIFACTS}" cleanup --review-root "${REVIEW_ROOT}" --log-root "${LOG_ROOT}" \
+    --keep "${RUN_ID}"
   mkdir -p "${LOG_DIR}"
+  node "${ARTIFACTS}" mark --run "${LOG_DIR}" --status active
+  trap finish_run EXIT
+}
+
+# EXIT trap: records the outcome, scrubs secrets from the logs and, only for a successful run,
+# drops the temporary review files (every changeset was copied into the logs when reviewed).
+# Failed runs keep them for debugging until the retention period ends.
+finish_run() {
+  node "${ARTIFACTS}" mark --run "${LOG_DIR}" --status "${RUN_STATUS}" || true
+  node "${ARTIFACTS}" redact --run "${LOG_DIR}" || true
+  if [[ "${RUN_STATUS}" == succeeded ]]; then
+    node "${ARTIFACTS}" remove --root "${REVIEW_ROOT}" --run-id "${RUN_ID}" || true
+  fi
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -368,21 +401,51 @@ run_phase_until() {
 # Independent review (skills/code-review, run in its non-interactive mode)
 # ---------------------------------------------------------------------------------------------
 
+# The acceptance criteria as the review gate numbers them (scripts/ralph-review.mjs).
+numbered_criteria() {
+  grep -E '^- \[[ xX]\] ' "$1" | awk '{ print "  AC" NR ": " substr($0, 7) }' || true
+}
+
+axis_brief() {
+  case "$1" in
+    standards)
+      cat <<'EOF'
+- Standards brief: judge architecture (ADRs, module boundaries, dependency direction),
+  correctness (concurrency, transactions, idempotency), security (validation, authz, secrets),
+  error handling, maintainability and test quality, and name integration problems with the
+  existing code. `criteria` stays empty.
+EOF
+      ;;
+    spec)
+      cat <<'EOF'
+- Spec brief: give every acceptance criterion above exactly one outcome in `criteria`, with the
+  implementation evidence and the tests that verify it. A criterion with no test proving it is
+  `unverifiable`, not `met`. Report missing or insufficient coverage and scope creep as findings.
+EOF
+      ;;
+  esac
+}
+
 build_review_prompt() {
-  local axis=$1 ticket=$2 diff_file=$3
+  local axis=$1 ticket=$2 diff_file=$3 base=$4 head=$5
   cat <<EOF
 You are the ${axis^} sub-agent of the two-axis code review in skills/code-review/SKILL.md, in
 its non-interactive mode, reviewing ticket ${ticket}. Read that skill file first and follow the
 brief for the ${axis^} axis. You run in a fresh context, independent of the other axis.
 
-- Fixed point: ${BASE_BRANCH} ($(git rev-parse --short "${BASE_BRANCH}")). The complete candidate
-  changeset is committed on HEAD; \`git diff ${BASE_BRANCH}...HEAD\` is saved in full in the
-  changeset file below. Read all of it, then whatever surrounding code you need.
+- Commit range: base ${base}, head ${head} (copy both into \`changeset\`). The complete
+  candidate changeset, \`git diff ${BASE_BRANCH}...HEAD\`, is saved in full in the changeset
+  file below. Read all of it, then whatever surrounding code you need.
 - Changeset file: ${diff_file#"${REPO_ROOT}/"}
-  Its last line is \`review-token: <value>\`; put that value in \`changeset_token\`. If you
+  Its last line is \`review-token: <value>\`; put that value in \`changeset.token\`. If you
   cannot open the file, review nothing else: say so in the summary and leave the token empty.
+- Changed files (account for every one in \`files\`):
+$(git diff --name-only "${BASE_BRANCH}...HEAD" | sed 's/^/  /')
+- Every finding names one of those files and a line inside one of its hunks (0: whole file).
 - Commits: $(git log --oneline "${BASE_BRANCH}..HEAD" | tr '\n' ';')
-- Spec: the ticket ${ticket} and the spec and ADRs it references.
+- Spec: the ticket ${ticket} and the spec and ADRs it references. Acceptance criteria:
+$(numbered_criteria "${ticket}")
+$(axis_brief "${axis}")
 - Standards: discover the sources as the skill describes, starting from CLAUDE.md.
 - You are read-only: do not modify any file. Return only the report matching the JSON schema.
 EOF
@@ -391,20 +454,21 @@ EOF
 # Never fails: whatever the process printed (or nothing) goes to the review gate, which judges
 # anything but a valid report as invalid. A reviewer can therefore not approve by crashing.
 run_reviewer() {
-  local axis=$1 ticket=$2 diff_file=$3 out=$4
+  local axis=$1 ticket=$2 diff_file=$3 base=$4 head=$5 out=$6
   local -a review_argv
   IFS=' ' read -r -a review_argv <<<"${REVIEW_CMD}"
   timeout "${REVIEW_TIMEOUT}" "${review_argv[@]}" --json-schema "$(cat "${REVIEW_SCHEMA}")" \
-    "$(build_review_prompt "${axis}" "${ticket}" "${diff_file}")" \
+    "$(build_review_prompt "${axis}" "${ticket}" "${diff_file}" "${base}" "${head}")" \
     >"${out}" 2>"${out%.json}.stderr.log" || true
 }
 
 # One review round over the committed changeset. Returns the review gate's verdict:
 # 0 approved, 1 blocked (findings in REVIEW_FEEDBACK), 2 invalid.
 run_review() {
-  local ticket=$1 round=$2 slug prefix head diff_file token verdict=0
+  local ticket=$1 round=$2 slug prefix base head diff_file token verdict=0
   slug="$(ticket_slug "${ticket}")"
   prefix="${LOG_DIR}/${slug}.review-${round}"
+  base="$(git merge-base "${BASE_BRANCH}" HEAD)"
   head="$(git rev-parse HEAD)"
   REVIEW_FEEDBACK="${prefix}.blocking.md"
 
@@ -415,7 +479,7 @@ run_review() {
   fi
   # The changeset goes inside the workspace (git-ignored): read-only reviewers are confined to it,
   # while LOG_DIR may be outside (the sandbox mounts the host's logs). A copy stays in the logs.
-  diff_file="${REPO_ROOT}/.ralph/review/${RUN_ID}/${slug}.review-${round}.diff"
+  diff_file="${REVIEW_ROOT}/${RUN_ID}/${slug}.review-${round}.diff"
   mkdir -p "${diff_file%/*}"
   git diff "${BASE_BRANCH}...HEAD" >"${diff_file}"
   if [[ ! -s "${diff_file}" ]]; then
@@ -427,9 +491,9 @@ run_review() {
   cp "${diff_file}" "${prefix}.diff"
 
   log "  review round ${round}/${MAX_REVIEW_ROUNDS}: Standards and Spec reviewers in parallel"
-  run_reviewer standards "${ticket}" "${diff_file}" "${prefix}.standards.json" &
+  run_reviewer standards "${ticket}" "${diff_file}" "${base}" "${head}" "${prefix}.standards.json" &
   local standards_pid=$!
-  run_reviewer spec "${ticket}" "${diff_file}" "${prefix}.spec.json" &
+  run_reviewer spec "${ticket}" "${diff_file}" "${base}" "${head}" "${prefix}.spec.json" &
   local spec_pid=$!
   wait "${standards_pid}" "${spec_pid}"
 
@@ -443,10 +507,13 @@ run_review() {
     return 2
   fi
 
-  node "${REVIEW_GATE}" --block "${REVIEW_BLOCKING}" --token "${token}" \
+  # The gate checks the reports' evidence against the real changeset (token, commit range, file
+  # and hunk references, file coverage) and the ticket's acceptance criteria.
+  node "${REVIEW_GATE}" --block "${REVIEW_BLOCKING}" \
+    --changeset "${diff_file}" --base "${base}" --head "${head}" --ticket "${ticket}" \
     --standards "${prefix}.standards.json" --spec "${prefix}.spec.json" \
-    --report "${prefix}.md" --feedback "${REVIEW_FEEDBACK}" 2>>"${LOG_DIR}/${slug}.review.log" ||
-    verdict=$?
+    --report "${prefix}.md" --feedback "${REVIEW_FEEDBACK}" --decision "${prefix}.decision.json" \
+    2>>"${LOG_DIR}/${slug}.review.log" || verdict=$?
   return "${verdict}"
 }
 
@@ -622,16 +689,24 @@ main() {
   parse_args "$@"
   preflight
 
+  if [[ "${DRY_RUN}" == true ]]; then
+    local ticket
+    if ticket="$(next_ticket)"; then
+      log "dry run: next ticket would be ${ticket}"
+    else
+      log "dry run: no ticket is ready"
+    fi
+    return 0
+  fi
+  start_run
+
   local ticket processed=0
   while ticket="$(next_ticket)"; do
-    if [[ "${DRY_RUN}" == true ]]; then
-      log "dry run: next ticket would be ${ticket}"
-      return 0
-    fi
     process_ticket "${ticket}" || die "stopping: a rejected ticket needs human attention"
     processed=$((processed + 1))
     [[ "${ONCE}" == true || -n "${ONLY_TICKET}" ]] && break
   done
+  RUN_STATUS=succeeded
   log "Done: ${processed} slice(s) merged. No further ticket is ready."
 }
 

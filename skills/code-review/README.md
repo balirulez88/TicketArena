@@ -67,4 +67,10 @@ invalid report as a failed review, never as an approval.
 Keep the changeset file inside the reviewer's working directory: read-only modes such as
 `--restricted` confine file access to it. To prove the reviewer actually read the changeset, end
 the file with a random `review-token: <value>` line and reject any report whose
-`changeset_token` differs.
+`changeset.token` differs.
+
+The report is structured evidence, not a verdict: the commit range, every changed file (reviewed
+or not relevant, with a reason), findings anchored to a changed file and a hunk line, and (Spec)
+one outcome per acceptance criterion with the tests that verify it. A harness should check those
+references against the real changeset and ticket and treat any mismatch as an invalid review.
+That checks structure, not correctness: the judgement is still the independent reviewer's.

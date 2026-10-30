@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { type Buyer, createBookingService, SeatUnavailableError } from "./booking-service";
+import {
+  type Buyer,
+  createBookingService,
+  InvalidSeatSelectionError,
+  SeatUnavailableError,
+} from "./booking-service";
 
 const database = setupTestDatabase();
 let prisma: PrismaClient | undefined;
@@ -153,6 +158,30 @@ describe("holdSeats", () => {
     await blocker;
 
     expect(readAfterLockRelease).toBe(true);
+  });
+});
+
+describe("holdSeats seat selection", () => {
+  test("rejects an empty seatIds list before writing anything", async () => {
+    const { eventId } = await freshSeats(1);
+    const before = await db().hold.count();
+
+    await expect(service().holdSeats(alice, eventId, [])).rejects.toBeInstanceOf(
+      InvalidSeatSelectionError,
+    );
+    expect(await db().hold.count()).toBe(before);
+  });
+
+  test("rejects a duplicated seatIds list before writing anything", async () => {
+    const { eventId, seatIds } = await freshSeats(1);
+    const seatId = seatIds[0] ?? "";
+    const before = await db().hold.count();
+
+    await expect(service().holdSeats(alice, eventId, [seatId, seatId])).rejects.toBeInstanceOf(
+      InvalidSeatSelectionError,
+    );
+    expect(await db().hold.count()).toBe(before);
+    expect((await db().seat.findUniqueOrThrow({ where: { id: seatId } })).status).toBe("AVAILABLE");
   });
 });
 

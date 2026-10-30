@@ -42,6 +42,12 @@ export interface Contact {
 
 type OrderStatus = "PENDING_PAYMENT" | "CONFIRMED" | "CANCELLED" | "EXPIRED";
 
+export interface OrderLineView {
+  readonly seatId: string;
+  readonly priceMinor: number;
+  readonly currency: string;
+}
+
 export interface OrderView {
   readonly id: string;
   readonly holdId: string;
@@ -51,7 +57,7 @@ export interface OrderView {
   readonly paymentDeadline: Date;
   readonly correlationId: string;
   readonly contact: Contact;
-  readonly lines: { seatId: string; priceMinor: number; currency: string }[];
+  readonly lines: OrderLineView[];
 }
 
 export interface BookingService {
@@ -114,6 +120,34 @@ export class SeatUnavailableError extends Error {
   }
 }
 
+export class InvalidSeatSelectionError extends Error {
+  readonly code = "INVALID_SEAT_SELECTION";
+
+  constructor(reason: string) {
+    super(`INVALID_SEAT_SELECTION: ${reason}`);
+    this.name = "InvalidSeatSelectionError";
+  }
+}
+
+/** The hold's `seat.held` event, the source of its seat set, no longer exists. */
+export class HoldSeatSetMissingError extends Error {
+  readonly code = "HOLD_SEAT_SET_MISSING";
+
+  constructor(holdId: string) {
+    super(`HOLD_SEAT_SET_MISSING: hold ${holdId} has no seat.held event`);
+    this.name = "HoldSeatSetMissingError";
+  }
+}
+
+export class MixedCurrencyError extends Error {
+  readonly code = "MIXED_CURRENCY";
+
+  constructor(currencies: readonly string[]) {
+    super(`MIXED_CURRENCY: seats are priced in ${currencies.join(", ")}`);
+    this.name = "MixedCurrencyError";
+  }
+}
+
 const HOLD_DURATION_MS = 10 * 60_000;
 const SEAT_HELD_EVENT = "seat.held";
 const heldEnvelope = envelopeSchema(seatHeldPayloadSchema);
@@ -160,6 +194,27 @@ function assertPlaceable(
   if (expectedSeatIds.length === 0 || lost.length > 0) {
     throw new SeatUnavailableError(lost);
   }
+}
+
+/** Prices exactly `seatIds`, the validated and locked set, never whatever carries the holdId. */
+async function priceSeats(
+  tx: Pick<PrismaClient, "$queryRaw">,
+  seatIds: readonly string[],
+): Promise<{ priced: PricedSeat[]; totalMinor: number; currency: string }> {
+  const priced = await tx.$queryRaw<PricedSeat[]>`
+    SELECT s.id::text AS id, sec."priceMinor", sec.currency
+    FROM seats s
+    JOIN rows r ON r.id = s."rowId"
+    JOIN sections sec ON sec.id = r."sectionId"
+    WHERE s.id = ANY(${[...seatIds]}::uuid[])
+    ORDER BY s.id`;
+  const currencies = [...new Set(priced.map((seat) => seat.currency))];
+  const [currency] = currencies;
+  // No fallback: an empty set (unreachable after assertPlaceable) or a mix has no honest currency.
+  if (currency === undefined || currencies.length > 1) {
+    throw new MixedCurrencyError(currencies);
+  }
+  return { priced, totalMinor: priced.reduce((sum, seat) => sum + seat.priceMinor, 0), currency };
 }
 
 interface OrderPlacedFacts {
@@ -219,7 +274,7 @@ function toOrderView(order: {
   correlationId: string;
   contactEmail: string;
   contactPhone: string | null;
-  lines: { seatId: string; priceMinor: number; currency: string }[];
+  lines: OrderLineView[];
 }): OrderView {
   return {
     id: order.id,
@@ -268,6 +323,12 @@ export function createBookingService({ db, clock, newId }: BookingServiceDeps): 
 
   return {
     async holdSeats(buyer, eventId, seatIds) {
+      if (seatIds.length === 0) {
+        throw new InvalidSeatSelectionError("seatIds is empty");
+      }
+      if (new Set(seatIds).size !== seatIds.length) {
+        throw new InvalidSeatSelectionError("seatIds contains duplicates");
+      }
       return db.$transaction(async (tx) => {
         // Waiting (not NOWAIT) lock in id order: a loser sees the winner's committed state
         // instead of a spurious "taken" while the winner might still roll back (ADR 0005).
@@ -363,12 +424,19 @@ export function createBookingService({ db, clock, newId }: BookingServiceDeps): 
           if (duplicate !== null) {
             return duplicate;
           }
+          // Refused before the event is read: a settled hold needs no seat set.
+          if (hold.status !== "HELD") {
+            throw new HoldNotActiveError(holdId, hold.status);
+          }
           // The seat set comes from the hold's own seat.held event, written in the hold's
           // transaction: querying seats by holdId would silently miss a seat that lost its hold.
           const held = await tx.outboxEvent.findFirst({
             where: { aggregateId: holdId, eventType: SEAT_HELD_EVENT },
           });
-          const expectedSeatIds = heldEnvelope.parse(held?.payload).payload.seatIds;
+          if (held === null) {
+            throw new HoldSeatSetMissingError(holdId);
+          }
+          const expectedSeatIds = heldEnvelope.parse(held.payload).payload.seatIds;
           const seats = await tx.$queryRaw<{ id: string; status: string; holdId: string | null }[]>`
             SELECT id::text AS id, status::text AS status, "holdId"::text AS "holdId"
             FROM seats WHERE id = ANY(${[...expectedSeatIds]}::uuid[]) ORDER BY id FOR UPDATE`;
@@ -378,16 +446,7 @@ export function createBookingService({ db, clock, newId }: BookingServiceDeps): 
 
           assertPlaceable(holdId, hold, expectedSeatIds, seats, placedAt);
 
-          const priced = await tx.$queryRaw<PricedSeat[]>`
-            SELECT s.id::text AS id, sec."priceMinor", sec.currency
-            FROM seats s
-            JOIN rows r ON r.id = s."rowId"
-            JOIN sections sec ON sec.id = r."sectionId"
-            WHERE s."holdId" = ${holdId}::uuid
-            ORDER BY s.id`;
-          const totalMinor = priced.reduce((sum, seat) => sum + seat.priceMinor, 0);
-          // assertPlaceable guarantees at least one seat; the fallback only satisfies the type.
-          const currency = priced[0]?.currency ?? "EUR";
+          const { priced, totalMinor, currency } = await priceSeats(tx, expectedSeatIds);
 
           const orderId = newId();
           const paymentDeadline = new Date(placedAt.getTime() + PAYMENT_WINDOW_MS);
@@ -418,7 +477,10 @@ export function createBookingService({ db, clock, newId }: BookingServiceDeps): 
             include: orderInclude,
           });
           await tx.hold.update({ where: { id: holdId }, data: { status: "ORDERED" } });
-          await tx.seat.updateMany({ where: { holdId }, data: { status: "IN_CHECKOUT" } });
+          await tx.seat.updateMany({
+            where: { id: { in: [...expectedSeatIds] }, status: "HELD" },
+            data: { status: "IN_CHECKOUT" },
+          });
 
           const envelope = orderPlacedEnvelope(newId(), {
             orderId,

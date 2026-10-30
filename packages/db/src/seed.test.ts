@@ -18,6 +18,19 @@ afterAll(async () => {
 const NOW = new Date("2027-03-01T12:00:00.000Z");
 
 describe("seedCatalog", () => {
+  it("concurrent runs leave exactly one row per venue", async () => {
+    await Promise.all(Array.from({ length: 5 }, () => seedCatalog(client(), NOW)));
+
+    const names = (await client().venue.findMany({ select: { name: true } })).map((v) => v.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("has an index on seats.holdId", async () => {
+    const indexes = await client().$queryRaw<{ indexdef: string }[]>`
+      SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'seats'`;
+    expect(indexes.some((index) => /\("holdId"\)$/.test(index.indexdef))).toBe(true);
+  });
+
   it("creates venues, events with exactly one demo event, and available seats", async () => {
     await seedCatalog(client(), NOW);
 

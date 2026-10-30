@@ -8,8 +8,12 @@ export {
   HoldExpiredError,
   HoldNotActiveError,
   HoldNotFoundError,
+  HoldSeatSetMissingError,
   type HoldView,
   IdempotencyKeyReusedError,
+  InvalidSeatSelectionError,
+  MixedCurrencyError,
+  type OrderLineView,
   type OrderView,
   SeatUnavailableError,
 } from "./booking-service";

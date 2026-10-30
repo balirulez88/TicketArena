@@ -3,7 +3,13 @@ export {
   type BookingServiceDeps,
   type Buyer,
   type Clock,
+  type Contact,
   createBookingService,
+  HoldExpiredError,
+  HoldNotActiveError,
+  HoldNotFoundError,
   type HoldView,
+  IdempotencyKeyReusedError,
+  type OrderView,
   SeatUnavailableError,
 } from "./booking-service";

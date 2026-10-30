@@ -33,12 +33,16 @@ Each slice that emits an event adds a row here. Every event travels in the envel
 `packages/contracts` (`id`, `type`, `version`, `occurredAt`, `correlationId`, `causationId`,
 optional `holdId`/`orderId`, `payload`); the full envelope is stored as the outbox row payload.
 
-| Event type  | Producer                             | Consumers | Payload version |
-| ----------- | ------------------------------------ | --------- | --------------- |
-| `seat.held` | `BookingService.holdSeats` (same TX) | none yet  | 1               |
+| Event type     | Producer                              | Consumers | Payload version |
+| -------------- | ------------------------------------- | --------- | --------------- |
+| `seat.held`    | `BookingService.holdSeats` (same TX)  | none yet  | 1               |
+| `order.placed` | `BookingService.placeOrder` (same TX) | none yet  | 1               |
 
 `seat.held` payload: `holdId`, `eventId`, `seatIds`, `holdExpiresAt`. Its `correlationId` is
 minted here and reused by every later event of the booking.
+
+`order.placed` payload: `orderId`, `holdId`, `amountMinor`, `currency`, `paymentDeadline`, `contact`
+(`email`, optional `phone`). It carries the hold's `correlationId`.
 
 ## Decided, not yet built
 

@@ -30,8 +30,10 @@ warnings:
   `noPropertyAccessFromIndexSignature`.
 - **Vitest** behaviour tests at agreed seams: unit **and** integration tests in one gate
   ([ADR 0010](../adr/0010-real-infrastructure-tests.md)).
-- **Harness tests** (`test:harness`): `node:test` for the review gate and bash scenarios that
-  run `ralph-loop.sh` with stub agents and reviewers, proving the merge policy below.
+- **Harness tests** (`test:harness`): `node:test` for the review gate and the artifact
+  lifecycle, and bash scenarios that run `ralph-loop.sh` with stub agents and a stub reviewer
+  (`scripts/ralph-stub-reviewer.mjs`), proving the merge policy, the evidence gate and the
+  retention rules below.
 
 ## Integration test infrastructure
 
@@ -87,7 +89,7 @@ A ticket that cannot get through RED, GREEN, DOCS, REVIEW or VERIFY is **rejecte
 committed to a quarantine branch `rejected/<NN>-<slug>-<run-id>` (never to a slice branch or
 `main`), the ticket is marked `blocked` on `main`, and the loop stops for a human to look.
 Agent transcripts, gate output and review reports are kept in `.ralph/logs/<run-id>/`
-(git-ignored).
+(git-ignored); see [Run artifacts](#run-artifacts) for what is kept and for how long.
 
 ## Independent review
 
@@ -105,17 +107,53 @@ non-interactive mode. TicketArena's rules for reviewers are in [code-review.md](
   references. The changeset file lives in the git-ignored `.ralph/review/<run-id>/` inside the
   workspace (the reviewers' file access is confined to it), with a copy in the run logs.
 - **Proof of reading.** The changeset ends with a random `review-token` line. Each report must
-  echo it as `changeset_token`; a missing or wrong token makes the review invalid, so a reviewer
+  echo it as `changeset.token`; a missing or wrong token makes the review invalid, so a reviewer
   that could not open the changeset cannot approve by reviewing other files instead.
-- **Structured, validated reports.** Each reviewer must return JSON matching
-  `skills/code-review/report.schema.json`: severity, file and line, rule, problem, impact,
-  recommendation. `scripts/ralph-review.mjs` validates both reports and applies the policy.
-- **Merge policy.** `CRITICAL` and `HIGH` findings block the merge (`RALPH_REVIEW_BLOCKING`);
+- **Structured evidence.** Each reviewer returns JSON matching
+  `skills/code-review/report.schema.json`: reviewer and axis, the commit range and token, a
+  summary, every changed file (`reviewed`, or `not_relevant` with a reason), and findings with
+  severity, kind (defect, security, missing test, unverified assumption, regression risk, ...),
+  file and line, rule, problem, impact and correction. The Spec reviewer also gives every
+  acceptance criterion (the ticket's checkboxes, numbered `AC1..ACn` in the prompt) an outcome
+  with its implementation evidence and the tests that verify it; without a test it is
+  `unverifiable`, not `met`.
+- **Evidence gate.** `scripts/ralph-review.mjs` checks both reports against the real changeset
+  and ticket. A report is **invalid** if the token or commit range differs, a changed file is
+  unaccounted for, a finding names a file outside the changeset or a line outside its hunks, a
+  criterion has no outcome, or a criterion is `met` without a test that exists. This is
+  structural validation: it rules out reports that cannot be right, not reports that are wrong;
+  the judgement stays the reviewers'. Every round writes `<slug>.review-<round>.decision.json`
+  (verdict, range, token, files, criteria, errors, blockers) next to the readable report.
+- **Merge policy.** `CRITICAL` and `HIGH` findings block the merge (`RALPH_REVIEW_BLOCKING`), and
+  so does any acceptance criterion that is `partial`, `unmet` or `unverifiable`;
   `MEDIUM` and `LOW` are logged, not blocking. A crashed or timed-out reviewer, an error result,
   invalid JSON, a skipped axis or a tampered tree is a **failed** review, never an approval.
 - **Bounded.** Up to `RALPH_MAX_REVIEW_ROUNDS` (default 3) rounds; each round except the last
   may trigger a fix. A slice still blocked, or without a valid approval, after the last round is
   rejected and quarantined like any other failure.
+
+## Run artifacts
+
+`scripts/ralph-artifacts.mjs` owns their lifecycle; `ralph-loop.sh` calls it when a run starts
+and on exit.
+
+| Where                     | What                                                                                           | Kept                                                                         |
+| ------------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `.ralph/review/<run-id>/` | Changesets the reviewers read (inside the workspace)                                           | While the run is active; deleted when it succeeds; 7 days after a failed run |
+| `.ralph/logs/<run-id>/`   | Agent and gate logs, review reports, decisions, a copy of every reviewed changeset, `run.json` | 30 days after the run finished                                               |
+- `run.json` records the run's status (`active`, `succeeded`, `failed`) and times. A run is
+  `active` until its exit trap marks it; an interrupted run that never finished stays `active` and
+  is **never** cleaned automatically (remove it by hand once you are sure it is dead).
+- Each run cleans expired artifacts of earlier runs when it starts, never its own. Review retries
+  within a run are unaffected: every round's changeset stays until the run ends.
+- Cleanup only touches directories carrying the `.ralph-managed` marker and, inside them, only
+  real directories named like a run id (`YYYYMMDD-HHMMSS`); it never follows links and never
+  touches source files or git history. It is idempotent.
+- On exit the run's logs are scrubbed of secrets: values of `*TOKEN*`, `*API_KEY*`, `*SECRET*`,
+  `*PASSWORD*` and `*CREDENTIAL*` environment variables and Anthropic key patterns become
+  `[REDACTED]`.
+- In the sandbox the review dir lives in the container's clone and goes with it; the archived
+  changeset copies in the host's `.ralph/logs` are the evidence.
 
 ## Sandbox
 

@@ -185,9 +185,24 @@ its axis, the fixed point, the changeset, the spec (Spec axis) and a JSON schema
   are the sub-agent from step 4, so the brief for your axis applies.
 - Do not modify any file and do not ask questions: there is nobody to answer.
 - Read the changeset you were given, all of it. If it ends with a `review-token: <value>` line,
-  put that value in `changeset_token`: it proves to the harness that you read the changeset to
+  put that value in `changeset.token`: it proves to the harness that you read the changeset to
   the end, so never guess it. If you cannot open the changeset, do not review other files
-  instead: say so in `summary` and leave `changeset_token` empty, which fails the review.
-- Return one report matching [`report.schema.json`](report.schema.json): `axis`, `status`
-  (`reviewed`, or `skipped` only when the Spec axis truly has no spec), `summary` and `findings`.
-  The 400-word limit is replaced by the schema; keep each field short and specific.
+  instead: say so in `summary` and leave the token empty, which fails the review.
+- Return one report matching [`report.schema.json`](report.schema.json). The 400-word limit is
+  replaced by the schema; keep each field short and specific. The report is evidence, and a
+  harness may check every reference in it against the changeset:
+  - `reviewer` (your role and agent), `changeset` (the base and head commits exactly as given,
+    and the token), `status` (`reviewed`, or `skipped` only when the Spec axis truly has no
+    spec) and `summary` (what changed and what you examined).
+  - `files`: every changed file exactly once, `reviewed` or `not_relevant` with the reason in
+    `note` (e.g. generated code, a status line in a ticket).
+  - `findings`: each names a changed `file` and a `line` inside one of that file's diff hunks
+    (the file's own line number on the new side, never a line of the diff file; 0 for the whole
+    file), a `kind`, and severity, rule, problem, impact and fix.
+    Report missing tests, unverified assumptions and regression risks as findings of those
+    kinds; they are what a green test suite hides.
+  - `criteria` (Spec axis; empty for Standards): one outcome per acceptance criterion id you
+    were given. `met` needs the implementation `evidence` and the `tests` that verify it
+    (`path` or `path::test name`); a criterion without a verifying test is `unverifiable`, not
+    `met`. `partial`, `unmet`, `unverifiable` and `not_applicable` explain themselves in
+    `note`. Never call a criterion met because the code looks plausible.

@@ -25,7 +25,7 @@ new_host_repo() {
   cp "${SOURCE_ROOT}/Dockerfile" "${SOURCE_ROOT}/.dockerignore" "${SOURCE_ROOT}/ralph-loop.sh" \
     "${dir}/"
   cp "${SOURCE_ROOT}/infra/nats/nats.conf" "${dir}/infra/nats/"
-  cp "${SOURCE_ROOT}"/scripts/{sandbox.sh,sandbox-entrypoint.sh,sandbox-services.sh,ralph-review.mjs} \
+  cp "${SOURCE_ROOT}"/scripts/{sandbox.sh,sandbox-entrypoint.sh,sandbox-services.sh,ralph-review.mjs,ralph-artifacts.mjs} \
     "${dir}/scripts/"
   cp "${SOURCE_ROOT}/skills/code-review/report.schema.json" "${dir}/skills/code-review/"
 
@@ -47,20 +47,8 @@ case "${RALPH_PHASE}" in
   green) echo feature >feature.txt ;;
 esac
 EOF
-  cat >"${dir}/stub/reviewer.sh" <<'EOF'
-#!/usr/bin/env bash
-# Reads the changeset the way the restricted reviewer must: by the prompt's path, inside the
-# workspace. Without the token the review would be invalid, not BLOCKED.
-prompt="${*: -1}"
-axis=spec
-[[ "${prompt}" == *"Standards sub-agent"* ]] && axis=standards
-changeset="$(sed -n 's/^- Changeset file: //p' <<<"${prompt}")"
-token=""
-if [[ "$(realpath -m "${changeset}")" == "$(pwd -P)"/* && -f "${changeset}" ]]; then
-  token="$(sed -n 's/^review-token: //p' "${changeset}")"
-fi
-printf '{"type":"result","subtype":"success","is_error":false,"structured_output":{"axis":"%s","status":"reviewed","summary":"stub","changeset_token":"%s","findings":[{"severity":"HIGH","file":"feature.txt","line":1,"rule":"stub","title":"always blocks","problem":"p","impact":"i","recommendation":"r"}]}}\n' "${axis}" "${token}"
-EOF
+  # The shared stub reviewer returns valid evidence plus one HIGH finding (STUB_REVIEW=high).
+  cp "${SOURCE_ROOT}/scripts/ralph-stub-reviewer.mjs" "${dir}/stub/"
 
   git -C "${dir}" init --quiet --initial-branch=main
   git -C "${dir}" config core.autocrlf false
@@ -80,7 +68,7 @@ run_sandbox() {
   local dir=$1
   # Stub agents need no credentials; a placeholder satisfies the scripts' key check.
   ANTHROPIC_API_KEY=placeholder-unused-by-stub-agents CLAUDE_CODE_OAUTH_TOKEN="" \
-    RALPH_AGENT_CMD="bash stub/agent.sh" RALPH_REVIEW_CMD="bash stub/reviewer.sh" \
+    RALPH_AGENT_CMD="bash stub/agent.sh" RALPH_REVIEW_CMD="env STUB_REVIEW=high node stub/ralph-stub-reviewer.mjs" \
     RALPH_MAX_ATTEMPTS=1 RALPH_MAX_REVIEW_ROUNDS=1 RALPH_BASE_BRANCH="" \
     bash "${dir}/scripts/sandbox.sh" --once >"${dir}.out" 2>&1 && echo 0 || echo $?
 }
@@ -107,6 +95,12 @@ check_evidence() {
   check "review report on host" \
     "grep -q 'Code review: BLOCKED' '${dir}'/.ralph/logs/*/01-demo.review-1.md 2>/dev/null"
   check "agent log on host" "ls '${dir}'/.ralph/logs/*/01-demo.agent.log >/dev/null 2>&1"
+  check "review decision on host" \
+    "grep -q '\"verdict\": \"blocked\"' '${dir}'/.ralph/logs/*/01-demo.review-1.decision.json 2>/dev/null"
+  check "reviewed changeset archived on host" \
+    "grep -q '^review-token: ' '${dir}'/.ralph/logs/*/01-demo.review-1.diff 2>/dev/null"
+  check "run recorded as failed on host" \
+    "grep -q '\"status\": \"failed\"' '${dir}'/.ralph/logs/*/run.json 2>/dev/null"
 }
 
 echo "rejected run, clean host:"

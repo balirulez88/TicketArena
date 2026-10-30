@@ -20,7 +20,7 @@ Skill sources live in `skills/`; `.claude/skills/*` are thin wrappers.
 pnpm run lint       # biome ci --error-on-warnings
 pnpm run typecheck  # tsc strict in every workspace
 pnpm run test       # vitest
-pnpm run test:harness  # ralph-loop review policy + review gate (bash, node:test)
+pnpm run test:harness  # ralph-loop review policy, evidence gate, artifact retention (bash, node:test)
 pnpm run check      # all of the above
 pnpm test:sandbox   # Docker: a rejected sandbox run keeps logs, branch and status on the host
 pnpm infra:up       # local Postgres/Redis/NATS for integration tests (TEST_* in .env.test)

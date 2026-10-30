@@ -39,7 +39,7 @@ below shows what is built.
 | Area                | Status      | Map                                    |
 | ------------------- | ----------- | -------------------------------------- |
 | Monorepo & modules  | scaffolded  | [architecture/](architecture/index.md) |
-| Database & Prisma   | outbox only | [database/](database/index.md)         |
+| Database & Prisma   | catalog     | [database/](database/index.md)         |
 | Async messaging     | designed    | [messaging/](messaging/index.md)       |
 | Agent workflow & CI | operational | [workflow/](workflow/index.md)         |
 | Decisions (ADRs)    | 13 accepted | [adr/](adr/index.md)                   |
@@ -54,7 +54,8 @@ below shows what is built.
 - Guest identity: `proxy.ts` issues a signed `ta_session` cookie; `IdentityService` resolves a
   `Principal` onto the tRPC context (`session.whoami`). See
   [architecture/](architecture/index.md#identity).
-- `packages/db`: Prisma 7 on the Neon serverless adapter; the `outbox_events` table.
+- `packages/db`: Prisma 7 on the Neon serverless adapter; the `outbox_events` table and the seeded catalog (venues, sections, rows, events,
+  per-event seats). `events.list`, `events.get` and `seats.map` serve it.
 - Quality gate: Biome (warnings fail), strict `tsc`, Vitest, enforced by `ralph-loop.sh`.
 
 No domain features yet. They arrive as tickets split from the

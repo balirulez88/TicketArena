@@ -8,6 +8,7 @@ const requestWith = (cookie?: string) =>
 
 beforeEach(() => {
   vi.stubEnv("SESSION_SECRET", secret);
+  vi.stubEnv("DATABASE_URL", "postgresql://user:pass@db.example.com/ticketarena?sslmode=require");
 });
 
 afterEach(() => {

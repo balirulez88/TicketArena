@@ -1,6 +1,4 @@
-// Domain models (Event, Seat, Order, ...) are intentionally absent: they will be shaped by the
-// /grill-me -> /to-spec -> /to-tickets workflow and added slice by slice under TDD.
-// Only the cross-cutting infrastructure table that the architecture mandates lives here.
+// Domain models arrive slice by slice under TDD. Hold, order and payment tables are still to come.
 
 generator client {
   provider = "prisma-client"
@@ -9,12 +7,15 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  schemas  = ["public"]
 }
 
 enum OutboxStatus {
   PENDING
   PUBLISHED
   FAILED
+
+  @@schema("public")
 }
 
 /// Transactional Outbox.
@@ -41,4 +42,88 @@ model OutboxEvent {
   @@index([status, createdAt])
   @@index([aggregateType, aggregateId])
   @@map("outbox_events")
+  @@schema("public")
+}
+
+enum SeatStatus {
+  AVAILABLE
+  HELD
+  IN_CHECKOUT
+  SOLD
+
+  @@schema("public")
+}
+
+model Venue {
+  id       String    @id @default(uuid()) @db.Uuid
+  name     String
+  sections Section[]
+  events   Event[]
+
+  @@map("venues")
+  @@schema("public")
+}
+
+/// A priced area of a venue. Prices are integer minor units (cents) so money never touches
+/// floating point; the currency is stored beside them for the day a second one appears.
+model Section {
+  id         String @id @default(uuid()) @db.Uuid
+  venueId    String @db.Uuid
+  venue      Venue  @relation(fields: [venueId], references: [id])
+  name       String
+  priceMinor Int
+  currency   String @default("EUR")
+  rows       Row[]
+
+  @@unique([venueId, name])
+  @@map("sections")
+  @@schema("public")
+}
+
+model Row {
+  id        String  @id @default(uuid()) @db.Uuid
+  sectionId String  @db.Uuid
+  section   Section @relation(fields: [sectionId], references: [id])
+  label     String
+  seats     Seat[]
+
+  @@unique([sectionId, label])
+  @@map("rows")
+  @@schema("public")
+}
+
+model Event {
+  id            String   @id @default(uuid()) @db.Uuid
+  venueId       String   @db.Uuid
+  venue         Venue    @relation(fields: [venueId], references: [id])
+  name          String   @unique
+  onSaleAt      DateTime @db.Timestamptz(3)
+  queueOpensAt  DateTime @db.Timestamptz(3)
+  queueClosesAt DateTime @db.Timestamptz(3)
+  /// The event the admin dashboard races and resets.
+  demo          Boolean  @default(false)
+  seats         Seat[]
+
+  @@map("events")
+  @@schema("public")
+}
+
+/// Seat inventory is per event: the same physical row has independent availability for each
+/// event. Postgres is the sole authority for seat state (ADR 0005); Redis never decides it.
+model Seat {
+  id            String     @id @default(uuid()) @db.Uuid
+  eventId       String     @db.Uuid
+  event         Event      @relation(fields: [eventId], references: [id])
+  rowId         String     @db.Uuid
+  row           Row        @relation(fields: [rowId], references: [id])
+  number        Int
+  status        SeatStatus @default(AVAILABLE)
+  holdId        String?    @db.Uuid
+  /// Buyer who holds or has bought the seat, backing the per-event ticket limit.
+  claimBuyerKey String?
+
+  @@unique([eventId, rowId, number])
+  @@index([eventId, status])
+  @@map("seats")
+  @@schema("public")
 }

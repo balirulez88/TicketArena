@@ -1,6 +1,7 @@
+import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
 import { initTRPC } from "@trpc/server";
 import superjson from "superjson";
-import { parseSessionEnv } from "./env";
+import { parseDatabaseEnv, parseSessionEnv } from "./env";
 import { type CookieReader, createIdentityService, type Principal } from "./identity/identity";
 
 /**
@@ -12,6 +13,19 @@ export interface TRPCContext {
   readonly now: () => Date;
   /** Resolved once per request; procedures never read cookies themselves (ADR 0012). */
   readonly principal: Principal;
+  readonly db: PrismaClient;
+}
+
+// One client per server process: the Neon driver pools internally, and a fresh client per
+// request would open a new connection pool on every call.
+let sharedDb: PrismaClient | undefined;
+
+function database(): PrismaClient {
+  sharedDb ??= createPrismaClient({
+    connectionString: parseDatabaseEnv(process.env).DATABASE_URL,
+    driver: "neon",
+  });
+  return sharedDb;
 }
 
 export async function createTRPCContext({ req }: { req: Request }): Promise<TRPCContext> {
@@ -19,7 +33,7 @@ export async function createTRPCContext({ req }: { req: Request }): Promise<TRPC
     sessionSecret: parseSessionEnv(process.env).SESSION_SECRET,
   });
   const principal = await identity.resolve(cookieReader(req.headers.get("cookie")));
-  return { now: () => new Date(), principal };
+  return { now: () => new Date(), principal, db: database() };
 }
 
 // Parsed by hand: the tRPC fetch adapter hands us a plain Request, not Next's cookie store, and

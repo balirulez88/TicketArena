@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ticketarena/db": "workspace:*",
     "@tanstack/react-query": "5.105.0",
     "@trpc/client": "11.19.0",
     "@trpc/server": "11.19.0",
@@ -27,6 +28,7 @@
     "zustand": "5.0.16"
   },
   "devDependencies": {
+    "@ticketarena/test-infra": "workspace:*",
     "@tailwindcss/postcss": "4.3.3",
     "@types/node": "26.6.5",
     "@types/react": "19.3.0",

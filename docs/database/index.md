@@ -20,11 +20,25 @@
 
 ## Tables
 
-| Table           | Purpose                                                             |
-| --------------- | ------------------------------------------------------------------- |
-| `outbox_events` | Transactional outbox: integration events written in the business TX |
+All tables live in the `public` schema (`multiSchema` with `schemas = ["public"]`; every model and
+enum carries `@@schema("public")`).
 
-Domain tables are deliberately absent until the spec defines them.
+| Table           | Purpose                                                                                        |
+| --------------- | ---------------------------------------------------------------------------------------------- |
+| `outbox_events` | Transactional outbox: integration events written in the business TX                            |
+| `venues`        | Seeded venues                                                                                  |
+| `sections`      | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                   |
+| `rows`          | Row label within a section                                                                     |
+| `events`        | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                        |
+| `seats`         | **Per event** seat: `status` `AVAILABLE\|HELD\|IN_CHECKOUT\|SOLD`, `holdId?`, `claimBuyerKey?` |
+
+Catalog data is seeded, never edited through the API. `seedCatalog(prisma, now)`
+(`packages/db/src/seed.ts`, run with `pnpm --filter @ticketarena/db db:seed`) only inserts
+missing rows, so re-running it keeps seat state. Seats are unique on `(eventId, rowId, number)`
+and indexed on `(eventId, status)`.
+
+Catalog API (`apps/web`): `events.list`, `events.get`, `seats.map`. Inputs and outputs are zod
+validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.
 
 ### `outbox_events`
 

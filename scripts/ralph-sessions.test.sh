@@ -12,6 +12,9 @@ readonly SOURCE_ROOT
 WORK="$(mktemp -d)"
 readonly WORK
 trap 'rm -rf "${WORK}"' EXIT
+# Sessions killed on purpose below never remove their config dirs; keep them inside WORK.
+mkdir -p "${WORK}/tmp"
+export TMPDIR="${WORK}/tmp"
 failures=0
 
 mkdir -p "${WORK}/bin"

@@ -408,9 +408,12 @@ fresh_session() {
   config="$(mktemp -d "${TMPDIR:-/tmp}/ralph-session.XXXXXX")"
   [[ "${argv[0]##*/}" == claude ]] && argv+=(--session-id "${session}")
   ((seconds > 0)) && argv=(timeout "${seconds}" "${argv[@]}")
-  local started record outcome=ok
-  started="$(date -u +%FT%TZ)"
-  record="${LOG_DIR}/sessions/$(date -u +%Y%m%dT%H%M%S%N)-${session}.tsv"
+  local stamp started record outcome=ok
+  # One clock reading names the record and fills its start column, so the merged order and the
+  # start times can never disagree.
+  stamp="$(date -u +%Y%m%dT%H%M%S%N)"
+  started="${stamp:0:4}-${stamp:4:2}-${stamp:6:2}T${stamp:9:2}:${stamp:11:2}:${stamp:13:2}Z"
+  record="${LOG_DIR}/sessions/${stamp}-${session}.tsv"
   mkdir -p "${record%/*}"
   # Recorded before launch, so a session whose harness dies still has its record (`running`).
   session_record "${record}" "${started}" "${label}" "${session}" running - -

@@ -5,6 +5,7 @@ const validEnv = {
   DATABASE_URL: "postgresql://user:pass@db.example.com/ticketarena?sslmode=require",
   UPSTASH_REDIS_REST_URL: "https://example.upstash.io",
   UPSTASH_REDIS_REST_TOKEN: "token",
+  SESSION_SECRET: "s".repeat(32),
 };
 
 describe("parseServerEnv", () => {
@@ -20,6 +21,17 @@ describe("parseServerEnv", () => {
   test("rejects a database URL that is not Postgres", () => {
     expect(() => parseServerEnv({ ...validEnv, DATABASE_URL: "mysql://db.example.com/x" })).toThrow(
       /DATABASE_URL/,
+    );
+  });
+
+  test("names SESSION_SECRET when it is missing", () => {
+    const { SESSION_SECRET: _omitted, ...incomplete } = validEnv;
+    expect(() => parseServerEnv(incomplete)).toThrow(/SESSION_SECRET/);
+  });
+
+  test("names SESSION_SECRET when it is shorter than 32 bytes", () => {
+    expect(() => parseServerEnv({ ...validEnv, SESSION_SECRET: "short" })).toThrow(
+      /SESSION_SECRET/,
     );
   });
 });

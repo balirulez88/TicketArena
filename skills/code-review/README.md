@@ -63,3 +63,8 @@ claude -p --restricted --strict-mcp-config --tools=Read,Grep,Glob \
 
 The report is in the result's `structured_output`. Treat a failed run, an error result or an
 invalid report as a failed review, never as an approval.
+
+Keep the changeset file inside the reviewer's working directory: read-only modes such as
+`--restricted` confine file access to it. To prove the reviewer actually read the changeset, end
+the file with a random `review-token: <value>` line and reject any report whose
+`changeset_token` differs.

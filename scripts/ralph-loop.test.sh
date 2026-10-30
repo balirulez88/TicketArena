@@ -27,14 +27,21 @@ esac
 exit 0
 EOF
 
-# Reviewer stub: prints a Claude Code JSON result per STUB_REVIEW. The axis is read from the
-# prompt (last argument), the way a real reviewer learns it.
+# Reviewer stub: prints a Claude Code JSON result per STUB_REVIEW. Like a real reviewer it learns
+# its axis and the changeset file from the prompt (last argument), and like `--restricted` it can
+# only open files inside its working directory; the token it echoes proves it read the file.
 cat >"${WORK}/reviewer.sh" <<'EOF'
 #!/usr/bin/env bash
 prompt="${*: -1}"
 axis=spec
 [[ "${prompt}" == *"Standards sub-agent"* ]] && axis=standards
 echo "${axis}" >>"${STUB_CALLS}"
+changeset="$(sed -n 's/^- Changeset file: //p' <<<"${prompt}")"
+token=""
+if [[ -n "${changeset}" && "$(realpath -m "${changeset}")" == "$(pwd -P)"/* && -f "${changeset}" ]]; then
+  token="$(sed -n 's/^review-token: //p' "${changeset}")"
+fi
+[[ "${STUB_REVIEW}" == noread ]] && token=""
 finding() {
   printf '{"severity":"%s","file":"feature.txt","line":1,"rule":"r","title":"t","problem":"p","impact":"i","recommendation":"fix it"}' "$1"
 }
@@ -53,8 +60,8 @@ case "${STUB_REVIEW}:${axis}" in
   critical:spec) findings="$(finding CRITICAL)" ;;
   bug:standards) [[ -f bug.txt ]] && findings="$(finding HIGH)" ;;
 esac
-printf '{"type":"result","subtype":"success","is_error":false,"structured_output":{"axis":"%s","status":"%s","summary":"ok","findings":[%s]}}\n' \
-  "${axis}" "${status}" "${findings}"
+printf '{"type":"result","subtype":"success","is_error":false,"structured_output":{"axis":"%s","status":"%s","summary":"ok","changeset_token":"%s","findings":[%s]}}\n' \
+  "${axis}" "${status}" "${token}" "${findings}"
 EOF
 
 new_repo() {
@@ -118,7 +125,9 @@ scenario() {
     check "harness exits 0" "[[ ${code} == 0 ]]"
     check "slice merged into main" "merged '${dir}'"
     check "ticket done on main" "[[ \$(status_on_main '${dir}') == done ]]"
-    check "review report logged" "ls '${dir}'/.ralph/logs/*/01-demo.review-*.md >/dev/null 2>&1"
+    check "review report logged" \
+      "compgen -G '${dir}/.ralph/logs/*/01-demo.review-*.md' >/dev/null ||
+        compgen -G '${dir}.logs/*/01-demo.review-*.md' >/dev/null"
     check "no defect on main" "! git -C '${dir}' cat-file -e main:bug.txt 2>/dev/null"
   else
     check "harness exits non-zero" "[[ ${code} != 0 ]]"
@@ -144,6 +153,10 @@ scenario garbage-report-is-not-approval reject 2 STUB_REVIEW=garbage RALPH_MAX_R
 scenario error-result-is-not-approval reject 2 STUB_REVIEW=error RALPH_MAX_REVIEW_ROUNDS=1
 scenario skipped-axis-is-not-approval reject 2 STUB_REVIEW=skip RALPH_MAX_REVIEW_ROUNDS=1
 scenario tampering-reviewer-is-not-approval reject 2 STUB_REVIEW=tamper RALPH_MAX_REVIEW_ROUNDS=1
+scenario unread-changeset-is-not-approval reject 2 STUB_REVIEW=noread RALPH_MAX_REVIEW_ROUNDS=1
+# As in the sandbox: logs outside the workspace must not take the changeset out of reach.
+scenario logs-outside-workspace-still-reviewed merge 2 STUB_REVIEW=clean \
+  RALPH_LOG_ROOT="${WORK}/logs-outside-workspace-still-reviewed.logs"
 
 tamper_dir="${WORK}/tampering-reviewer-is-not-approval"
 echo "tampering reviewer leaves no trace:"

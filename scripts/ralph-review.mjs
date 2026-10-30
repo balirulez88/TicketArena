@@ -8,7 +8,7 @@
 //   2  invalid:  a reviewer failed or returned an invalid report; NEVER an approval
 //
 // Usage: node scripts/ralph-review.mjs --standards <file> --spec <file> --report <file>
-//          --feedback <file> [--block CRITICAL,HIGH]
+//          --feedback <file> [--block CRITICAL,HIGH] [--token <changeset token>]
 //        node scripts/ralph-review.mjs --check-block <severities>   (validate a policy only)
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -70,7 +70,7 @@ function findingErrors(finding, index) {
 
 // Mirrors skills/code-review/report.schema.json. Validated again here because the schema is
 // only a request to the agent; the gate must not trust that it was honoured.
-export function validateReport(report, expectedAxis) {
+export function validateReport(report, expectedAxis, token) {
   if (report === null || typeof report !== "object") {
     return ["report is not an object"];
   }
@@ -85,6 +85,11 @@ export function validateReport(report, expectedAxis) {
   }
   if (!isNonEmptyString(report.summary)) {
     errors.push("summary must be a non-empty string");
+  }
+  // The token is the changeset file's last line and appears nowhere else, so echoing it proves the
+  // reviewer opened the changeset and read it to the end, instead of reviewing other files.
+  if (token !== undefined && report.changeset_token !== token) {
+    errors.push("changeset_token does not match: the reviewer did not read the whole changeset");
   }
   if (Array.isArray(report.findings)) {
     for (const [index, finding] of report.findings.entries()) {
@@ -147,7 +152,7 @@ function countLine(result) {
 
 // Each axis is judged and rendered on its own; findings are never merged or reranked across axes
 // (see "Why two axes" in skills/code-review/SKILL.md).
-export function evaluate({ standardsOutput, specOutput, blocking }) {
+export function evaluate({ standardsOutput, specOutput, blocking, token }) {
   const results = {};
   for (const [axis, output] of [
     ["standards", standardsOutput],
@@ -156,7 +161,7 @@ export function evaluate({ standardsOutput, specOutput, blocking }) {
     const extracted = extractReport(output);
     results[axis] = extracted.error
       ? { errors: [extracted.error] }
-      : { report: extracted.report, errors: validateReport(extracted.report, axis) };
+      : { report: extracted.report, errors: validateReport(extracted.report, axis, token) };
   }
 
   const invalid = AXES.some((axis) => results[axis].errors.length > 0);
@@ -201,6 +206,7 @@ function main() {
       feedback: { type: "string" },
       block: { type: "string", default: "CRITICAL,HIGH" },
       "check-block": { type: "string" },
+      token: { type: "string" },
     },
   });
   if (values["check-block"] !== undefined) {
@@ -223,6 +229,7 @@ function main() {
     standardsOutput: readOutput(values.standards),
     specOutput: readOutput(values.spec),
     blocking: parseBlocking(values.block),
+    token: values.token,
   });
   writeFileSync(values.report, `${result.report}\n`);
   writeFileSync(values.feedback, result.feedback);

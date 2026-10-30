@@ -49,9 +49,17 @@ esac
 EOF
   cat >"${dir}/stub/reviewer.sh" <<'EOF'
 #!/usr/bin/env bash
+# Reads the changeset the way the restricted reviewer must: by the prompt's path, inside the
+# workspace. Without the token the review would be invalid, not BLOCKED.
+prompt="${*: -1}"
 axis=spec
-[[ "${*: -1}" == *"Standards sub-agent"* ]] && axis=standards
-printf '{"type":"result","subtype":"success","is_error":false,"structured_output":{"axis":"%s","status":"reviewed","summary":"stub","findings":[{"severity":"HIGH","file":"feature.txt","line":1,"rule":"stub","title":"always blocks","problem":"p","impact":"i","recommendation":"r"}]}}\n' "${axis}"
+[[ "${prompt}" == *"Standards sub-agent"* ]] && axis=standards
+changeset="$(sed -n 's/^- Changeset file: //p' <<<"${prompt}")"
+token=""
+if [[ "$(realpath -m "${changeset}")" == "$(pwd -P)"/* && -f "${changeset}" ]]; then
+  token="$(sed -n 's/^review-token: //p' "${changeset}")"
+fi
+printf '{"type":"result","subtype":"success","is_error":false,"structured_output":{"axis":"%s","status":"reviewed","summary":"stub","changeset_token":"%s","findings":[{"severity":"HIGH","file":"feature.txt","line":1,"rule":"stub","title":"always blocks","problem":"p","impact":"i","recommendation":"r"}]}}\n' "${axis}" "${token}"
 EOF
 
   git -C "${dir}" init --quiet --initial-branch=main

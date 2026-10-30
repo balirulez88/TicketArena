@@ -8,6 +8,7 @@
     "axis": { "type": "string", "enum": ["standards", "spec"] },
     "status": { "type": "string", "enum": ["reviewed", "skipped"] },
     "summary": { "type": "string", "minLength": 1 },
+    "changeset_token": { "type": "string" },
     "findings": {
       "type": "array",
       "items": {

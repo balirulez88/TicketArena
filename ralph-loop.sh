@@ -376,8 +376,11 @@ its non-interactive mode, reviewing ticket ${ticket}. Read that skill file first
 brief for the ${axis^} axis. You run in a fresh context, independent of the other axis.
 
 - Fixed point: ${BASE_BRANCH} ($(git rev-parse --short "${BASE_BRANCH}")). The complete candidate
-  changeset is committed on HEAD; \`git diff ${BASE_BRANCH}...HEAD\` is saved in full at
-  ${diff_file#"${REPO_ROOT}/"}. Read it, then read whatever surrounding code you need.
+  changeset is committed on HEAD; \`git diff ${BASE_BRANCH}...HEAD\` is saved in full in the
+  changeset file below. Read all of it, then whatever surrounding code you need.
+- Changeset file: ${diff_file#"${REPO_ROOT}/"}
+  Its last line is \`review-token: <value>\`; put that value in \`changeset_token\`. If you
+  cannot open the file, review nothing else: say so in the summary and leave the token empty.
 - Commits: $(git log --oneline "${BASE_BRANCH}..HEAD" | tr '\n' ';')
 - Spec: the ticket ${ticket} and the spec and ADRs it references.
 - Standards: discover the sources as the skill describes, starting from CLAUDE.md.
@@ -399,7 +402,7 @@ run_reviewer() {
 # One review round over the committed changeset. Returns the review gate's verdict:
 # 0 approved, 1 blocked (findings in REVIEW_FEEDBACK), 2 invalid.
 run_review() {
-  local ticket=$1 round=$2 slug prefix head verdict=0
+  local ticket=$1 round=$2 slug prefix head diff_file token verdict=0
   slug="$(ticket_slug "${ticket}")"
   prefix="${LOG_DIR}/${slug}.review-${round}"
   head="$(git rev-parse HEAD)"
@@ -410,16 +413,23 @@ run_review() {
     log "  review: the working tree is not clean before the review"
     return 2
   fi
-  git diff "${BASE_BRANCH}...HEAD" >"${prefix}.diff"
-  if [[ ! -s "${prefix}.diff" ]]; then
+  # The changeset goes inside the workspace (git-ignored): read-only reviewers are confined to it,
+  # while LOG_DIR may be outside (the sandbox mounts the host's logs). A copy stays in the logs.
+  diff_file="${REPO_ROOT}/.ralph/review/${RUN_ID}/${slug}.review-${round}.diff"
+  mkdir -p "${diff_file%/*}"
+  git diff "${BASE_BRANCH}...HEAD" >"${diff_file}"
+  if [[ ! -s "${diff_file}" ]]; then
     log "  review: the changeset is empty"
     return 2
   fi
+  token="$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')"
+  printf '\nreview-token: %s\n' "${token}" >>"${diff_file}"
+  cp "${diff_file}" "${prefix}.diff"
 
   log "  review round ${round}/${MAX_REVIEW_ROUNDS}: Standards and Spec reviewers in parallel"
-  run_reviewer standards "${ticket}" "${prefix}.diff" "${prefix}.standards.json" &
+  run_reviewer standards "${ticket}" "${diff_file}" "${prefix}.standards.json" &
   local standards_pid=$!
-  run_reviewer spec "${ticket}" "${prefix}.diff" "${prefix}.spec.json" &
+  run_reviewer spec "${ticket}" "${diff_file}" "${prefix}.spec.json" &
   local spec_pid=$!
   wait "${standards_pid}" "${spec_pid}"
 
@@ -433,7 +443,7 @@ run_review() {
     return 2
   fi
 
-  node "${REVIEW_GATE}" --block "${REVIEW_BLOCKING}" \
+  node "${REVIEW_GATE}" --block "${REVIEW_BLOCKING}" --token "${token}" \
     --standards "${prefix}.standards.json" --spec "${prefix}.spec.json" \
     --report "${prefix}.md" --feedback "${REVIEW_FEEDBACK}" 2>>"${LOG_DIR}/${slug}.review.log" ||
     verdict=$?

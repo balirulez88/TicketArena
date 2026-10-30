@@ -118,6 +118,36 @@ describe("ralph review gate", () => {
     }
   });
 
+  describe("with a changeset token", () => {
+    const TOKEN = "3f9a0c1d2e4b5a69";
+    const withToken = (axis, changesetToken) =>
+      envelope({ ...report(axis), changeset_token: changesetToken });
+    const runWithToken = (standards, spec) =>
+      evaluate({ standardsOutput: standards, specOutput: spec, blocking: BLOCKING, token: TOKEN });
+
+    it("approves when both reviewers echo the token", () => {
+      const result = runWithToken(withToken("standards", TOKEN), withToken("spec", TOKEN));
+      assert.equal(result.verdict, "approved");
+    });
+
+    it("never approves a reviewer that did not read the changeset", () => {
+      const missing = runWithToken(envelope(report("standards")), withToken("spec", TOKEN));
+      const wrong = runWithToken(withToken("standards", TOKEN), withToken("spec", "guessed"));
+      for (const result of [missing, wrong]) {
+        assert.equal(result.verdict, "invalid");
+        assert.match(result.report, /did not read the whole changeset/);
+      }
+    });
+
+    it("does not let blocking findings hide an unread changeset", () => {
+      const result = runWithToken(
+        envelope({ ...report("standards", [finding("HIGH")]) }),
+        withToken("spec", TOKEN),
+      );
+      assert.equal(result.verdict, "invalid");
+    });
+  });
+
   it("accepts a bare report from a non-Claude reviewer", () => {
     const result = run(JSON.stringify(report("standards")), JSON.stringify(report("spec")));
     assert.equal(result.verdict, "approved");

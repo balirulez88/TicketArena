@@ -23,15 +23,17 @@
 All tables live in the `public` schema (`multiSchema` with `schemas = ["public"]`; every model and
 enum carries `@@schema("public")`).
 
-| Table           | Purpose                                                                                                   |
-| --------------- | --------------------------------------------------------------------------------------------------------- |
-| `outbox_events` | Transactional outbox: integration events written in the business TX                                       |
-| `venues`        | Seeded venues                                                                                             |
-| `sections`      | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                              |
-| `rows`          | Row label within a section                                                                                |
-| `events`        | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                   |
-| `seats`         | **Per event** seat: `status` `AVAILABLE\|HELD\|IN_CHECKOUT\|SOLD`, `holdId?`, `claimBuyerKey?`            |
-| `holds`         | A buyer's hold: `buyerKey`, `status` `HELD\|ORDERED\|RELEASED\|EXPIRED`, `holdExpiresAt`, `correlationId` |
+| Table           | Purpose                                                                                                      |
+| --------------- | ------------------------------------------------------------------------------------------------------------ |
+| `outbox_events` | Transactional outbox: integration events written in the business TX                                          |
+| `venues`        | Seeded venues                                                                                                |
+| `sections`      | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                 |
+| `rows`          | Row label within a section                                                                                   |
+| `events`        | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                      |
+| `seats`         | **Per event** seat: `status` `AVAILABLE\|HELD\|IN_CHECKOUT\|SOLD`, `holdId?`, `claimBuyerKey?`               |
+| `holds`         | A buyer's hold: `buyerKey`, `status` `HELD\|ORDERED\|RELEASED\|EXPIRED`, `holdExpiresAt`, `correlationId`    |
+| `orders`        | One per hold: contact, `totalMinor`, `status`, fixed `paymentDeadline`, unique `(sessionId, idempotencyKey)` |
+| `order_lines`   | Seat prices copied at placement                                                                              |
 
 Catalog data is seeded, never edited through the API. `seedCatalog(prisma, now)`
 (`packages/db/src/seed.ts`, run with `pnpm --filter @ticketarena/db db:seed`) only inserts
@@ -45,6 +47,19 @@ row (`holdExpiresAt = T + 10 min`, fresh `correlationId`), the seat set `HELD`, 
 row in `outbox_events` whose `payload` is the full event envelope and whose `id` is the envelope
 `id`. A seat that is not `AVAILABLE` fails with `SEAT_UNAVAILABLE` (tRPC `CONFLICT`) naming its id.
 No SQL `now()`; the `Clock` is injected.
+
+Orders: `booking.placeOrder` (no admission required) and `booking.getOrder` (owner only, else
+`NOT_FOUND`). `placeOrder` runs one transaction with the lock order hold `FOR UPDATE`, seats
+`ORDER BY id FOR UPDATE`, then `T = clock.now()`. It requires a `HELD` hold owned by the caller's
+`BuyerKey` (else `NOT_FOUND`), `T < holdExpiresAt` (else `HOLD_EXPIRED`, tRPC
+`PRECONDITION_FAILED`) and every seat still `HELD` with this `holdId`; the expected seat set is
+read from the hold's `seat.held` outbox event, so a seat that lost its `holdId` fails with
+`SEAT_UNAVAILABLE`. It then writes the `orders`
+row (`PENDING_PAYMENT`, `paymentDeadline = T + 5 min`, the hold's `correlationId`) with
+`order_lines` copying seat prices, sets the hold `ORDERED` and seats `IN_CHECKOUT`, and writes an
+`order.placed` outbox row. Idempotency: a repeated `(sessionId, idempotencyKey)` returns the
+stored order; the same key with a different `requestHash` (hold + contact) fails with a
+`CONFLICT`. `holdId` is unique on `orders`, so a hold yields at most one order.
 
 Catalog API (`apps/web`): `events.list`, `events.get`, `seats.map`. Inputs and outputs are zod
 validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.

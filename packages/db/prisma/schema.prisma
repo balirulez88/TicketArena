@@ -1,4 +1,4 @@
-// Domain models arrive slice by slice under TDD. Order and payment tables are still to come.
+// Domain models arrive slice by slice under TDD. Payment tables are still to come.
 
 generator client {
   provider = "prisma-client"
@@ -153,8 +153,58 @@ model Hold {
   holdExpiresAt DateTime   @db.Timestamptz(3)
   correlationId String     @db.Uuid
   seats         Seat[]
+  order         Order?
 
   @@index([eventId, buyerKey])
   @@map("holds")
+  @@schema("public")
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  CANCELLED
+  EXPIRED
+
+  @@schema("public")
+}
+
+/// A buyer's checkout of one hold. `paymentDeadline` is fixed at placement and never extended.
+/// `(sessionId, idempotencyKey)` makes `placeOrder` retry-safe (ADR 0007); `requestHash`
+/// detects a key reused for a different request. `holdId` is unique: one order per hold.
+model Order {
+  id              String      @id @default(uuid()) @db.Uuid
+  holdId          String      @unique @db.Uuid
+  hold            Hold        @relation(fields: [holdId], references: [id])
+  sessionId       String
+  buyerKey        String
+  contactEmail    String
+  contactPhone    String?
+  totalMinor      Int
+  currency        String
+  status          OrderStatus @default(PENDING_PAYMENT)
+  paymentDeadline DateTime    @db.Timestamptz(3)
+  idempotencyKey  String
+  requestHash     String
+  correlationId   String      @db.Uuid
+  createdAt       DateTime    @db.Timestamptz(3)
+  lines           OrderLine[]
+
+  @@unique([sessionId, idempotencyKey])
+  @@map("orders")
+  @@schema("public")
+}
+
+/// Price and currency are copied at placement so later catalog changes never alter an order.
+model OrderLine {
+  id         String @id @default(uuid()) @db.Uuid
+  orderId    String @db.Uuid
+  order      Order  @relation(fields: [orderId], references: [id])
+  seatId     String @db.Uuid
+  priceMinor Int
+  currency   String
+
+  @@unique([orderId, seatId])
+  @@map("order_lines")
   @@schema("public")
 }

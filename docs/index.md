@@ -36,15 +36,15 @@ capacity by orders of magnitude within seconds. The system must:
 The diagram shows the target of the [MVP spec](specs/ticketarena-mvp.md); "What exists today"
 below shows what is built.
 
-| Area                | Status         | Map                                    |
-| ------------------- | -------------- | -------------------------------------- |
-| Monorepo & modules  | scaffolded     | [architecture/](architecture/index.md) |
-| Database & Prisma   | catalog, holds | [database/](database/index.md)         |
-| Async messaging     | designed       | [messaging/](messaging/index.md)       |
-| Agent workflow & CI | operational    | [workflow/](workflow/index.md)         |
-| Decisions (ADRs)    | 13 accepted    | [adr/](adr/index.md)                   |
-| Feature specs       | MVP ready      | [specs/](specs/index.md)               |
-| Domain vocabulary   | seeded         | [glossary.md](glossary.md)             |
+| Area                | Status                 | Map                                    |
+| ------------------- | ---------------------- | -------------------------------------- |
+| Monorepo & modules  | scaffolded             | [architecture/](architecture/index.md) |
+| Database & Prisma   | catalog, holds, orders | [database/](database/index.md)         |
+| Async messaging     | designed               | [messaging/](messaging/index.md)       |
+| Agent workflow & CI | operational            | [workflow/](workflow/index.md)         |
+| Decisions (ADRs)    | 13 accepted            | [adr/](adr/index.md)                   |
+| Feature specs       | MVP ready              | [specs/](specs/index.md)               |
+| Domain vocabulary   | seeded                 | [glossary.md](glossary.md)             |
 
 ## What exists today
 
@@ -57,10 +57,11 @@ below shows what is built.
 - `packages/db`: Prisma 7 on the Neon serverless adapter; the `outbox_events` table and the seeded catalog (venues, sections, rows, events,
   per-event seats). `events.list`, `events.get` and `seats.map` serve it. The `holds` table backs
   `booking.holdSeats` / `booking.getHold` (`packages/booking`), which write a `seat.held` outbox
-  event; envelope schemas live in `packages/contracts`.
+  event; `orders` and `order_lines` back `booking.placeOrder` / `booking.getOrder`, which write
+  `order.placed`; envelope schemas live in `packages/contracts`.
 - Quality gate: Biome (warnings fail), strict `tsc`, Vitest, enforced by `ralph-loop.sh`.
 
-A buyer can hold one seat (no queue yet). Remaining features arrive as tickets split from the
+A buyer can hold one seat and place an order for it (`PENDING_PAYMENT`; no queue or payment yet). Remaining features arrive as tickets split from the
 [MVP spec](specs/ticketarena-mvp.md) by `/to-tickets`.
 
 ## Decisions

@@ -4,13 +4,15 @@
 
 ## Module boundaries
 
-| Workspace     | Responsibility                                                  | Depends on    |
-| ------------- | --------------------------------------------------------------- | ------------- |
-| `apps/web`    | Next.js App Router UI and the tRPC API (the only public entry)  | `packages/db` |
-| `packages/db` | Prisma schema, migrations, client factory over the Neon adapter | (none)        |
+| Workspace            | Responsibility                                                      | Depends on                   |
+| -------------------- | ------------------------------------------------------------------- | ---------------------------- |
+| `apps/web`           | Next.js App Router UI and the tRPC API (the only public entry)      | `db`, `booking`, `contracts` |
+| `packages/db`        | Prisma schema, migrations, client factory over the Neon adapter     | (none)                       |
+| `packages/contracts` | Zod schemas for the event envelope and event payloads (`seat.held`) | (none)                       |
+| `packages/booking`   | `BookingService`: `holdSeats`, `getHold` over Postgres row locks    | `contracts`, `db`            |
 
-Planned (created by tickets, not up front): a waiting-room module (Redis queue logic), a booking
-module (seat state, holds, orders), an outbox relay worker, and payment/notification consumers.
+Planned (created by tickets, not up front): a waiting-room module (Redis queue logic), orders in
+the booking module, an outbox relay worker, and payment/notification consumers.
 New modules are added when a slice needs them, not speculatively.
 
 ## Conventions that shape the code

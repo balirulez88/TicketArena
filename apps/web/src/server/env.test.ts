@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { parseServerEnv } from "./env";
+import { parseServerEnv, parseSessionEnv } from "./env";
 
 const validEnv = {
   DATABASE_URL: "postgresql://user:pass@db.example.com/ticketarena?sslmode=require",
@@ -33,5 +33,17 @@ describe("parseServerEnv", () => {
     expect(() => parseServerEnv({ ...validEnv, SESSION_SECRET: "short" })).toThrow(
       /SESSION_SECRET/,
     );
+  });
+});
+
+describe("parseSessionEnv", () => {
+  test("ignores unrelated missing or invalid variables", () => {
+    expect(
+      parseSessionEnv({ SESSION_SECRET: "s".repeat(32), UPSTASH_REDIS_REST_TOKEN: "" }),
+    ).toEqual({ SESSION_SECRET: "s".repeat(32) });
+  });
+
+  test("names SESSION_SECRET when it is missing", () => {
+    expect(() => parseSessionEnv({})).toThrow(/SESSION_SECRET/);
   });
 });

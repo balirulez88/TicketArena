@@ -9,7 +9,19 @@ const serverEnvSchema = z.object({
     .refine((secret) => new TextEncoder().encode(secret).length >= 32, "must be at least 32 bytes"),
 });
 
+const sessionEnvSchema = serverEnvSchema.pick({ SESSION_SECRET: true });
+
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
+
+type EnvSource = Readonly<Record<string, string | undefined>>;
+
+function parseEnv<T extends z.ZodType>(schema: T, source: EnvSource, label: string): z.output<T> {
+  const result = schema.safeParse(source);
+  if (!result.success) {
+    throw new Error(`Invalid ${label} environment:\n${z.prettifyError(result.error)}`);
+  }
+  return result.data;
+}
 
 /**
  * Validates server configuration at the boundary and fails fast with every problem listed.
@@ -17,10 +29,14 @@ export type ServerEnv = z.infer<typeof serverEnvSchema>;
  * Parsing is an explicit call (not a module-level side effect) so `next build` and unit tests
  * can import server code without a fully populated environment.
  */
-export function parseServerEnv(source: Readonly<Record<string, string | undefined>>): ServerEnv {
-  const result = serverEnvSchema.safeParse(source);
-  if (!result.success) {
-    throw new Error(`Invalid server environment:\n${z.prettifyError(result.error)}`);
-  }
-  return result.data;
+export function parseServerEnv(source: EnvSource): ServerEnv {
+  return parseEnv(serverEnvSchema, source, "server");
+}
+
+/**
+ * Validates only the session configuration, for the proxy, which runs on every page request and
+ * must not fail because of settings it never uses (e.g. the Redis token).
+ */
+export function parseSessionEnv(source: EnvSource): Pick<ServerEnv, "SESSION_SECRET"> {
+  return parseEnv(sessionEnvSchema, source, "session");
 }

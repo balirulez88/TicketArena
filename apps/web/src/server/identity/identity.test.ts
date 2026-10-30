@@ -49,7 +49,7 @@ describe("buyerKey", () => {
     expect(buyerKey({ kind: "guest", sessionId: "abc" })).toBe("abc");
   });
 
-  test("prefers the user id when one is present", () => {
-    expect(buyerKey({ kind: "guest", sessionId: "abc", userId: "u1" })).toBe("u1");
+  test("is the user id for a user", () => {
+    expect(buyerKey({ kind: "user", sessionId: "abc", userId: "u1" })).toBe("u1");
   });
 });

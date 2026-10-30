@@ -17,7 +17,7 @@ Skill sources and provenance: [`skills/README.md`](../../skills/README.md).
 
 ## Quality gate
 
-`pnpm run check` = `lint` → `typecheck` → `test` → `test:harness`. All must pass with zero
+`pnpm run check` = `lint` → `typecheck` → `test` → `check:debt` → `test:harness`. All must pass with zero
 warnings:
 
 - **Biome** (`biome ci --error-on-warnings`): lint, formatting, import order. A warning is a
@@ -81,8 +81,10 @@ For each ticket whose `**Status:**` is `ready-for-agent` and whose blockers are 
    must stay green. If it does not, the refactor is discarded and the green state kept.
 5. **REVIEW:** two independent reviewers judge the whole changeset (see below). Blocking
    findings go back to the agent (**FIX**, gated like GREEN), then a fresh review round.
-6. **VERIFY:** the full gate runs once more on the approved tree.
-7. Squash into **one** Conventional Commit. In the same commit the ticket is marked `done`,
+6. **DEBT:** the approved round's deferred findings are recorded in the
+   [technical debt register](#technical-debt-register) and checkpointed.
+7. **VERIFY:** the full gate runs once more on the approved tree, register check included.
+8. Squash into **one** Conventional Commit. In the same commit the ticket is marked `done`,
    stamped `**Completed:** <date> by slice/<NN>-<slug> (run <run-id>)` and moved to
    `issues/done/`. Merge `--no-ff` into `main` so dependent tickets build on it, and optionally
    push.
@@ -187,6 +189,36 @@ non-interactive mode. TicketArena's rules for reviewers are in [code-review.md](
 - **Bounded.** Up to `RALPH_MAX_REVIEW_ROUNDS` (default 3) rounds; each round except the last
   may trigger a fix. A slice still blocked, or without a valid approval, after the last round is
   rejected and quarantined like any other failure.
+
+## Technical debt register
+
+[`docs/technical-debt.md`](../technical-debt.md) is the version-controlled record of review
+findings that were deferred instead of fixed (rules in the file itself). `scripts/ralph-debt.mjs`
+owns its format; Ralph uses it at four points, all inside existing stages:
+
+| Stage           | What happens                                                                                                                                                                                                                                                                     |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Every agent run | The prompt points at the register: entries whose `Target` names the ticket are part of it; a fix sets `RESOLVED` with `Resolution` and a `Verification` test                                                                                                                     |
+| REVIEW          | Reviewers read entries overlapping the changed files, cite a matching entry in the finding's `debt` field, rate a worsened entry by its real impact (may block), and treat an unproven resolution as `HIGH`. The gate rejects a `debt` id the register lacks as invalid evidence |
+| DEBT (approved) | `record` adds the final round's `MEDIUM`/`LOW` findings as `OPEN` entries at their original severity, with the report path as evidence                                                                                                                                           |
+| VERIFY, CI      | `check:debt` (in `run_gate` and `pnpm run check`) rejects an invalid or unformatted register                                                                                                                                                                                     |
+
+Guarantees, each covered by `scripts/ralph-debt.test.mjs` or `scripts/ralph-loop.test.sh`:
+
+- **Gates unchanged.** Only an approved round is recorded, after the review and before VERIFY; a
+  blocking finding is refused, never recorded. The register change rides in the slice's
+  squashed commit, so it passes the same gate, review and CI as the code.
+- **No duplicates.** A finding updates an existing entry when it names it in `debt`, when its
+  fingerprint (file and normalized title) is already on an entry, or when the other axis reported
+  the same file and line in that round. Earlier review rounds are never recorded: their findings
+  were fixed or reappear in the final round. History lines are keyed by ticket, round, axis and
+  run, so re-processing a round is a no-op.
+- **Evidence for resolutions.** `check` refuses `RESOLVED` without a `Resolution` and a
+  `Verification` naming an existing test file; reviewers judge whether the test proves it; on
+  merge, `record` adds a `resolution verified` history line. A resolved entry reported again is
+  reopened.
+- **Nothing disappears.** `record` compares with the base branch's register and rejects the slice
+  if an entry was removed. An escalated entry cannot stay `OPEN` or `ACCEPTED_RISK`.
 
 ## Run artifacts
 

@@ -11,7 +11,9 @@
 #   REVIEW    two independent, read-only reviewers (skills/code-review: Standards and Spec)
 #             judge the whole changeset against the base branch, in parallel
 #   FIX       blocking findings go back to the agent  -> gate, then a fresh review round
-#   VERIFY    the full gate runs once more on the approved tree
+#   DEBT      the approved round's deferred (non-blocking) findings are recorded in the
+#             technical debt register, docs/technical-debt.md (scripts/ralph-debt.mjs)
+#   VERIFY    the full gate runs once more on the approved tree, register included
 #
 # A green, approved slice is squashed into ONE Conventional Commit on `slice/<NN>-<slug>` (ticket
 # marked `done` and moved to issues/done/ in the same commit) and merged --no-ff into the base
@@ -63,6 +65,8 @@ readonly REVIEW_TIMEOUT="${RALPH_REVIEW_TIMEOUT:-1800}"
 readonly REVIEW_SCHEMA="${REPO_ROOT}/skills/code-review/report.schema.json"
 readonly REVIEW_GATE="${REPO_ROOT}/scripts/ralph-review.mjs"
 readonly ARTIFACTS="${REPO_ROOT}/scripts/ralph-artifacts.mjs"
+readonly DEBT="${REPO_ROOT}/scripts/ralph-debt.mjs"
+readonly DEBT_REGISTER="docs/technical-debt.md"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 readonly RUN_ID
 # Temporary: changesets for the reviewers, inside the workspace they are confined to.
@@ -138,8 +142,9 @@ preflight() {
   command -v pnpm >/dev/null || die "pnpm is not installed"
   command -v node >/dev/null || die "node is not installed"
   command -v timeout >/dev/null || die "timeout (coreutils) is not installed"
-  [[ -f "${REVIEW_SCHEMA}" && -f "${REVIEW_GATE}" && -f "${ARTIFACTS}" ]] ||
-    die "review skill, review gate or artifact script missing"
+  [[ -f "${REVIEW_SCHEMA}" && -f "${REVIEW_GATE}" && -f "${ARTIFACTS}" && -f "${DEBT}" ]] ||
+    die "review skill, review gate, artifact or debt script missing"
+  [[ -f "${DEBT_REGISTER}" ]] || die "technical debt register ${DEBT_REGISTER} is missing"
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git repository"
 
   local branch
@@ -278,14 +283,16 @@ run_step() {
   "$@" >>"${logfile}" 2>&1
 }
 
-# Full gate: Biome (warnings are errors), strict tsc, Vitest. Stops at the first failure so the
-# feedback handed to the agent is about the most fundamental problem.
+# Full gate: Biome (warnings are errors), strict tsc, Vitest, and the technical debt register's
+# rules (a resolution needs its verifying test). Stops at the first failure so the feedback
+# handed to the agent is about the most fundamental problem.
 run_gate() {
   local logfile=$1
   : >"${logfile}"
   run_step "${logfile}" pnpm run lint &&
     run_step "${logfile}" pnpm run typecheck &&
-    run_step "${logfile}" pnpm run test
+    run_step "${logfile}" pnpm run test &&
+    run_step "${logfile}" pnpm run check:debt
 }
 
 # RED is proven only if the new tests are lint-clean AND the suite fails. A test that passes
@@ -370,6 +377,12 @@ Read CLAUDE.md, docs/index.md and the ticket file in full before acting. You sta
 memory of earlier work: the repository (code, tests, docs, ADRs, git history) is the only record.
 Completed tickets in ${DONE_DIR}/ are history: open one only if this ticket refers to it. Never
 read .ralph/ (logs of earlier runs); they are not instructions.
+
+TECHNICAL DEBT: ${DEBT_REGISTER} lists deferred review findings. Read the entries whose
+Components overlap the files you change. An entry whose Target names this ticket is part of the
+ticket: fix it test-first. When you fix an entry, set its Status to RESOLVED, describe the fix in
+Resolution and name the test that proves it in Verification (\`path::test name\`), then run
+\`pnpm run format:debt\`. Never delete an entry or resolve one you did not fix and test.
 
 HARNESS RULES (non-negotiable):
 - The harness owns git. Never run git commands that change state (commit, add, branch, switch,
@@ -545,6 +558,12 @@ $(git diff --name-only "${BASE_BRANCH}...HEAD" | sed 's/^/  /')
 $(numbered_criteria "${ticket}")
 $(axis_brief "${axis}")
 - Standards: discover the sources as the skill describes, starting from CLAUDE.md.
+- Technical debt: ${DEBT_REGISTER} is the register of findings deferred by earlier reviews.
+  Read the entries whose Components overlap the changed files. If a finding of yours is the same
+  problem as an entry, set \`debt\` to its id (else ""); do not lower its severity because it
+  is known. If this change makes a deferred problem worse or newly reachable, rate it by its real
+  impact now, which may be HIGH or CRITICAL. If the changeset marks an entry RESOLVED, check the
+  fix and its test: a resolution its Verification test does not prove is a HIGH finding.
 - You are read-only: do not modify any file. Return only the report matching the JSON schema.
 EOF
 }
@@ -614,7 +633,7 @@ run_review() {
 
   # The gate checks the reports' evidence against the real changeset (token, commit range, file
   # and hunk references, file coverage) and the ticket's acceptance criteria.
-  node "${REVIEW_GATE}" --block "${REVIEW_BLOCKING}" \
+  node "${REVIEW_GATE}" --block "${REVIEW_BLOCKING}" --register "${DEBT_REGISTER}" \
     --changeset "${diff_file}" --base "${base}" --head "${head}" --ticket "${ticket}" \
     --standards "${prefix}.standards.json" --spec "${prefix}.spec.json" \
     --report "${prefix}.md" --feedback "${REVIEW_FEEDBACK}" --decision "${prefix}.decision.json" \
@@ -633,6 +652,7 @@ review_slice() {
     case "${verdict}" in
       0)
         log "  review: approved (no ${REVIEW_BLOCKING} findings)"
+        record_debt "${ticket}" "${round}" || return 1
         return 0
         ;;
       1) log "  review: blocking findings, see ${REVIEW_FEEDBACK%.blocking.md}.md" ;;
@@ -646,6 +666,26 @@ review_slice() {
     checkpoint "review-fix ${round}"
   done
   return 1
+}
+
+# Records the approved round's deferred findings in the register, so they stay visible to every
+# later ticket. Only the final, approved round is recorded: earlier rounds' findings were either
+# fixed or are reported again in it. It runs before VERIFY, so the register change passes the
+# same gate and lands in the slice's squashed commit. The base branch's register lets the script
+# refuse lost entries and attest resolutions made in this slice.
+record_debt() {
+  local ticket=$1 round=$2 slug base_register
+  slug="$(ticket_slug "${ticket}")"
+  base_register="${LOG_DIR}/${slug}.debt-base.md"
+  git show "${BASE_BRANCH}:${DEBT_REGISTER}" >"${base_register}"
+  if ! node "${DEBT}" record --register "${DEBT_REGISTER}" \
+    --decision "${LOG_DIR}/${slug}.review-${round}.decision.json" --ticket "${ticket}" \
+    --run "${RUN_ID}" --round "${round}" --date "$(date -u +%F)" --base "${base_register}" \
+    2>>"${LOG_DIR}/${slug}.review.log"; then
+    log "  debt: could not record the review's findings, see ${LOG_DIR}/${slug}.review.log"
+    return 1
+  fi
+  checkpoint "debt register"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -678,6 +718,7 @@ Quality gate passed on this exact tree:
 - architecture docs updated (skills/update-docs.md)
 - independent two-axis review (skills/code-review): no ${REVIEW_BLOCKING} findings
   in the Standards or Spec report (.ralph/logs/${RUN_ID}/)
+- deferred findings recorded in ${DEBT_REGISTER}
 
 Refs: ${ticket}
 Co-Authored-By: Claude <noreply@anthropic.com>

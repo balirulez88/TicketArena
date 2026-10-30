@@ -200,7 +200,9 @@ its axis, the fixed point, the changeset, the spec (Spec axis) and a JSON schema
     (the file's own line number on the new side, never a line of the diff file; 0 for the whole
     file), a `kind`, and severity, rule, problem, impact and fix.
     Report missing tests, unverified assumptions and regression risks as findings of those
-    kinds; they are what a green test suite hides.
+    kinds; they are what a green test suite hides. If the project tracks deferred findings
+    (a technical-debt register) and a finding is the same problem as a tracked entry, put the
+    entry's id in `debt`; otherwise leave it empty.
   - `criteria` (Spec axis; empty for Standards): one outcome per acceptance criterion id you
     were given. `met` needs the implementation `evidence` and the `tests` that verify it
     (`path` or `path::test name`); a criterion without a verifying test is `unverifiable`, not

@@ -77,7 +77,8 @@
           "title",
           "problem",
           "impact",
-          "recommendation"
+          "recommendation",
+          "debt"
         ],
         "properties": {
           "severity": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
@@ -105,7 +106,12 @@
           "title": { "type": "string", "minLength": 1 },
           "problem": { "type": "string", "minLength": 1 },
           "impact": { "type": "string", "minLength": 1 },
-          "recommendation": { "type": "string", "minLength": 1 }
+          "recommendation": { "type": "string", "minLength": 1 },
+          "debt": {
+            "type": "string",
+            "pattern": "^(TD-[0-9]{3,})?$",
+            "description": "Id of the tracked technical-debt entry this finding is the same problem as (e.g. TD-004); empty if none or the project tracks no debt."
+          }
         }
       }
     }

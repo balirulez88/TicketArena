@@ -44,6 +44,15 @@ Vitest. Biome and `tsc` already enforce formatting, lint rules and types: do not
   Postgres, Redis and NATS; mocks only at system boundaries (network, time, randomness), never our
   own modules; concurrency claims need a test that actually races.
 
+## Technical debt
+
+[`docs/technical-debt.md`](../technical-debt.md) holds findings earlier reviews deferred. Read
+the entries whose components the change touches. A finding that is the same problem as an entry
+names it in `debt`; knowing about a problem is no reason to rate it lower. A change that makes a
+deferred problem worse or newly reachable is rated by its real impact, which can block the
+merge. An entry the changeset marks `RESOLVED` needs a fix and a test that proves it; a claim
+without one is `HIGH`.
+
 ## Scope
 
 The MVP spec is deliberately small. Extra architecture, features or configurability beyond the

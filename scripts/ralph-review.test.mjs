@@ -474,3 +474,50 @@ describe("blocking policy", () => {
     assert.throws(() => parseBlocking(""), /--block must list severities/);
   });
 });
+
+describe("technical debt references", () => {
+  const withRegister = { ...CONTEXT, debtIds: new Set(["TD-001"]) };
+  const gate = (debt) =>
+    run(
+      envelope(report("standards", { findings: [finding("LOW", { debt })] })),
+      envelope(report("spec")),
+      withRegister,
+    );
+
+  it("accepts a finding that names an entry of the register, or none", () => {
+    assert.equal(gate("TD-001").verdict, "approved");
+    assert.equal(gate("").verdict, "approved");
+    assert.match(gate("TD-001").report, /\*\*Debt:\*\* TD-001/);
+  });
+
+  it("rejects an id the register does not contain as INVALID evidence", () => {
+    assertInvalid(gate("TD-002"), /debt TD-002 is not an entry of the technical debt register/);
+  });
+
+  it("rejects a malformed id", () => {
+    assertInvalid(gate("debt-1"), /debt must be "" or a register id/);
+  });
+
+  it("hands every finding of a valid round to the harness, with its axis", () => {
+    const result = runReports(
+      report("standards", { findings: [finding("MEDIUM")] }),
+      report("spec", { findings: [finding("LOW")] }),
+    );
+    assert.deepEqual(
+      result.decision.findings.map(({ axis, severity }) => [axis, severity]),
+      [
+        ["standards", "MEDIUM"],
+        ["spec", "LOW"],
+      ],
+    );
+  });
+
+  it("hands over no findings from an invalid round", () => {
+    const result = runReports(
+      report("standards", { findings: [finding("MEDIUM")] }),
+      report("spec", { summary: "" }),
+    );
+    assert.equal(result.verdict, "invalid");
+    assert.deepEqual(result.decision.findings, []);
+  });
+});

@@ -14,7 +14,7 @@
 //
 // Usage: node scripts/ralph-review.mjs --standards <file> --spec <file> --changeset <diff>
 //          --base <sha> --head <sha> --report <file> --feedback <file> --decision <file>
-//          --ticket <file> [--block CRITICAL,HIGH]
+//          --ticket <file> [--block CRITICAL,HIGH] [--register docs/technical-debt.md]
 //        node scripts/ralph-review.mjs --check-block <severities>   (validate a policy only)
 //        node scripts/ralph-review.mjs --annotate <git diff file>   (changeset for reviewers)
 
@@ -22,6 +22,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { DEBT_ID, parseRegister } from "./ralph-debt.mjs";
 
 export const SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 export const FINDING_KINDS = [
@@ -217,6 +218,21 @@ function locationError(finding, where, context) {
   return undefined;
 }
 
+// `debt` links a finding to an existing register entry (scripts/ralph-debt.mjs). Like a file
+// reference, an id the register does not contain is evidence that cannot be right.
+function debtErrors(finding, where, context) {
+  if (finding.debt === undefined || finding.debt === "") {
+    return [];
+  }
+  if (typeof finding.debt !== "string" || !DEBT_ID.test(finding.debt)) {
+    return [`${where}.debt must be "" or a register id like TD-001`];
+  }
+  if (context.debtIds && !context.debtIds.has(finding.debt)) {
+    return [`${where}.debt ${finding.debt} is not an entry of the technical debt register`];
+  }
+  return [];
+}
+
 function findingErrors(finding, index, context) {
   const where = `findings[${index}]`;
   if (!isObject(finding)) {
@@ -234,6 +250,7 @@ function findingErrors(finding, index, context) {
       errors.push(`${where}.${field} must be a non-empty string`);
     }
   }
+  errors.push(...debtErrors(finding, where, context));
   if (!Number.isInteger(finding.line) || finding.line < 0) {
     errors.push(`${where}.line must be a non-negative integer`);
   } else if (isNonEmptyString(finding.file)) {
@@ -354,6 +371,7 @@ function renderFinding(finding) {
     `### [${finding.severity}] ${finding.title}`,
     "",
     `- **Where:** \`${finding.file}${finding.line > 0 ? `:${finding.line}` : ""}\` (${finding.kind})`,
+    ...(finding.debt ? [`- **Debt:** ${finding.debt}`] : []),
     `- **Rule:** ${finding.rule}`,
     `- **Problem:** ${finding.problem}`,
     `- **Impact:** ${finding.impact}`,
@@ -481,6 +499,13 @@ export function evaluate({ standardsOutput, specOutput, blocking, context }) {
     blocking,
     errors: { standards: results.standards.errors, spec: results.spec.errors },
     blockers: blockers.map(({ axis, severity, title }) => ({ axis, severity, title })),
+    // Every finding of a valid round, so the harness can record the deferred ones in the
+    // technical debt register (scripts/ralph-debt.mjs) without re-reading the raw reports.
+    findings: invalid
+      ? []
+      : AXES.flatMap((axis) =>
+          results[axis].report.findings.map((finding) => ({ ...finding, axis })),
+        ),
   };
   return { verdict, report, feedback, decision };
 }
@@ -510,6 +535,7 @@ function main() {
       block: { type: "string", default: "CRITICAL,HIGH" },
       "check-block": { type: "string" },
       annotate: { type: "string" },
+      register: { type: "string" },
     },
   });
   if (values["check-block"] !== undefined) {
@@ -546,6 +572,13 @@ function main() {
       token: changeset.token,
       files: changeset.files,
       criteria: parseCriteria(readText(values.ticket)),
+      ...(values.register === undefined
+        ? {}
+        : {
+            debtIds: new Set(
+              parseRegister(readFileSync(values.register, "utf8")).entries.map((e) => e.id),
+            ),
+          }),
       // Test references are workspace-relative; anything else cannot name a test of this repo.
       pathExists: (path) =>
         path.length > 0 &&

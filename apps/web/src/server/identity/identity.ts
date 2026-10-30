@@ -2,14 +2,12 @@ export const SESSION_COOKIE = "ta_session";
 export const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /**
- * `userId` is absent until phase-2 authentication. The booking core only ever sees a Principal,
- * never cookies, so adding users does not touch booking procedures (ADR 0012).
+ * A guest has no `userId` until phase-2 authentication. The booking core only ever sees a
+ * Principal, never cookies, so adding users does not touch booking procedures (ADR 0012).
  */
-export interface Principal {
-  readonly kind: "guest" | "user";
-  readonly sessionId: string;
-  readonly userId?: string;
-}
+export type Principal =
+  | { readonly kind: "guest"; readonly sessionId: string }
+  | { readonly kind: "user"; readonly sessionId: string; readonly userId: string };
 
 export interface CookieReader {
   get(name: string): { readonly value: string } | undefined;
@@ -20,7 +18,7 @@ export interface IdentityService {
 }
 
 export function buyerKey(principal: Principal): string {
-  return principal.userId ?? principal.sessionId;
+  return principal.kind === "user" ? principal.userId : principal.sessionId;
 }
 
 const encoder = new TextEncoder();

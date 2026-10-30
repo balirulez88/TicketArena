@@ -1,6 +1,6 @@
 import { initTRPC } from "@trpc/server";
 import superjson from "superjson";
-import { parseServerEnv } from "./env";
+import { parseSessionEnv } from "./env";
 import { type CookieReader, createIdentityService, type Principal } from "./identity/identity";
 
 /**
@@ -16,7 +16,7 @@ export interface TRPCContext {
 
 export async function createTRPCContext({ req }: { req: Request }): Promise<TRPCContext> {
   const identity = createIdentityService({
-    sessionSecret: parseServerEnv(process.env).SESSION_SECRET,
+    sessionSecret: parseSessionEnv(process.env).SESSION_SECRET,
   });
   const principal = await identity.resolve(cookieReader(req.headers.get("cookie")));
   return { now: () => new Date(), principal };

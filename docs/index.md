@@ -51,6 +51,9 @@ below shows what is built.
 - Turborepo + pnpm monorepo: `apps/web`, `packages/db`.
 - `apps/web`: Next.js App Router with an end-to-end tRPC tracer (`health.check`), validated
   server env (`parseServerEnv`), shadcn/ui tokens on Tailwind v4.
+- Guest identity: `proxy.ts` issues a signed `ta_session` cookie; `IdentityService` resolves a
+  `Principal` onto the tRPC context (`session.whoami`). See
+  [architecture/](architecture/index.md#identity).
 - `packages/db`: Prisma 7 on the Neon serverless adapter; the `outbox_events` table.
 - Quality gate: Biome (warnings fail), strict `tsc`, Vitest, enforced by `ralph-loop.sh`.
 

@@ -3,7 +3,10 @@ import { createCaller } from "./_app";
 
 test("health check reports ok with the time it was checked", async () => {
   const fixedNow = new Date("2026-01-01T12:00:00.000Z");
-  const caller = createCaller({ now: () => fixedNow });
+  const caller = createCaller({
+    now: () => fixedNow,
+    principal: { kind: "guest", sessionId: "0123456789abcdef0123456789abcdef" },
+  });
 
   const result = await caller.health.check();
 

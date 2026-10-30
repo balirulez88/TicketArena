@@ -4,6 +4,9 @@ const serverEnvSchema = z.object({
   DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
   UPSTASH_REDIS_REST_URL: z.url({ protocol: /^https$/ }),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
+  SESSION_SECRET: z
+    .string()
+    .refine((secret) => new TextEncoder().encode(secret).length >= 32, "must be at least 32 bytes"),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

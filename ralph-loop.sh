@@ -195,6 +195,7 @@ start_run() {
 # drops the temporary review files (every changeset was copied into the logs when reviewed).
 # Failed runs keep them for debugging until the retention period ends.
 finish_run() {
+  combine_sessions || true
   node "${ARTIFACTS}" mark --run "${LOG_DIR}" --status "${RUN_STATUS}" || true
   node "${ARTIFACTS}" redact --run "${LOG_DIR}" || true
   if [[ "${RUN_STATUS}" == succeeded ]]; then
@@ -390,7 +391,8 @@ EOF
 # carry forward. Isolation is enforced by the process, not by asking the model to forget:
 #   - a fresh, empty CLAUDE_CONFIG_DIR, deleted afterwards: no earlier sessions to --continue or
 #     --resume, no auto-memory, no user-level instructions or history from any other ticket;
-#   - a new --session-id per process (claude only), recorded in <run>/sessions.tsv;
+#   - a new --session-id per process (claude only), recorded with its outcome in
+#     <run>/sessions/ and merged into <run>/sessions.tsv when the run ends;
 #   - DISABLE_COMPACT: a process that exhausts its context fails instead of compacting. The
 #     harness restarts the phase in a new session that learns everything from the repository
 #     and the gate output, never from an earlier conversation.
@@ -406,11 +408,44 @@ fresh_session() {
   config="$(mktemp -d "${TMPDIR:-/tmp}/ralph-session.XXXXXX")"
   [[ "${argv[0]##*/}" == claude ]] && argv+=(--session-id "${session}")
   ((seconds > 0)) && argv=(timeout "${seconds}" "${argv[@]}")
-  printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "${label}" "${session}" >>"${LOG_DIR}/sessions.tsv"
+  local started record outcome=ok
+  started="$(date -u +%FT%TZ)"
+  record="${LOG_DIR}/sessions/$(date -u +%Y%m%dT%H%M%S%N)-${session}.tsv"
+  mkdir -p "${record%/*}"
+  # Recorded before launch, so a session whose harness dies still has its record (`running`).
+  session_record "${record}" "${started}" "${label}" "${session}" running - -
   CLAUDE_CONFIG_DIR="${config}" DISABLE_COMPACT=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
     RALPH_SESSION_ID="${session}" "${argv[@]}" "${prompt}" || status=$?
   rm -rf "${config}"
+  if ((status == 124 && seconds > 0)); then
+    outcome=timed-out
+  elif ((status != 0)); then
+    outcome=failed
+  fi
+  session_record "${record}" "${started}" "${label}" "${session}" "${outcome}" "${status}" \
+    "$(date -u +%FT%TZ)"
   return "${status}"
+}
+
+# One record file per session, only ever written by that session's own fresh_session call, and
+# replaced atomically: parallel reviewers never share a file, so no record is lost to interleaved
+# appends. Fields: started, label, session, status, exit code, finished.
+session_record() {
+  local file=$1
+  shift
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$@" >"${file}.tmp"
+  mv "${file}.tmp" "${file}"
+}
+
+# Merges the session records into <run>/sessions.tsv in launch order (record names start with a
+# nanosecond timestamp). A session still `running` when its run ends was cut off: `interrupted`.
+combine_sessions() {
+  local records=("${LOG_DIR}"/sessions/*.tsv)
+  [[ -f "${records[0]}" ]] || return 0
+  {
+    printf 'started\tlabel\tsession\tstatus\texit\tfinished\n'
+    cat "${records[@]}" | sed 's/\trunning\t-\t-$/\tinterrupted\t-\t-/'
+  } >"${LOG_DIR}/sessions.tsv"
 }
 
 # What Claude Code prints when a session runs out of context (compaction is disabled).
@@ -491,17 +526,17 @@ its non-interactive mode, reviewing ticket ${ticket}. Read that skill file first
 brief for the ${axis^} axis. You run in a fresh context, independent of the other axis.
 
 - Commit range: base ${base}, head ${head} (copy both into \`changeset\`). The complete
-  candidate changeset, \`git diff ${BASE_BRANCH}...HEAD\`, is saved in full in the changeset
-  file below. Read all of it, then whatever surrounding code you need.
+  candidate changeset, \`git diff ${BASE_BRANCH}...HEAD\` annotated with source line numbers,
+  is saved in full in the changeset file below. Read all of it, then whatever surrounding code
+  you need.
 - Changeset file: ${diff_file#"${REPO_ROOT}/"}
   Its last line is \`review-token: <value>\`; put that value in \`changeset.token\`. If you
   cannot open the file, review nothing else: say so in the summary and leave the token empty.
 - Changed files (account for every one in \`files\`):
 $(git diff --name-only "${BASE_BRANCH}...HEAD" | sed 's/^/  /')
 - Every finding names one of those files and a line inside one of its hunks (0: whole file).
-  Lines are the file's own line numbers at HEAD (the "+" side of the @@ hunk headers), never
-  line numbers within the changeset file: before citing a line, open the file and take the
-  number Read shows, do not count lines in the diff.
+  Each hunk line of the changeset is prefixed with its OLD and NEW source line numbers: cite
+  those (NEW for added or unchanged lines), never a line's position within the changeset file.
 - Commits: $(git log --oneline "${BASE_BRANCH}..HEAD" | tr '\n' ';')
 - Spec: the ticket ${ticket} and the spec and ADRs it references. Acceptance criteria:
 $(numbered_criteria "${ticket}")
@@ -543,11 +578,16 @@ run_review() {
   # while LOG_DIR may be outside (the sandbox mounts the host's logs). A copy stays in the logs.
   diff_file="${REVIEW_ROOT}/${RUN_ID}/${slug}.review-${round}.diff"
   mkdir -p "${diff_file%/*}"
-  git diff "${BASE_BRANCH}...HEAD" >"${diff_file}"
-  if [[ ! -s "${diff_file}" ]]; then
+  git diff "${BASE_BRANCH}...HEAD" >"${diff_file}.raw"
+  if [[ ! -s "${diff_file}.raw" ]]; then
+    rm -f "${diff_file}.raw"
     log "  review: the changeset is empty"
     return 2
   fi
+  # Every hunk line labelled with its source line numbers (see annotateChangeset), so reviewers
+  # cite real lines; the gate parses the same file.
+  node "${REVIEW_GATE}" --annotate "${diff_file}.raw" >"${diff_file}"
+  rm -f "${diff_file}.raw"
   token="$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')"
   printf '\nreview-token: %s\n' "${token}" >>"${diff_file}"
   cp "${diff_file}" "${prefix}.diff"

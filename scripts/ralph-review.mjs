@@ -16,6 +16,7 @@
 //          --base <sha> --head <sha> --report <file> --feedback <file> --decision <file>
 //          --ticket <file> [--block CRITICAL,HIGH]
 //        node scripts/ralph-review.mjs --check-block <severities>   (validate a policy only)
+//        node scripts/ralph-review.mjs --annotate <git diff file>   (changeset for reviewers)
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
@@ -74,6 +75,53 @@ export function parseChangeset(diffText) {
     }
   }
   return { files, token };
+}
+
+const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+
+export const ANNOTATION_GUIDE = [
+  "# Changeset annotated for review. Each hunk line starts with two SOURCE-FILE line numbers,",
+  '# OLD (base) and NEW (head), "." where the line does not exist on that side, then "|", then',
+  '# the diff line: "+" added, "-" removed, " " unchanged. Cite NEW for added and unchanged lines.',
+  "# For a removed line cite a NEW number of the same hunk (or OLD if the whole file was deleted).",
+  "# These are line numbers in the files, never positions within this changeset file.",
+].join("\n");
+
+const lineCell = (number) => (number === undefined ? "." : String(number)).padStart(5);
+
+/**
+ * The changeset as reviewers read it. Real reviewers cited positions in the diff file (line 69 of
+ * the changeset for line 27 of the source), which the evidence gate rightly rejects. Labelling every
+ * hunk line with its old and new source line numbers makes the right number the one in front of
+ * them. File and hunk headers stay verbatim, so parseChangeset reads both forms identically.
+ */
+export function annotateChangeset(diffText) {
+  const out = [ANNOTATION_GUIDE];
+  let oldLine = 0;
+  let newLine = 0;
+  let inHunk = false;
+  for (const line of diffText.split("\n")) {
+    const hunk = HUNK_HEADER.exec(line);
+    if (hunk) {
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[2]);
+      inHunk = true;
+      out.push(line);
+    } else if (!inHunk || line.startsWith("diff --git ") || line === "") {
+      inHunk = inHunk && !line.startsWith("diff --git ");
+      out.push(line);
+    } else if (line.startsWith("+")) {
+      out.push(`${lineCell(undefined)} ${lineCell(newLine++)} | ${line}`);
+    } else if (line.startsWith("-")) {
+      out.push(`${lineCell(oldLine++)} ${lineCell(undefined)} | ${line}`);
+    } else if (line.startsWith(" ")) {
+      out.push(`${lineCell(oldLine++)} ${lineCell(newLine++)} | ${line}`);
+    } else {
+      // "\ No newline at end of file" belongs to the line before it and has no number.
+      out.push(`${lineCell(undefined)} ${lineCell(undefined)} | ${line}`);
+    }
+  }
+  return out.join("\n");
 }
 
 /** Acceptance criteria are the ticket's checkbox lines, numbered AC1..ACn in order. */
@@ -461,10 +509,15 @@ function main() {
       decision: { type: "string" },
       block: { type: "string", default: "CRITICAL,HIGH" },
       "check-block": { type: "string" },
+      annotate: { type: "string" },
     },
   });
   if (values["check-block"] !== undefined) {
     parseBlocking(values["check-block"]);
+    return;
+  }
+  if (values.annotate !== undefined) {
+    process.stdout.write(`${annotateChangeset(readFileSync(values.annotate, "utf8"))}\n`);
     return;
   }
   for (const name of [

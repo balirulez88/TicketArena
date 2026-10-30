@@ -4,7 +4,7 @@
 
 **Blocked by:** 05
 
-**Status:** ready-for-agent
+**Status:** blocked
 
 - [ ] The `messaging` package exposes a `MessageBus` port and a JetStream adapter; application modules never import the NATS client.
 - [ ] `ensureTopology()` idempotently creates `TICKETARENA` (`ta.seat.>`, `ta.hold.>`, `ta.order.>`, `ta.payment.>`; limits, 7 days, sized, `discard: new`) and `TICKETARENA_DLQ` (`ta.dlq.>`; limits, 30 days, sized, `discard: new`, duplicate window 10 min) before the relay starts.

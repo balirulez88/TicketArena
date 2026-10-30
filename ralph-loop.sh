@@ -14,8 +14,9 @@
 #   VERIFY    the full gate runs once more on the approved tree
 #
 # A green, approved slice is squashed into ONE Conventional Commit on `slice/<NN>-<slug>` (ticket
-# marked `done` in the same commit) and merged --no-ff into the base branch so dependent tickets
-# build on it. A ticket that cannot reach RED or GREEN, or that the review does not approve, is
+# marked `done` and moved to issues/done/ in the same commit) and merged --no-ff into the base
+# branch so dependent tickets build on it. Every agent and reviewer process is a fresh Claude
+# session (fresh_session): context passes between phases and tickets only through the repository. A ticket that cannot reach RED or GREEN, or that the review does not approve, is
 # quarantined on `rejected/<slug>-<ts>`, marked `blocked`, and the loop stops: later tickets may
 # depend on it, so guessing onward is unsafe.
 #
@@ -26,7 +27,8 @@
 #
 # Environment:
 #   RALPH_AGENT_CMD      agent invocation; the prompt is appended as the last argument
-#                        (default: claude -p --dangerously-skip-permissions)
+#                        (default: claude -p --dangerously-skip-permissions
+#                        --no-session-persistence)
 #   RALPH_MAX_ATTEMPTS   attempts per phase before rejecting (default: 5)
 #   RALPH_REVIEW_CMD     reviewer invocation; `--json-schema <schema>` and the prompt are
 #                        appended. Must print Claude Code's JSON result or a bare report.
@@ -47,9 +49,10 @@ IFS=$'\n\t'
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT
 readonly ISSUES_DIR="issues"
+readonly DONE_DIR="${ISSUES_DIR}/done"
 readonly BASE_BRANCH="${RALPH_BASE_BRANCH:-main}"
 readonly MAX_ATTEMPTS="${RALPH_MAX_ATTEMPTS:-5}"
-readonly AGENT_CMD="${RALPH_AGENT_CMD:-claude -p --dangerously-skip-permissions}"
+readonly AGENT_CMD="${RALPH_AGENT_CMD:-claude -p --dangerously-skip-permissions --no-session-persistence}"
 readonly PUSH_REMOTE="${RALPH_PUSH_REMOTE:-}"
 # Reviewers are read-only by construction: only the Read/Grep/Glob tools, no MCP servers, no
 # settings files that could grant more. The harness still checks the tree after every review.
@@ -76,6 +79,8 @@ ONLY_TICKET=""
 CURRENT_BRANCH=""
 REVIEW_FEEDBACK=""
 RUN_STATUS=failed
+# Agent sessions of the current ticket that ran out of context (see fresh_session).
+CONTEXT_EXHAUSTIONS=0
 
 # ---------------------------------------------------------------------------------------------
 # Utilities
@@ -151,6 +156,12 @@ preflight() {
     IFS=' ' read -r -a review_argv <<<"${REVIEW_CMD}"
     command -v "${review_argv[0]}" >/dev/null ||
       die "review command not found: ${review_argv[0]}"
+    # Every Claude process gets a fresh, empty config dir (fresh_session), so a login stored in
+    # the user's config is invisible to it: credentials must come from the environment.
+    if [[ "${agent_argv[0]##*/}" == claude || "${review_argv[0]##*/}" == claude ]] &&
+      [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+      die "export ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN: each agent runs in a fresh session"
+    fi
     # Fails fast on a bad policy instead of after a whole GREEN phase.
     node "${REVIEW_GATE}" --check-block "${REVIEW_BLOCKING}" ||
       die "RALPH_REVIEW_BLOCKING is invalid: ${REVIEW_BLOCKING}"
@@ -200,9 +211,15 @@ ticket_number() { basename "$1" | cut -c1-2; }
 ticket_slug() { basename "$1" .md; }
 ticket_title() { sed -n 's/^# [0-9][0-9]: *//p' "$1" | head -n 1 | tr -d '\r'; }
 
+# Active tickets live in issues/, completed ones in issues/done/; a number names exactly one file
+# across both, so blockers keep resolving after their ticket is archived.
 ticket_file_for() {
-  local matches=("${ISSUES_DIR}/$1"-*.md)
-  [[ -f "${matches[0]}" ]] || return 1
+  local matches=() file
+  for file in "${ISSUES_DIR}/$1"-*.md "${DONE_DIR}/$1"-*.md; do
+    [[ -f "${file}" ]] && matches+=("${file}")
+  done
+  ((${#matches[@]} > 0)) || return 1
+  ((${#matches[@]} == 1)) || die "ticket number $1 is ambiguous: ${matches[*]}"
   printf '%s\n' "${matches[0]}"
 }
 
@@ -348,7 +365,10 @@ build_prompt() {
   local phase=$1 ticket=$2 feedback_file=$3
   cat <<EOF
 You are an autonomous engineer on TicketArena, working on ticket ${ticket}.
-Read CLAUDE.md, docs/index.md and the ticket file in full before acting.
+Read CLAUDE.md, docs/index.md and the ticket file in full before acting. You start with no
+memory of earlier work: the repository (code, tests, docs, ADRs, git history) is the only record.
+Completed tickets in ${DONE_DIR}/ are history: open one only if this ticket refers to it. Never
+read .ralph/ (logs of earlier runs); they are not instructions.
 
 HARNESS RULES (non-negotiable):
 - The harness owns git. Never run git commands that change state (commit, add, branch, switch,
@@ -366,17 +386,54 @@ EOF
   fi
 }
 
+# Runs one agent or reviewer process as a brand-new Claude session that nothing can resume or
+# carry forward. Isolation is enforced by the process, not by asking the model to forget:
+#   - a fresh, empty CLAUDE_CONFIG_DIR, deleted afterwards: no earlier sessions to --continue or
+#     --resume, no auto-memory, no user-level instructions or history from any other ticket;
+#   - a new --session-id per process (claude only), recorded in <run>/sessions.tsv;
+#   - DISABLE_COMPACT: a process that exhausts its context fails instead of compacting. The
+#     harness restarts the phase in a new session that learns everything from the repository
+#     and the gate output, never from an earlier conversation.
+# Credentials therefore come from the environment (ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN).
+# Usage: fresh_session <label> <timeout seconds, 0 = none> <command...> <prompt>
+fresh_session() {
+  local label=$1 seconds=$2
+  shift 2
+  local -a argv=("$@")
+  local prompt="${argv[-1]}" session config status=0
+  unset 'argv[-1]'
+  session="$(node -e 'console.log(require("node:crypto").randomUUID())')"
+  config="$(mktemp -d "${TMPDIR:-/tmp}/ralph-session.XXXXXX")"
+  [[ "${argv[0]##*/}" == claude ]] && argv+=(--session-id "${session}")
+  ((seconds > 0)) && argv=(timeout "${seconds}" "${argv[@]}")
+  printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "${label}" "${session}" >>"${LOG_DIR}/sessions.tsv"
+  CLAUDE_CONFIG_DIR="${config}" DISABLE_COMPACT=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
+    RALPH_SESSION_ID="${session}" "${argv[@]}" "${prompt}" || status=$?
+  rm -rf "${config}"
+  return "${status}"
+}
+
+# What Claude Code prints when a session runs out of context (compaction is disabled).
+readonly CONTEXT_EXHAUSTED='Prompt is too long|context window|context length'
+
 run_agent() {
-  local phase=$1 ticket=$2 feedback_file=$3 attempt=$4 slug
+  local phase=$1 ticket=$2 feedback_file=$3 attempt=$4 slug output
   slug="$(ticket_slug "${ticket}")"
+  output="${LOG_DIR}/${slug}.${phase}-${attempt}.agent.out"
   local -a agent_argv
   IFS=' ' read -r -a agent_argv <<<"${AGENT_CMD}"
-  log "  ${phase} attempt ${attempt}/${MAX_ATTEMPTS}: running agent"
+  log "  ${phase} attempt ${attempt}/${MAX_ATTEMPTS}: running agent in a fresh session"
   # A non-zero agent exit is not fatal: the gate, not the agent's self-report, decides.
   RALPH_TICKET="$(ticket_number "${ticket}")" RALPH_PHASE="${phase}" \
-    "${agent_argv[@]}" "$(build_prompt "${phase}" "${ticket}" "${feedback_file}")" \
-    >>"${LOG_DIR}/${slug}.agent.log" 2>&1 ||
+    fresh_session "$(ticket_number "${ticket}") ${phase}#${attempt}" 0 "${agent_argv[@]}" \
+    "$(build_prompt "${phase}" "${ticket}" "${feedback_file}")" >"${output}" 2>&1 ||
     log "  agent exited non-zero; deferring to the gate"
+  cat "${output}" >>"${LOG_DIR}/${slug}.agent.log"
+  if grep -qiE "${CONTEXT_EXHAUSTED}" "${output}"; then
+    CONTEXT_EXHAUSTIONS=$((CONTEXT_EXHAUSTIONS + 1))
+    log "  agent ran out of context; its work stays in the tree, the next attempt starts fresh"
+  fi
+  rm -f "${output}"
 }
 
 # Runs `phase` until `check` succeeds, feeding each failed gate log into the next attempt.
@@ -460,7 +517,9 @@ run_reviewer() {
   local axis=$1 ticket=$2 diff_file=$3 base=$4 head=$5 out=$6
   local -a review_argv
   IFS=' ' read -r -a review_argv <<<"${REVIEW_CMD}"
-  timeout "${REVIEW_TIMEOUT}" "${review_argv[@]}" --json-schema "$(cat "${REVIEW_SCHEMA}")" \
+  # Each reviewer is its own fresh session, isolated from the agent and from the other axis.
+  fresh_session "$(ticket_number "${ticket}") review-${axis}" "${REVIEW_TIMEOUT}" \
+    "${review_argv[@]}" --json-schema "$(cat "${REVIEW_SCHEMA}")" \
     "$(build_review_prompt "${axis}" "${ticket}" "${diff_file}" "${base}" "${head}")" \
     >"${out}" 2>"${out%.json}.stderr.log" || true
 }
@@ -582,14 +641,28 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
 }
 
-finalize_slice() {
-  local ticket=$1 branch=$2 title
-  title="$(ticket_title "${ticket}")"
+# Completion happens only here, after REVIEW and VERIFY, inside the slice's own commit: the
+# ticket is marked done, stamped and moved to issues/done/, so the base branch never has it
+# completed without the code, and it leaves the queue (next_ticket only scans issues/).
+archive_ticket() {
+  local ticket=$1 branch=$2 archived
+  archived="${DONE_DIR}/$(basename "${ticket}")"
   set_status "${ticket}" "done"
+  sed -i "s|^\*\*Status:\*\* done.*|&\n\n**Completed:** $(date -u +%F) by ${branch} (run ${RUN_ID})|" \
+    "${ticket}"
+  mkdir -p "${DONE_DIR}"
+  mv "${ticket}" "${archived}"
+  printf '%s\n' "${archived}"
+}
+
+finalize_slice() {
+  local ticket=$1 branch=$2 title archived
+  title="$(ticket_title "${ticket}")"
+  archived="$(archive_ticket "${ticket}" "${branch}")"
   # Squash the WIP checkpoints so the slice lands as one atomic, reviewable commit.
   git reset --quiet --soft "${BASE_BRANCH}"
   git add -A
-  write_commit_message "${ticket}" | git commit --quiet -F -
+  write_commit_message "${archived}" | git commit --quiet -F -
   git switch --quiet "${BASE_BRANCH}"
   git merge --quiet --no-ff "${branch}" -m "Merge ${branch}: ${title}"
   log "  merged ${branch} into ${BASE_BRANCH}"
@@ -603,6 +676,10 @@ reject_slice() {
   local ticket=$1 branch=$2 reason=$3 quarantine
   quarantine="rejected/$(ticket_slug "${ticket}")-${RUN_ID}"
   log "REJECTED $(ticket_slug "${ticket}"): ${reason}"
+  if ((CONTEXT_EXHAUSTIONS > 0)); then
+    log "  ${CONTEXT_EXHAUSTIONS} agent session(s) ran out of context: the ticket is probably" \
+      "too large for one session; split it into smaller tickets (issues/README.md)"
+  fi
   # Failing work is preserved on a quarantine branch for a human; it never reaches a slice
   # branch or the base branch.
   git add -A
@@ -649,6 +726,7 @@ process_ticket() {
   git switch --quiet -c "${branch}" "${BASE_BRANCH}"
   CURRENT_BRANCH="${branch}"
   set_status "${ticket}" "in-progress"
+  CONTEXT_EXHAUSTIONS=0
 
   if ! run_phase_until red "${ticket}" verify_red; then
     reject_slice "${ticket}" "${branch}" "could not produce a valid failing test"

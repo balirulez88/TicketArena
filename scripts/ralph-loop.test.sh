@@ -73,7 +73,7 @@ check() {
 }
 
 merged() { git -C "$1" log --oneline main | grep "Merge slice/01-demo" >/dev/null; }
-status_on_main() { git -C "$1" show main:issues/01-demo.md | sed -n 's/^\*\*Status:\*\* //p'; }
+status_on_main() { git -C "$1" show "main:${2:-issues}/01-demo.md" | sed -n 's/^\*\*Status:\*\* //p'; }
 quarantined() { git -C "$1" branch --list 'rejected/*' | grep rejected/01-demo >/dev/null; }
 calls() { wc -l <"$1.calls" | tr -d ' '; }
 # The run's log dir (RALPH_LOG_ROOT=<repo>.logs in some scenarios) and temporary review dir.
@@ -97,7 +97,11 @@ scenario() {
   if [[ "${expect}" == merge ]]; then
     check "harness exits 0" "[[ ${code} == 0 ]]"
     check "slice merged into main" "merged '${dir}'"
-    check "ticket done on main" "[[ \$(status_on_main '${dir}') == done ]]"
+    check "ticket done and archived on main" "[[ \$(status_on_main '${dir}' issues/done) == done ]]"
+    check "ticket left the active queue" \
+      "! git -C '${dir}' cat-file -e main:issues/01-demo.md 2>/dev/null"
+    check "completion recorded" \
+      "git -C '${dir}' show main:issues/done/01-demo.md | grep '^\*\*Completed:\*\* .* by slice/01-demo' >/dev/null"
     check "review report logged" \
       "compgen -G '${dir}/.ralph/logs/*/01-demo.review-*.md' >/dev/null ||
         compgen -G '${dir}.logs/*/01-demo.review-*.md' >/dev/null"

@@ -82,14 +82,61 @@ For each ticket whose `**Status:**` is `ready-for-agent` and whose blockers are 
 5. **REVIEW:** two independent reviewers judge the whole changeset (see below). Blocking
    findings go back to the agent (**FIX**, gated like GREEN), then a fresh review round.
 6. **VERIFY:** the full gate runs once more on the approved tree.
-7. Squash into **one** Conventional Commit, mark the ticket `done` in the same commit, merge
-   `--no-ff` into `main` so dependent tickets build on it, and optionally push.
+7. Squash into **one** Conventional Commit. In the same commit the ticket is marked `done`,
+   stamped `**Completed:** <date> by slice/<NN>-<slug> (run <run-id>)` and moved to
+   `issues/done/`. Merge `--no-ff` into `main` so dependent tickets build on it, and optionally
+   push.
 
 A ticket that cannot get through RED, GREEN, DOCS, REVIEW or VERIFY is **rejected**: its failing work is
 committed to a quarantine branch `rejected/<NN>-<slug>-<run-id>` (never to a slice branch or
 `main`), the ticket is marked `blocked` on `main`, and the loop stops for a human to look.
 Agent transcripts, gate output and review reports are kept in `.ralph/logs/<run-id>/`
 (git-ignored); see [Run artifacts](#run-artifacts) for what is kept and for how long.
+
+### Context lifecycle: preserve verified work, not conversations
+
+Every agent attempt (RED, GREEN, REFACTOR, DOCS, FIX) and every reviewer is its own `claude -p`
+process and a **brand-new session**; nothing is ever continued, resumed or compacted.
+`fresh_session` in `ralph-loop.sh` enforces this by construction, not by instructions:
+
+- **Empty config per process.** `CLAUDE_CONFIG_DIR` points at a new empty directory, deleted when
+  the process exits: no earlier sessions to `--continue`/`--resume`, no auto-memory, no
+  user-level instructions. Credentials therefore come from `ANTHROPIC_API_KEY` or
+  `CLAUDE_CODE_OAUTH_TOKEN` (preflight refuses to start without one).
+- **Unresumable.** `--no-session-persistence` and a new `--session-id` per process; every
+  session is recorded in `.ralph/logs/<run-id>/sessions.tsv` (time, ticket and phase, id).
+- **No compaction.** `DISABLE_COMPACT=1` turns off automatic and manual compaction and
+  `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` turns off auto-memory. A session that runs out of context
+  fails. Its work stays in the tree, the gate judges it, and the next attempt starts a fresh
+  session from the repository and the gate output. If sessions keep running out of context and
+  the ticket is rejected, the harness says the ticket is probably too large: split it.
+
+What carries over, and nothing else:
+
+| Between             | Through                                                                 |
+| ------------------- | ----------------------------------------------------------------------- |
+| Attempts of a phase | The working tree, plus the tail of the failed gate output in the prompt |
+| Phases of a ticket  | The working tree and WIP checkpoint commits on the slice branch         |
+| REVIEW → FIX        | The blocking findings in the FIX prompt                                 |
+| Tickets             | `main`: code, tests, docs, ADRs, git history, the archived ticket       |
+
+Prompts name the ticket file and point at `CLAUDE.md` and `docs/index.md`. They never include
+earlier transcripts, review reports or completed tickets. Agents are told that `issues/done/`
+is history and that `.ralph/` is not instructions.
+
+### Completed tickets
+
+`issues/` is the active queue and `issues/done/` the archive (contract:
+[issues/README.md](../../issues/README.md)).
+
+- Only a slice that passed REVIEW and VERIFY is archived, inside its own squashed commit, so
+  `main` never shows a ticket as done without its code.
+- Rejected tickets stay in `issues/` as `blocked`. A harness that dies mid-ticket leaves the
+  ticket `ready-for-agent` on `main`, and its run stays `active` in `.ralph/logs`, so cleanup keeps
+  the evidence. To recover, check out `main`, delete the dead run's `slice/<NN>-<slug>` branch and
+  run again.
+- `next_ticket` scans only `issues/`, so an archived ticket is never selected again. Blockers
+  resolve across both directories by number, and a number must name exactly one file.
 
 ## Independent review
 

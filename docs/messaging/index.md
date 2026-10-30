@@ -29,10 +29,16 @@ publishing the same row twice in one pass.
 
 ## Event catalogue
 
-None yet. Each slice that emits an event adds a row here:
+Each slice that emits an event adds a row here. Every event travels in the envelope from
+`packages/contracts` (`id`, `type`, `version`, `occurredAt`, `correlationId`, `causationId`,
+optional `holdId`/`orderId`, `payload`); the full envelope is stored as the outbox row payload.
 
-| Event type | Producer | Consumers | Payload version |
-| ---------- | -------- | --------- | --------------- |
+| Event type  | Producer                             | Consumers | Payload version |
+| ----------- | ------------------------------------ | --------- | --------------- |
+| `seat.held` | `BookingService.holdSeats` (same TX) | none yet  | 1               |
+
+`seat.held` payload: `holdId`, `eventId`, `seatIds`, `holdExpiresAt`. Its `correlationId` is
+minted here and reused by every later event of the booking.
 
 ## Decided, not yet built
 

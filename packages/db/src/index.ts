@@ -4,6 +4,8 @@ import { PrismaClient } from "./generated/prisma/client";
 
 export type {
   Event,
+  Hold,
+  HoldStatus,
   OutboxEvent,
   OutboxStatus,
   Seat,

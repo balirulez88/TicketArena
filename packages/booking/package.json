@@ -1,0 +1,24 @@
+{
+  "name": "@ticketarena/booking",
+  "version": "0.0.0",
+  "private": true,
+  "description": "BookingService: seat holds, orders and saga decisions over Postgres.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ticketarena/contracts": "workspace:*",
+    "@ticketarena/db": "workspace:*"
+  },
+  "devDependencies": {
+    "@ticketarena/test-infra": "workspace:*",
+    "@types/node": "26.6.5",
+    "typescript": "6.0.3",
+    "vitest": "5.0.5"
+  }
+}

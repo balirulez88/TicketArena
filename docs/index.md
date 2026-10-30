@@ -36,29 +36,31 @@ capacity by orders of magnitude within seconds. The system must:
 The diagram shows the target of the [MVP spec](specs/ticketarena-mvp.md); "What exists today"
 below shows what is built.
 
-| Area                | Status      | Map                                    |
-| ------------------- | ----------- | -------------------------------------- |
-| Monorepo & modules  | scaffolded  | [architecture/](architecture/index.md) |
-| Database & Prisma   | catalog     | [database/](database/index.md)         |
-| Async messaging     | designed    | [messaging/](messaging/index.md)       |
-| Agent workflow & CI | operational | [workflow/](workflow/index.md)         |
-| Decisions (ADRs)    | 13 accepted | [adr/](adr/index.md)                   |
-| Feature specs       | MVP ready   | [specs/](specs/index.md)               |
-| Domain vocabulary   | seeded      | [glossary.md](glossary.md)             |
+| Area                | Status         | Map                                    |
+| ------------------- | -------------- | -------------------------------------- |
+| Monorepo & modules  | scaffolded     | [architecture/](architecture/index.md) |
+| Database & Prisma   | catalog, holds | [database/](database/index.md)         |
+| Async messaging     | designed       | [messaging/](messaging/index.md)       |
+| Agent workflow & CI | operational    | [workflow/](workflow/index.md)         |
+| Decisions (ADRs)    | 13 accepted    | [adr/](adr/index.md)                   |
+| Feature specs       | MVP ready      | [specs/](specs/index.md)               |
+| Domain vocabulary   | seeded         | [glossary.md](glossary.md)             |
 
 ## What exists today
 
-- Turborepo + pnpm monorepo: `apps/web`, `packages/db`.
+- Turborepo + pnpm monorepo: `apps/web`, `packages/db`, `packages/contracts`, `packages/booking`.
 - `apps/web`: Next.js App Router with an end-to-end tRPC tracer (`health.check`), validated
   server env (`parseServerEnv`), shadcn/ui tokens on Tailwind v4.
 - Guest identity: `proxy.ts` issues a signed `ta_session` cookie; `IdentityService` resolves a
   `Principal` onto the tRPC context (`session.whoami`). See
   [architecture/](architecture/index.md#identity).
 - `packages/db`: Prisma 7 on the Neon serverless adapter; the `outbox_events` table and the seeded catalog (venues, sections, rows, events,
-  per-event seats). `events.list`, `events.get` and `seats.map` serve it.
+  per-event seats). `events.list`, `events.get` and `seats.map` serve it. The `holds` table backs
+  `booking.holdSeats` / `booking.getHold` (`packages/booking`), which write a `seat.held` outbox
+  event; envelope schemas live in `packages/contracts`.
 - Quality gate: Biome (warnings fail), strict `tsc`, Vitest, enforced by `ralph-loop.sh`.
 
-No domain features yet. They arrive as tickets split from the
+A buyer can hold one seat (no queue yet). Remaining features arrive as tickets split from the
 [MVP spec](specs/ticketarena-mvp.md) by `/to-tickets`.
 
 ## Decisions

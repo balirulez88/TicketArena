@@ -1,4 +1,4 @@
-// Domain models arrive slice by slice under TDD. Hold, order and payment tables are still to come.
+// Domain models arrive slice by slice under TDD. Order and payment tables are still to come.
 
 generator client {
   provider = "prisma-client"
@@ -103,6 +103,7 @@ model Event {
   /// The event the admin dashboard races and resets.
   demo          Boolean  @default(false)
   seats         Seat[]
+  holds         Hold[]
 
   @@map("events")
   @@schema("public")
@@ -119,11 +120,41 @@ model Seat {
   number        Int
   status        SeatStatus @default(AVAILABLE)
   holdId        String?    @db.Uuid
+  hold          Hold?      @relation(fields: [holdId], references: [id])
   /// Buyer who holds or has bought the seat, backing the per-event ticket limit.
   claimBuyerKey String?
 
   @@unique([eventId, rowId, number])
   @@index([eventId, status])
   @@map("seats")
+  @@schema("public")
+}
+
+enum HoldStatus {
+  HELD
+  ORDERED
+  RELEASED
+  EXPIRED
+
+  @@schema("public")
+}
+
+/// A buyer's time-boxed claim on seats. The expiry is stored, never swept into existence by a
+/// timer: a HELD seat whose hold has expired is treated as free at decision time (lazy expiry).
+/// `correlationId` is minted with the hold and carried by every event of the booking.
+model Hold {
+  id            String     @id @default(uuid()) @db.Uuid
+  eventId       String     @db.Uuid
+  event         Event      @relation(fields: [eventId], references: [id])
+  sessionId     String
+  userId        String?
+  buyerKey      String
+  status        HoldStatus @default(HELD)
+  holdExpiresAt DateTime   @db.Timestamptz(3)
+  correlationId String     @db.Uuid
+  seats         Seat[]
+
+  @@index([eventId, buyerKey])
+  @@map("holds")
   @@schema("public")
 }

@@ -11,6 +11,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ticketarena/booking": "workspace:*",
+    "@ticketarena/contracts": "workspace:*",
     "@ticketarena/db": "workspace:*",
     "@tanstack/react-query": "5.105.0",
     "@trpc/client": "11.19.0",

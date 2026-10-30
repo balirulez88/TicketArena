@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { evaluate, parseBlocking, parseChangeset, parseCriteria } from "./ralph-review.mjs";
+import {
+  annotateChangeset,
+  evaluate,
+  parseBlocking,
+  parseChangeset,
+  parseCriteria,
+} from "./ralph-review.mjs";
 
 const BLOCKING = ["CRITICAL", "HIGH"];
 const BASE = "a".repeat(40);
@@ -347,6 +354,113 @@ describe("ralph review gate: evidence that cannot be right is INVALID, never app
     assert.equal(result.decision.verdict, "invalid");
     assert.ok(result.decision.errors.standards.length > 0);
     assert.deepEqual(result.decision.errors.spec, []);
+  });
+});
+
+// The changeset of the failure-injection experiment, exactly as real reviewers received it: the
+// defect (`principal.kind === "user" || ...`) is line 27 of hold-access.ts and line 69 of this
+// file. Every real report cited 69, so every review was invalid instead of blocked.
+const OBSERVED = readFileSync(
+  new URL("./fixtures/hold-access.review.diff", import.meta.url),
+  "utf8",
+)
+  .replace(/\r\n/g, "\n")
+  .replace(/\nreview-token: .*\n?$/, "\n");
+const DEFECT = '+  if (principal.kind === "user" || hold.buyerKey === buyerKey(principal)) {';
+const DEFECT_FILE = "apps/web/src/server/holds/hold-access.ts";
+
+describe("annotated changeset: source line numbers, not diff positions", () => {
+  const annotated = annotateChangeset(OBSERVED);
+  const lines = annotated.split("\n");
+
+  it("puts the defect's source line 27 in front of it, while it sits elsewhere in the file", () => {
+    const position = lines.findIndex((line) => line.endsWith(DEFECT)) + 1;
+    assert.equal(lines[position - 1], `    .    27 | ${DEFECT}`);
+    assert.notEqual(position, 27);
+    assert.equal(OBSERVED.split("\n").indexOf(DEFECT) + 1, 69);
+  });
+
+  it("explains the numbers before the first file", () => {
+    assert.ok(annotated.indexOf("SOURCE-FILE line numbers") < annotated.indexOf("diff --git"));
+    assert.match(annotated, /never positions within this changeset file/);
+  });
+
+  it("numbers old and new sides of a modified hunk, removed and unchanged lines included", () => {
+    const ticketHunk = lines.slice(lines.findIndex((line) => line.startsWith("@@ -6,7 +6,7 @@")));
+    assert.match(ticketHunk[1] ?? "", /^ {4}6 {5}6 \| {2}/);
+    const removed = ticketHunk.find((line) => line.includes("| -**Status:**"));
+    const added = ticketHunk.find((line) => line.includes("| +**Status:**"));
+    assert.match(removed ?? "", /^ {4}9 {5}\. \| -/);
+    assert.match(added ?? "", /^ {4}\. {5}9 \| \+/);
+  });
+
+  it("uses old-side numbers only for a deleted file and leaves no-newline markers unnumbered", () => {
+    const deleted = annotateChangeset(
+      "diff --git a/old.md b/old.md\ndeleted file mode 100644\n--- a/old.md\n+++ /dev/null\n" +
+        "@@ -1,2 +0,0 @@\n-first\n-second\n\\ No newline at end of file\n",
+    ).split("\n");
+    assert.deepEqual(deleted.slice(-4, -1), [
+      "    1     . | -first",
+      "    2     . | -second",
+      "    .     . | \\ No newline at end of file",
+    ]);
+  });
+
+  it("keeps a removed line that looks like a header from being read as one", () => {
+    const tricky =
+      "diff --git a/x.md b/x.md\n--- a/x.md\n+++ b/x.md\n@@ -1,2 +1,1 @@\n keep\n-++ /dev/null\n";
+    assert.equal(parseChangeset(annotateChangeset(tricky)).files.get("x.md")?.deleted, false);
+  });
+
+  it("parses to the same files and hunk ranges as the raw diff", () => {
+    const raw = parseChangeset(OBSERVED);
+    const fromAnnotated = parseChangeset(annotated);
+    assert.deepEqual([...fromAnnotated.files.entries()], [...raw.files.entries()]);
+  });
+
+  describe("the gate on the observed review, with the token appended as the harness does", () => {
+    const changeset = parseChangeset(`${annotated}\nreview-token: ${TOKEN}\n`);
+    const context = {
+      base: BASE,
+      head: HEAD,
+      token: changeset.token,
+      files: changeset.files,
+      criteria: [{ id: "AC1", text: "owner only" }],
+      pathExists: () => true,
+    };
+    const observedReport = (axis, line) =>
+      report(axis, {
+        files: [...changeset.files.keys()].map((path) => ({ path, status: "reviewed", note: "" })),
+        criteria: axis === "spec" ? [met("AC1")] : [],
+        findings: [
+          finding("CRITICAL", {
+            kind: "security",
+            file: DEFECT_FILE,
+            line,
+            title: "Signed-in users bypass hold ownership check",
+          }),
+        ],
+      });
+    const gate = (line) =>
+      evaluate({
+        standardsOutput: envelope(observedReport("standards", line)),
+        specOutput: envelope(observedReport("spec", line)),
+        blocking: BLOCKING,
+        context,
+      });
+
+    it("still rejects the observed citation of changeset line 69 as INVALID", () => {
+      const result = gate(69);
+      assert.equal(result.verdict, "invalid");
+      assert.match(result.report, /line 69 is not inside a hunk of .*hold-access\.ts/);
+    });
+
+    it("BLOCKS on the same CRITICAL finding cited at source line 27", () => {
+      const result = gate(27);
+      assert.equal(result.verdict, "blocked");
+      assert.deepEqual(result.decision.errors, { standards: [], spec: [] });
+      assert.equal(result.decision.blockers[0]?.severity, "CRITICAL");
+    });
   });
 });
 

@@ -12,6 +12,9 @@ readonly SOURCE_ROOT
 WORK="$(mktemp -d)"
 readonly WORK
 trap 'rm -rf "${WORK}"' EXIT
+# Sessions killed on purpose below never remove their config dirs; keep them inside WORK.
+mkdir -p "${WORK}/tmp"
+export TMPDIR="${WORK}/tmp"
 failures=0
 
 mkdir -p "${WORK}/bin"
@@ -103,8 +106,13 @@ check "every process is a distinct session" \
   "[[ \$(ledger '${dir}' 'new Set(runs.map((r) => r.session)).size') == 12 ]]"
 check "the session id passed to claude is the one the harness recorded" \
   "[[ \$(ledger '${dir}' 'runs.every((r) => r.session && r.session === r.envSession)') == true ]]"
-check "sessions logged by the harness match" \
-  "[[ \$(cut -f3 \"\$(compgen -G '${dir}/.ralph/logs/2*')/sessions.tsv\" | sort -u | wc -l) == 12 ]]"
+sessions_tsv="$(compgen -G "${dir}/.ralph/logs/2*")/sessions.tsv"
+# Parallel reviewers start in no defined order, so the logged and launched sets are compared.
+check "the session log records every launched process exactly once" \
+  "[[ \$(tail -n +2 '${sessions_tsv}' | cut -f3 | sort | tr '\n' ' ') == \
+\$(ledger '${dir}' 'runs.map((r) => r.session).sort().join(\" \") + \" \"') ]]"
+check "every logged session ended ok" \
+  "[[ \$(tail -n +2 '${sessions_tsv}' | cut -f4 | sort -u) == ok ]]"
 check "no process resumes or continues a conversation" \
   "[[ \$(ledger '${dir}' 'runs.some((r) => r.flags.some((f) => /^(-c|-r|--continue|--resume|--fork-session|--from-pr|--teleport)/.test(f)))') == false ]]"
 check "every process disables session persistence" \
@@ -155,6 +163,8 @@ check "the ticket is not completed or archived" \
 check "nothing of the ticket reached main" "! on_main '${dir}' feature-01.txt"
 check "the run stays active, so cleanup never removes its evidence" \
   "grep -q '\"status\": \"active\"' \"\$(compgen -G '${dir}/.ralph/logs/2*')/run.json\""
+check "the killed session's record survives and shows it never finished" \
+  "cat \"\$(compgen -G '${dir}/.ralph/logs/2*')\"/sessions/*.tsv | grep -q \$'\\t01 green#1\\t.*\\trunning\\t-\\t-\$'"
 # Recovery as documented: back to main, drop the dead run's slice branch, run again.
 git -C "${dir}" checkout --quiet --force main
 git -C "${dir}" clean --quiet -fd
@@ -163,6 +173,39 @@ code="$(run_harness "${dir}")"
 check "a fresh run completes the ticket from scratch" \
   "[[ ${code} == 0 ]] && on_main '${dir}' issues/done/01-first.md && on_main '${dir}' issues/done/02-second.md"
 ((failures == 0)) || sed 's/^/      | /' "${dir}.out"
+
+echo "session log under concurrency (as with parallel reviewers):"
+ledger_dir="${WORK}/concurrent"
+mkdir -p "${ledger_dir}"
+(
+  cd "${ledger_dir}"
+  # shellcheck source=../ralph-loop.sh
+  RALPH_LOG_ROOT="${ledger_dir}/logs" source "${SOURCE_ROOT}/ralph-loop.sh"
+  for i in $(seq 1 20); do fresh_session "reviewer-${i}" 0 true prompt & done
+  fresh_session failing 0 false prompt &
+  fresh_session missing-command 0 ralph-no-such-command prompt &
+  fresh_session timed-out 1 bash -c 'sleep 5' prompt &
+  (fresh_session killed 0 bash -c 'sleep 5' prompt) &
+  killed=$!
+  until grep -qs $'\tkilled\t' "${LOG_DIR}"/sessions/*.tsv; do sleep 0.1; done
+  kill -KILL "${killed}"
+  wait || true
+  combine_sessions
+  printf '%s\n' "${LOG_DIR}/sessions.tsv" >"${ledger_dir}/path"
+) >"${ledger_dir}.out" 2>&1 || true
+tsv="$(cat "${ledger_dir}/path" 2>/dev/null || echo missing)"
+status_of() { awk -F'\t' -v label="$1" '$2 == label { print $4 "/" $5 }' "${tsv}"; }
+check "24 concurrent sessions, 24 rows, 24 distinct ids" \
+  "[[ \$(tail -n +2 '${tsv}' | wc -l) == 24 && \$(tail -n +2 '${tsv}' | cut -f3 | sort -u | wc -l) == 24 ]]"
+check "all 20 parallel sessions recorded ok" \
+  "[[ \$(awk -F'\t' '\$2 ~ /^reviewer-/ && \$4 == \"ok\"' '${tsv}' | wc -l) == 20 ]]"
+check "a failing session is failed with its exit code" "[[ \$(status_of failing) == failed/1 ]]"
+check "a launch failure is failed with exit 127" "[[ \$(status_of missing-command) == failed/127 ]]"
+check "a timed-out session is distinguished" "[[ \$(status_of timed-out) == timed-out/124 ]]"
+check "a session killed mid-flight is interrupted" "[[ \$(status_of killed) == interrupted/- ]]"
+check "rows are in launch order" \
+  "[[ \$(tail -n +2 '${tsv}' | cut -f1 | sort -c && echo sorted) == sorted ]]"
+((failures == 0)) || sed 's/^/      | /' "${ledger_dir}.out"
 
 if ((failures > 0)); then
   echo "ralph-loop session scenarios: ${failures} check(s) failed" >&2

@@ -103,8 +103,13 @@ process and a **brand-new session**; nothing is ever continued, resumed or compa
   the process exits: no earlier sessions to `--continue`/`--resume`, no auto-memory, no
   user-level instructions. Credentials therefore come from `ANTHROPIC_API_KEY` or
   `CLAUDE_CODE_OAUTH_TOKEN` (preflight refuses to start without one).
-- **Unresumable.** `--no-session-persistence` and a new `--session-id` per process; every
-  session is recorded in `.ralph/logs/<run-id>/sessions.tsv` (time, ticket and phase, id).
+- **Unresumable.** `--no-session-persistence` and a new `--session-id` per process.
+- **Every session logged exactly once.** Each process writes its own record in
+  `.ralph/logs/<run-id>/sessions/` before it launches and replaces it atomically when it ends, so
+  parallel reviewers never write to the same file. When the run ends, the records are merged into
+  `sessions.tsv` (started, label, session, status, exit code, finished). The status is `ok`,
+  `failed` (including launch failures, exit 127), `timed-out` or `interrupted`. A run killed
+  outright leaves its unfinished records as `running` in `sessions/`.
 - **No compaction.** `DISABLE_COMPACT=1` turns off automatic and manual compaction and
   `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` turns off auto-memory. A session that runs out of context
   fails. Its work stays in the tree, the gate judges it, and the next attempt starts a fresh
@@ -152,7 +157,11 @@ non-interactive mode. TicketArena's rules for reviewers are in [code-review.md](
 - **What they review.** The complete changeset `git diff main...HEAD`, committed by the harness
   right before the review so new files are included, plus the ticket and the spec and ADRs it
   references. The changeset file lives in the git-ignored `.ralph/review/<run-id>/` inside the
-  workspace (the reviewers' file access is confined to it), with a copy in the run logs.
+  workspace (the reviewers' file access is confined to it), with a copy in the run logs. Every
+  hunk line is prefixed with its OLD and NEW source line numbers (`    .    27 | +code`). Real
+  reviewers had cited positions within the diff file instead (line 69 for source line 27), which
+  the gate rejects. The file and hunk headers are unchanged, and the gate validates against
+  them as strictly as before.
 - **Proof of reading.** The changeset ends with a random `review-token` line. Each report must
   echo it as `changeset.token`; a missing or wrong token makes the review invalid, so a reviewer
   that could not open the changeset cannot approve by reviewing other files instead.

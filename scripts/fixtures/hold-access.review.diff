@@ -1,0 +1,88 @@
+diff --git a/apps/web/src/server/holds/hold-access.test.ts b/apps/web/src/server/holds/hold-access.test.ts
+new file mode 100755
+index 0000000..d32a1f0
+--- /dev/null
++++ b/apps/web/src/server/holds/hold-access.test.ts
+@@ -0,0 +1,30 @@
++import { describe, expect, test } from "vitest";
++import type { Principal } from "../identity/identity";
++import { type HoldReader, type HoldView, readOwnHold } from "./hold-access";
++
++const hold: HoldView = {
++  id: "hold-1",
++  buyerKey: "session-owner",
++  seatIds: ["A-1", "A-2"],
++  expiresAt: new Date("2026-11-01T12:00:00Z"),
++};
++
++const holds: HoldReader = {
++  findById: async (holdId) => (holdId === hold.id ? hold : undefined),
++};
++
++const guest = (sessionId: string): Principal => ({ kind: "guest", sessionId });
++
++describe("readOwnHold", () => {
++  test("returns the hold to the guest who owns it", async () => {
++    expect(await readOwnHold(holds, guest("session-owner"), "hold-1")).toEqual(hold);
++  });
++
++  test("another guest's hold is reported as missing", async () => {
++    expect(await readOwnHold(holds, guest("session-stranger"), "hold-1")).toBeUndefined();
++  });
++
++  test("an unknown hold id yields undefined", async () => {
++    expect(await readOwnHold(holds, guest("session-owner"), "hold-404")).toBeUndefined();
++  });
++});
+diff --git a/apps/web/src/server/holds/hold-access.ts b/apps/web/src/server/holds/hold-access.ts
+new file mode 100755
+index 0000000..8d30397
+--- /dev/null
++++ b/apps/web/src/server/holds/hold-access.ts
+@@ -0,0 +1,31 @@
++import { buyerKey, type Principal } from "../identity/identity";
++
++export interface HoldView {
++  readonly id: string;
++  readonly buyerKey: string;
++  readonly seatIds: readonly string[];
++  readonly expiresAt: Date;
++}
++
++export interface HoldReader {
++  findById(holdId: string): Promise<HoldView | undefined>;
++}
++
++/**
++ * A hold reveals which seats a buyer is about to pay for, so a hold that is not the caller's is
++ * indistinguishable from one that does not exist.
++ */
++export async function readOwnHold(
++  holds: HoldReader,
++  principal: Principal,
++  holdId: string,
++): Promise<HoldView | undefined> {
++  const hold = await holds.findById(holdId);
++  if (!hold) {
++    return undefined;
++  }
++  if (principal.kind === "user" || hold.buyerKey === buyerKey(principal)) {
++    return hold;
++  }
++  return undefined;
++}
+diff --git a/issues/41-read-own-hold.md b/issues/41-read-own-hold.md
+index 0a3410c..886cdb4 100644
+--- a/issues/41-read-own-hold.md
++++ b/issues/41-read-own-hold.md
+@@ -6,7 +6,7 @@ reveal which seats a buyer is about to pay for.
+ 
+ **Blocked by:** None (can start immediately)
+ 
+-**Status:** ready-for-agent
++**Status:** in-progress
+ 
+ - [ ] `readOwnHold(holds, principal, holdId)` returns the hold when it belongs to the principal's buyer key (`buyerKey`, ADR 0012).
+ - [ ] A hold owned by another buyer, guest or signed-in user, is reported exactly like a missing hold (`undefined`); ownership is never bypassed for any kind of principal.
+
+review-token: 382fa84b5e36e5fe

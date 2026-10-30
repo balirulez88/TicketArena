@@ -6,7 +6,7 @@
 
 **Blocked by:** 05
 
-**Status:** ready-for-agent
+**Status:** blocked
 
 - [ ] TD-019: `placeOrder` prices the order lines and the total, and moves seats to `IN_CHECKOUT`, using exactly the seat set it validated and locked (the hold's `seat.held` seat ids), never a `WHERE "holdId" = ...` query; a test with a seat that carries the hold's id but is outside that set proves the seat is neither priced nor mutated.
 - [ ] TD-023: the order currency comes from the priced seats; seats of different currencies fail with a domain error instead of a mixed total, and no currency is invented by a fallback.

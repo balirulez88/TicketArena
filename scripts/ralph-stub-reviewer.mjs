@@ -46,6 +46,7 @@ const finding = (severity, overrides = {}) => ({
   problem: "p",
   impact: "i",
   recommendation: "fix it",
+  debt: "",
   ...overrides,
 });
 const met = (id) => ({ id, status: "met", evidence: `${target}:1`, tests: [target], note: "" });
@@ -65,6 +66,16 @@ const report = {
 const behaviours = {
   "medium:standards": () => report.findings.push(finding("MEDIUM")),
   "high:standards": () => report.findings.push(finding("HIGH")),
+  // Both rounds report the same deferred MEDIUM; the slice must still record it only once.
+  "bugmedium:standards": () => {
+    report.findings.push(finding("MEDIUM", { title: "stub deferred finding" }));
+    if (existsSync("bug.txt")) {
+      report.findings.push(finding("HIGH"));
+    }
+  },
+  "bugmedium:spec": () =>
+    report.findings.push(finding("LOW", { title: "spec view of the same problem" })),
+  "baddebt:standards": () => report.findings.push(finding("LOW", { debt: "TD-999" })),
   "critical:spec": () => report.findings.push(finding("CRITICAL")),
   "bug:standards": () => existsSync("bug.txt") && report.findings.push(finding("HIGH")),
   "noread:standards": () => {

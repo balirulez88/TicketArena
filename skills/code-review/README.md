@@ -32,7 +32,8 @@ Each is marked **[local]** in `SKILL.md`, so a diff against upstream shows only 
   line, rule, problem, impact, recommendation. Which severities block a merge is left to the
   caller.
 - **Non-interactive mode**: a harness can run each axis as its own fresh, read-only agent that
-  returns JSON matching `report.schema.json`.
+  returns JSON matching `report.schema.json`. A finding's `debt` field links it to an entry of
+  the project's technical-debt register, if it keeps one (empty otherwise).
 
 ## Install in another repository
 

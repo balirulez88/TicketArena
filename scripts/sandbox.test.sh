@@ -25,12 +25,17 @@ new_host_repo() {
   cp "${SOURCE_ROOT}/Dockerfile" "${SOURCE_ROOT}/.dockerignore" "${SOURCE_ROOT}/ralph-loop.sh" \
     "${dir}/"
   cp "${SOURCE_ROOT}/infra/nats/nats.conf" "${dir}/infra/nats/"
-  cp "${SOURCE_ROOT}"/scripts/{sandbox.sh,sandbox-entrypoint.sh,sandbox-services.sh,ralph-review.mjs,ralph-artifacts.mjs} \
+  cp "${SOURCE_ROOT}"/scripts/{sandbox.sh,sandbox-entrypoint.sh,sandbox-services.sh,ralph-review.mjs,ralph-artifacts.mjs,ralph-debt.mjs} \
     "${dir}/scripts/"
   cp "${SOURCE_ROOT}/skills/code-review/report.schema.json" "${dir}/skills/code-review/"
+  # An empty, canonical technical debt register (preflight requires one).
+  mkdir -p "${dir}/docs"
+  printf '# Technical Debt Register\n\n<!-- ralph-debt:begin -->\n<!-- ralph-debt:end -->\n' \
+    >"${dir}/docs/technical-debt.md"
+  node "${dir}/scripts/ralph-debt.mjs" format "${dir}/docs/technical-debt.md"
 
   # A project whose gate passes once feature.txt exists, so RED and GREEN are genuine.
-  printf '{"name":"fixture","private":true,"scripts":{"lint":"node -e 0","typecheck":"node -e 0","test":"node gate.mjs"}}\n' \
+  printf '{"name":"fixture","private":true,"scripts":{"lint":"node -e 0","typecheck":"node -e 0","test":"node gate.mjs","check:debt":"node scripts/ralph-debt.mjs check docs/technical-debt.md"}}\n' \
     >"${dir}/package.json"
   printf "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\nimporters:\n\n  .: {}\n" \
     >"${dir}/pnpm-lock.yaml"

@@ -21,6 +21,7 @@ pnpm run lint       # biome ci --error-on-warnings
 pnpm run typecheck  # tsc strict in every workspace
 pnpm run test       # vitest
 pnpm run test:harness  # ralph-loop review policy, evidence gate, artifact retention (bash, node:test)
+pnpm run check:debt # technical debt register is valid (docs/technical-debt.md)
 pnpm run check      # all of the above
 pnpm test:sandbox   # Docker: a rejected sandbox run keeps logs, branch and status on the host
 pnpm infra:up       # local Postgres/Redis/NATS for integration tests (TEST_* in .env.test)
@@ -53,6 +54,13 @@ skipped tests, or edits that relax `biome.json` / `tsconfig.base.json`.
 TicketArena-specific rules live in [`docs/workflow/code-review.md`](docs/workflow/code-review.md):
 reviewers must read that file. Ralph reviews every slice before merging; `CRITICAL`/`HIGH`
 findings block the merge.
+
+## Technical debt
+
+Deferred `MEDIUM`/`LOW` findings live in [`docs/technical-debt.md`](docs/technical-debt.md).
+Before changing code, read the entries for the files you touch; entries whose `Target` names your
+ticket are part of it. Resolve an entry only with a fix and a test named in `Verification`, then
+`pnpm run format:debt`. Never delete entries.
 
 ## Layout
 

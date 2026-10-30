@@ -14,13 +14,14 @@ trap 'rm -rf "${WORK}"' EXIT
 failures=0
 
 # Agent stub. GREEN writes the feature and, with STUB_BUG=1, a defect. REVIEW FIX removes the
-# defect only with STUB_FIX=1.
+# defect only with STUB_FIX=1. STUB_DROP_DEBT=1 makes GREEN delete the register's entries.
 cat >"${WORK}/agent.sh" <<'EOF'
 #!/usr/bin/env bash
 case "${RALPH_PHASE}" in
   green)
     echo feature >feature.txt
     [[ "${STUB_BUG:-0}" == 1 ]] && echo defect >bug.txt
+    [[ "${STUB_DROP_DEBT:-0}" == 1 ]] && sed -i '/^### TD-/,/^<!-- ralph-debt:end -->/{/^<!--/!d}' docs/technical-debt.md
     ;;
   review-fix) [[ "${STUB_FIX:-0}" == 1 ]] && rm -f bug.txt ;;
 esac
@@ -29,9 +30,27 @@ EOF
 
 new_repo() {
   local dir="${WORK}/$1"
-  mkdir -p "${dir}/scripts" "${dir}/skills/code-review" "${dir}/issues"
+  mkdir -p "${dir}/scripts" "${dir}/skills/code-review" "${dir}/issues" "${dir}/docs"
   cp "${SOURCE_ROOT}/ralph-loop.sh" "${dir}/"
-  cp "${SOURCE_ROOT}"/scripts/{ralph-review.mjs,ralph-artifacts.mjs} "${dir}/scripts/"
+  cp "${SOURCE_ROOT}"/scripts/{ralph-review.mjs,ralph-artifacts.mjs,ralph-debt.mjs} "${dir}/scripts/"
+  # A register with one deferred finding from an earlier ticket.
+  cat >"${dir}/docs/technical-debt.md" <<'REGISTER'
+# Technical Debt Register
+
+<!-- ralph-debt:begin -->
+### TD-001: Earlier deferred finding
+- **Status:** OPEN
+- **Severity:** LOW
+- **Source:** ticket 00
+- **Evidence:** earlier review
+- **Components:** `old.txt`
+- **Problem:** p
+- **Impact:** i
+- **Justification:** non-blocking
+- **Remediation:** r
+<!-- ralph-debt:end -->
+REGISTER
+  node "${dir}/scripts/ralph-debt.mjs" format "${dir}/docs/technical-debt.md"
   cp "${SOURCE_ROOT}/skills/code-review/report.schema.json" "${dir}/skills/code-review/"
   printf '# 01: Demo ticket\n\n**Blocked by:** None (can start immediately)\n\n**Status:** ready-for-agent\n\n- [ ] works\n' \
     >"${dir}/issues/01-demo.md"
@@ -73,6 +92,8 @@ check() {
 }
 
 merged() { git -C "$1" log --oneline main | grep "Merge slice/01-demo" >/dev/null; }
+debt_on_main() { git -C "$1" show main:docs/technical-debt.md | grep -c '^### TD-' || true; }
+debt_field_count() { git -C "$1" show main:docs/technical-debt.md | grep -c "$2" || true; }
 status_on_main() { git -C "$1" show "main:${2:-issues}/01-demo.md" | sed -n 's/^\*\*Status:\*\* //p'; }
 quarantined() { git -C "$1" branch --list 'rejected/*' | grep rejected/01-demo >/dev/null; }
 calls() { wc -l <"$1.calls" | tr -d ' '; }
@@ -152,6 +173,29 @@ scenario invented-test-is-not-approval reject 2 invalid STUB_REVIEW=faketest RAL
 # As in the sandbox: logs outside the workspace must not take the changeset out of reach.
 scenario logs-outside-workspace-still-reviewed merge 2 approved STUB_REVIEW=clean \
   RALPH_LOG_ROOT="${WORK}/logs-outside-workspace-still-reviewed.logs"
+# Technical debt register: deferred findings are recorded once, blockers and failures never.
+scenario repeated-medium-across-rounds merge 4 approved STUB_REVIEW=bugmedium STUB_BUG=1 STUB_FIX=1
+scenario unknown-debt-id-is-not-approval reject 2 invalid STUB_REVIEW=baddebt RALPH_MAX_REVIEW_ROUNDS=1
+scenario dropped-debt-entry-rejects reject 2 approved STUB_REVIEW=clean STUB_DROP_DEBT=1
+
+echo "technical debt register:"
+dir="${WORK}/medium-is-not-blocking"
+check "a deferred MEDIUM is recorded on main" "[[ \$(debt_on_main '${dir}') == 2 ]]"
+check "it is OPEN at its original severity" \
+  "git -C '${dir}' show main:docs/technical-debt.md | grep -A3 '^### TD-002' | grep -q 'Severity:\*\* MEDIUM'"
+check "the register on main is canonical and valid" \
+  "git -C '${dir}' show main:docs/technical-debt.md >'${dir}.register.md' &&
+   node '${SOURCE_ROOT}/scripts/ralph-debt.mjs' check '${dir}.register.md' --root '${dir}'"
+dir="${WORK}/repeated-medium-across-rounds"
+check "one problem reported in two rounds and by both axes is one entry" \
+  "[[ \$(debt_on_main '${dir}') == 2 ]]"
+check "only the approved round is in its history" \
+  "[[ \$(debt_field_count '${dir}' 'review-2 ') == 2 && \$(debt_field_count '${dir}' 'review-1 ') == 0 ]]"
+check "the fixed HIGH blocker is not recorded" "[[ \$(debt_field_count '${dir}' 'stub HIGH') == 0 ]]"
+dir="${WORK}/critical-blocks"
+check "a rejected slice records nothing" "[[ \$(debt_on_main '${dir}') == 1 ]]"
+dir="${WORK}/dropped-debt-entry-rejects"
+check "a slice that deletes register entries keeps them on main" "[[ \$(debt_on_main '${dir}') == 1 ]]"
 
 retry_dir="${WORK}/high-blocks-until-rounds-exhausted"
 echo "review retries keep every round's evidence:"

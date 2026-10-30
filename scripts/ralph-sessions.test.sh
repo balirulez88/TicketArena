@@ -41,8 +41,13 @@ new_repo() {
   local dir="${WORK}/$1"
   mkdir -p "${dir}/scripts" "${dir}/skills/code-review" "${dir}/issues/done"
   cp "${SOURCE_ROOT}/ralph-loop.sh" "${dir}/"
-  cp "${SOURCE_ROOT}"/scripts/{ralph-review.mjs,ralph-artifacts.mjs} "${dir}/scripts/"
+  cp "${SOURCE_ROOT}"/scripts/{ralph-review.mjs,ralph-artifacts.mjs,ralph-debt.mjs} "${dir}/scripts/"
   cp "${SOURCE_ROOT}/skills/code-review/report.schema.json" "${dir}/skills/code-review/"
+  # An empty, canonical technical debt register (preflight requires one).
+  mkdir -p "${dir}/docs"
+  printf '# Technical Debt Register\n\n<!-- ralph-debt:begin -->\n<!-- ralph-debt:end -->\n' \
+    >"${dir}/docs/technical-debt.md"
+  node "${dir}/scripts/ralph-debt.mjs" format "${dir}/docs/technical-debt.md"
   ticket 00-foundation.md Foundation "None (can start immediately)" done "${dir}/issues/done"
   ticket 01-first.md "First slice" "00" ready-for-agent "${dir}/issues"
   ticket 02-second.md "Second slice" "01 (First slice)" ready-for-agent "${dir}/issues"

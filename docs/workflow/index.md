@@ -77,10 +77,12 @@ For each ticket whose `**Status:**` is `ready-for-agent` and whose blockers are 
    cache bypassed, so no replayed result stands in for running the new tests). Then
    `scripts/ralph-red.mjs` runs exactly the changed test files through their package's own Vitest
    and accepts RED only if each one belongs to a workspace package with a `test` script, executes
-   at least one test, and one of them fails on an assertion. A test that passes before any
-   implementation, one no package discovers (e.g. in a package that has no scaffolding yet), one
-   that fails to load, or one that is all skipped proves nothing and is rejected. A brand-new
-   package therefore needs its scaffolding merged first, as a separately reviewed change.
+   at least one test, and at least one test fails (on an assertion, or on an error inside a test
+   such as calling a function that does not exist yet). The evidence directory is emptied first,
+   so an earlier attempt's report never counts. A test that passes before any implementation, one
+   no package discovers (e.g. in a package that has no scaffolding yet), one that fails to load,
+   or one that is all skipped proves nothing and is rejected. A brand-new package therefore needs
+   its scaffolding merged first, as a separately reviewed change.
 3. **GREEN:** the agent implements until the full gate passes. Gate output from a failed attempt
    is fed into the next one, up to `RALPH_MAX_ATTEMPTS`.
 4. **REFACTOR + DOCS:** the agent runs the code-review/refactor pass and `update-docs`. The gate

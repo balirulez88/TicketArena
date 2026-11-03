@@ -5,27 +5,39 @@
 // or whose tests are all skipped executes nothing, and the suite can then fail (or pass) for an
 // unrelated reason. This script runs exactly the changed test files, uncached, through each owning
 // package's own Vitest and accepts RED only when every one of them executed at least one test and
-// at least one test failed on an assertion.
+// at least one of those tests failed (an assertion or an error thrown inside the test, such as a
+// call to a function that does not exist yet; never a file that failed to load).
 //
 //   node scripts/ralph-red.mjs [--root <dir>] [--runner <command>] --out <dir> <test file>...
 //
-// --runner runs Vitest inside one package (default: `pnpm exec vitest`).
+// --runner runs Vitest inside one package (default: `pnpm exec vitest`); it is split on spaces,
+// so its words must not contain spaces. --out is emptied first: evidence is only ever this run's.
 //
 // Exit codes: 0 RED proven, 1 not proven (reasons on stdout).
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 
-// Paths in Vitest's report are absolute with forward slashes; on Windows the drive letter's case
-// varies too. Comparison happens on this form only.
+// A hung or watching test run must not hang the harness.
+const RUN_TIMEOUT_MS = 15 * 60 * 1000;
+
+// Paths in Vitest's report are absolute and real (symlinks resolved), with forward slashes; on
+// Windows the drive letter's case varies too. Comparison happens on this form only.
 const normalize = (path) => {
-  const absolute = resolve(path).split(sep).join("/");
-  return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+  let absolute = resolve(path);
+  try {
+    absolute = realpathSync(absolute);
+  } catch {
+    // A file that does not exist cannot match a report entry either way.
+  }
+  const slashed = absolute.split(sep).join("/");
+  return process.platform === "win32" ? slashed.toLowerCase() : slashed;
 };
 
-// `packages/*`-style globs from pnpm-workspace.yaml; `*` matches one path segment.
+// `packages/*`-style globs from pnpm-workspace.yaml; `*` matches one path segment. That is the
+// only form this repository uses; `**` and negations are not supported.
 export function workspaceGlobs(text) {
   const section = /^packages:\s*\n((?:\s+-\s+.+\n?)*)/m.exec(text)?.[1] ?? "";
   return [...section.matchAll(/-\s+["']?([^"'\n]+?)["']?\s*$/gm)].map((match) => match[1]);
@@ -38,7 +50,6 @@ const globToRegExp = (glob) =>
       .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
       .join("[^/]+")}$`,
   );
-
 // The nearest directory with a package.json below the root, or null for a file no package owns.
 export function owningPackage(file, { root, exists }) {
   let dir = dirname(resolve(root, file));
@@ -116,18 +127,25 @@ export function evaluate(files, reports, { root }) {
   return { ok: errors.length === 0, errors, failed };
 }
 
-function runPackage({ root, runner }, pkg, files, outFile) {
+function runPackage({ root, runner, out }, pkg, files, index) {
   const cwd = join(root, pkg);
+  const outFile = join(out, `red-${index}.json`);
   const [command, ...prefix] = runner.split(" ").filter(Boolean);
   const args = [...prefix, "run", "--reporter=json", `--outputFile=${outFile}`];
   // Vitest filters by path with forward slashes on every platform.
   const filters = files.map((file) => relative(cwd, join(root, file)).split(sep).join("/"));
-  // Exit status is irrelevant: a RED run fails by design; the report is the evidence.
-  spawnSync(command, [...args, ...filters], {
+  // Exit status is irrelevant: a RED run fails by design; the report is the evidence. The output
+  // is kept so a missing report can be diagnosed.
+  const run = spawnSync(command, [...args, ...filters], {
     cwd,
-    stdio: "ignore",
+    encoding: "utf8",
+    timeout: RUN_TIMEOUT_MS,
     shell: process.platform === "win32",
   });
+  writeFileSync(
+    join(out, `red-${index}.log`),
+    `${[command, ...args, ...filters].join(" ")}\n${run.error ?? ""}\n${run.stdout ?? ""}${run.stderr ?? ""}`,
+  );
   return existsSync(outFile) ? JSON.parse(readFileSync(outFile, "utf8")) : null;
 }
 
@@ -148,11 +166,13 @@ function main() {
   }
   const root = resolve(values.root);
   const out = resolve(values.out);
+  // An earlier attempt's report must never stand in for this run's.
+  rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
   const io = { root, exists: existsSync, readText: (path) => readFileSync(path, "utf8") };
   const { groups, errors } = planRun(positionals, io);
   const reports = [...groups].map(([pkg, files], index) =>
-    runPackage({ root, runner: values.runner }, pkg, files, join(out, `red-${index}.json`)),
+    runPackage({ root, runner: values.runner, out }, pkg, files, index),
   );
   const verdict = evaluate([...groups.values()].flat(), reports, { root });
   for (const line of verdict.failed) {

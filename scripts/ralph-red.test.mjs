@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -116,5 +117,30 @@ describe("RED evidence", () => {
     const verdict = evaluate([file], [{ testResults: [result(root, file, [passing])] }], { root });
     assert.equal(verdict.ok, false);
     assert.match(verdict.errors.join(), /every new test ran and passed/);
+  });
+});
+
+describe("the command", () => {
+  const script = join(import.meta.dirname, "ralph-red.mjs");
+
+  it("never reuses an earlier attempt's report as evidence", () => {
+    const root = workspace();
+    const file = "packages/messaging/src/relay.test.ts";
+    writeFileSync(join(root, file), "");
+    const out = join(root, "red.vitest");
+    mkdirSync(out);
+    // A report from an earlier attempt that did prove RED; this attempt's runner writes none.
+    writeFileSync(
+      join(out, "red-0.json"),
+      JSON.stringify({ testResults: [result(root, file, [failing])] }),
+    );
+    const run = spawnSync(
+      process.execPath,
+      [script, "--root", root, "--runner", "node -e 0", "--out", out, file],
+      { encoding: "utf8" },
+    );
+    assert.equal(run.status, 1);
+    assert.match(run.stdout, /relay\.test\.ts was not executed/);
+    assert.ok(existsSync(join(out, "red-0.log")));
   });
 });

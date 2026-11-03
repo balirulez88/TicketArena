@@ -5,7 +5,7 @@
 # For every ticket that is `ready-for-agent` with all blockers `done`, in number order:
 #
 #   RED       agent writes failing test(s) only     -> gate: lint passes AND tests FAIL, run
-#             uncached, and every new test file executed with one failing on an assertion
+#             uncached, and every new test file executed and at least one test failing
 #   GREEN     agent implements until the gate passes -> gate: lint + typecheck + test pass
 #   REFACTOR  agent cleans up without behaviour change; discarded if it breaks the gate
 #   DOCS      agent runs skills/update-docs.md       -> gate must pass again
@@ -327,9 +327,14 @@ verify_red() {
     echo "RED rejected: the test suite PASSES, so the new test proves nothing yet." >>"${logfile}"
     return 1
   fi
-  mapfile -t tests < <(grep -E '\.test\.tsx?$' <<<"${changed}" | while read -r file; do
-    [[ -f "${file}" ]] && printf '%s\n' "${file}"
-  done)
+  # Every test file that exists now and differs from HEAD (new or modified; renamed counts as new),
+  # NUL-separated so unusual names are neither quoted nor split.
+  mapfile -d '' -t tests < <(
+    {
+      git diff -z --name-only --diff-filter=d HEAD
+      git ls-files -z --others --exclude-standard
+    } | grep -zE '\.test\.tsx?$' || true
+  )
   if ((${#tests[@]} == 0)); then
     echo "RED rejected: the phase only deleted tests." >>"${logfile}"
     return 1
@@ -352,7 +357,7 @@ the harness rejects the phase if any non-test file changes. Put each test in an 
 workspace package whose Vitest config matches it, and import what it exercises through a module
 that already exists (e.g. the package's `src/index.ts`): the harness runs exactly your changed
 test files, uncached, and accepts RED only if every one of them executes at least one test and
-one fails on an assertion. A file that fails to load, is skipped or is never discovered proves
+one test fails. A file that fails to load, is skipped or is never discovered proves
 nothing. Run `pnpm run format`. Done when `pnpm run lint` passes and your new tests fail for the
 expected reason.
 EOF

@@ -1,0 +1,25 @@
+{
+  "name": "@ticketarena/messaging",
+  "version": "0.0.0",
+  "private": true,
+  "description": "MessageBus port, JetStream adapter, outbox relay and consumer runner (ticket 06).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@nats-io/jetstream": "3.4.0",
+    "@nats-io/transport-node": "3.4.0",
+    "@ticketarena/db": "workspace:*"
+  },
+  "devDependencies": {
+    "@ticketarena/test-infra": "workspace:*",
+    "@types/node": "26.6.5",
+    "typescript": "6.0.3",
+    "vitest": "5.0.5"
+  }
+}

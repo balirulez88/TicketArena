@@ -4,12 +4,14 @@
 #
 # For every ticket that is `ready-for-agent` with all blockers `done`, in number order:
 #
-#   RED       agent writes failing test(s) only     -> gate: lint passes AND tests FAIL
+#   RED       agent writes failing test(s) only     -> gate: lint passes AND tests FAIL, run
+#             uncached, and every new test file executed with one failing on an assertion
 #   GREEN     agent implements until the gate passes -> gate: lint + typecheck + test pass
 #   REFACTOR  agent cleans up without behaviour change; discarded if it breaks the gate
 #   DOCS      agent runs skills/update-docs.md       -> gate must pass again
 #   REVIEW    two independent, read-only reviewers (skills/code-review: Standards and Spec)
-#             judge the whole changeset against the base branch, in parallel
+#             judge the whole changeset against the base branch, in parallel; a reviewer
+#             whose report the gate finds invalid is asked once more within the round
 #   FIX       blocking findings go back to the agent  -> gate, then a fresh review round
 #   DEBT      the approved round's deferred (non-blocking) findings are recorded in the
 #             technical debt register, docs/technical-debt.md (scripts/ralph-debt.mjs)
@@ -38,6 +40,8 @@
 #   RALPH_MAX_REVIEW_ROUNDS  review rounds, each but the last followed by a fix (default: 3)
 #   RALPH_REVIEW_BLOCKING    severities that block the merge (default: CRITICAL,HIGH)
 #   RALPH_REVIEW_TIMEOUT     seconds per reviewer process (default: 1800)
+#   RALPH_TEST_RUNNER    runs Vitest inside one package, for the RED check (default:
+#                        pnpm exec vitest)
 #   RALPH_BASE_BRANCH    integration branch (default: main)
 #   RALPH_PUSH_REMOTE    if set, push slice + base branch there after each merge, and the
 #                        quarantine branch + blocked status after a rejection
@@ -67,6 +71,8 @@ readonly REVIEW_GATE="${REPO_ROOT}/scripts/ralph-review.mjs"
 readonly ARTIFACTS="${REPO_ROOT}/scripts/ralph-artifacts.mjs"
 readonly DEBT="${REPO_ROOT}/scripts/ralph-debt.mjs"
 readonly DEBT_REGISTER="docs/technical-debt.md"
+readonly RED_CHECK="${REPO_ROOT}/scripts/ralph-red.mjs"
+readonly TEST_RUNNER="${RALPH_TEST_RUNNER:-pnpm exec vitest}"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 readonly RUN_ID
 # Temporary: changesets for the reviewers, inside the workspace they are confined to.
@@ -142,8 +148,8 @@ preflight() {
   command -v pnpm >/dev/null || die "pnpm is not installed"
   command -v node >/dev/null || die "node is not installed"
   command -v timeout >/dev/null || die "timeout (coreutils) is not installed"
-  [[ -f "${REVIEW_SCHEMA}" && -f "${REVIEW_GATE}" && -f "${ARTIFACTS}" && -f "${DEBT}" ]] ||
-    die "review skill, review gate, artifact or debt script missing"
+  [[ -f "${REVIEW_SCHEMA}" && -f "${REVIEW_GATE}" && -f "${ARTIFACTS}" && -f "${DEBT}" &&
+    -f "${RED_CHECK}" ]] || die "review skill, review gate, artifact, debt or RED script missing"
   [[ -f "${DEBT_REGISTER}" ]] || die "technical debt register ${DEBT_REGISTER} is missing"
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git repository"
 
@@ -295,10 +301,14 @@ run_gate() {
     run_step "${logfile}" pnpm run check:debt
 }
 
-# RED is proven only if the new tests are lint-clean AND the suite fails. A test that passes
-# before any implementation exists asserts nothing about the ticket.
+# RED is proven only if the new tests are lint-clean AND the suite fails AND the new tests are
+# what fails. A test that passes before any implementation exists asserts nothing about the
+# ticket; so does one that never ran: a file outside every workspace package, unmatched by its
+# package's Vitest config, failing to load, or all skipped. A cached result (Turbo replays a
+# package's last run when its inputs look unchanged) must never stand in for executing them.
 verify_red() {
   local logfile=$1 changed offenders
+  local -a tests
   : >"${logfile}"
 
   changed="$(git status --porcelain --untracked-files=all | cut -c4-)"
@@ -313,11 +323,19 @@ verify_red() {
     return 1
   fi
   run_step "${logfile}" pnpm run lint || return 1
-  if run_step "${logfile}" pnpm run test; then
+  if run_step "${logfile}" pnpm run test --force; then
     echo "RED rejected: the test suite PASSES, so the new test proves nothing yet." >>"${logfile}"
     return 1
   fi
-  return 0
+  mapfile -t tests < <(grep -E '\.test\.tsx?$' <<<"${changed}" | while read -r file; do
+    [[ -f "${file}" ]] && printf '%s\n' "${file}"
+  done)
+  if ((${#tests[@]} == 0)); then
+    echo "RED rejected: the phase only deleted tests." >>"${logfile}"
+    return 1
+  fi
+  run_step "${logfile}" node "${RED_CHECK}" --runner "${TEST_RUNNER}" \
+    --out "${logfile%.log}.vitest" "${tests[@]}"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -330,8 +348,13 @@ phase_instructions() {
       cat <<'EOF'
 PHASE: RED. Follow skills/tdd.md. Write ONLY the failing test(s) for the ticket's first unmet
 acceptance criterion, at a seam agreed in the spec. Do NOT write or change implementation code;
-the harness rejects the phase if any non-test file changes. Run `pnpm run format`. Done when
-`pnpm run lint` passes and `pnpm run test` fails for the expected reason.
+the harness rejects the phase if any non-test file changes. Put each test in an existing
+workspace package whose Vitest config matches it, and import what it exercises through a module
+that already exists (e.g. the package's `src/index.ts`): the harness runs exactly your changed
+test files, uncached, and accepts RED only if every one of them executes at least one test and
+one fails on an assertion. A file that fails to load, is skipped or is never discovered proves
+nothing. Run `pnpm run format`. Done when `pnpm run lint` passes and your new tests fail for the
+expected reason.
 EOF
       ;;
     green)
@@ -571,14 +594,56 @@ EOF
 # Never fails: whatever the process printed (or nothing) goes to the review gate, which judges
 # anything but a valid report as invalid. A reviewer can therefore not approve by crashing.
 run_reviewer() {
-  local axis=$1 ticket=$2 diff_file=$3 base=$4 head=$5 out=$6
+  local axis=$1 ticket=$2 diff_file=$3 base=$4 head=$5 out=$6 rejected=${7:-}
   local -a review_argv
   IFS=' ' read -r -a review_argv <<<"${REVIEW_CMD}"
   # Each reviewer is its own fresh session, isolated from the agent and from the other axis.
   fresh_session "$(ticket_number "${ticket}") review-${axis}" "${REVIEW_TIMEOUT}" \
     "${review_argv[@]}" --json-schema "$(cat "${REVIEW_SCHEMA}")" \
-    "$(build_review_prompt "${axis}" "${ticket}" "${diff_file}" "${base}" "${head}")" \
+    "$(build_review_prompt "${axis}" "${ticket}" "${diff_file}" "${base}" "${head}"
+      [[ -z "${rejected}" ]] || rejected_report_note "${rejected}")" \
     >"${out}" 2>"${out%.json}.stderr.log" || true
+}
+
+rejected_report_note() {
+  cat <<EOF
+- Your previous report on this exact changeset was rejected by the review gate as invalid, for
+  these reasons. Review again from scratch and return a report that follows the schema and the
+  rules above; the gate's rules have not changed.
+$(sed 's/^/  /' "$1")
+EOF
+}
+
+# The axes whose report the gate found invalid, one per line, from the decision file.
+invalid_axes() {
+  node -e '
+    const { errors = {} } = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    for (const [axis, list] of Object.entries(errors)) if (list.length > 0) console.log(axis);
+  ' "$1" 2>/dev/null || true
+}
+
+run_gate_on_round() {
+  local ticket=$1 prefix=$2 diff_file=$3 base=$4 head=$5 slug
+  slug="$(ticket_slug "${ticket}")"
+  node "${REVIEW_GATE}" --block "${REVIEW_BLOCKING}" --register "${DEBT_REGISTER}" \
+    --changeset "${diff_file}" --base "${base}" --head "${head}" --ticket "${ticket}" \
+    --standards "${prefix}.standards.json" --spec "${prefix}.spec.json" \
+    --report "${prefix}.md" --feedback "${REVIEW_FEEDBACK}" --decision "${prefix}.decision.json" \
+    2>>"${LOG_DIR}/${slug}.review.log"
+}
+
+# Reviewers must not change the implementation. Anything they left behind is evidence of a
+# broken sandbox, so it is discarded and the round counts as a failed review.
+reviewers_tampered() {
+  local head=$1 prefix=$2
+  if [[ "$(git rev-parse HEAD)" != "${head}" || -n "$(git status --porcelain)" ]]; then
+    git status --porcelain >"${prefix}.tampered.log"
+    log "  review: a reviewer modified the repository; discarding and failing the round"
+    git reset --quiet --hard "${head}"
+    git clean --quiet -fd
+    return 0
+  fi
+  return 1
 }
 
 # One review round over the committed changeset. Returns the review gate's verdict:
@@ -620,24 +685,35 @@ run_review() {
   run_reviewer spec "${ticket}" "${diff_file}" "${base}" "${head}" "${prefix}.spec.json" &
   local spec_pid=$!
   wait "${standards_pid}" "${spec_pid}"
-
-  # Reviewers must not change the implementation. Anything they left behind is evidence of a
-  # broken sandbox, so it is discarded and the round counts as a failed review.
-  if [[ "$(git rev-parse HEAD)" != "${head}" || -n "$(git status --porcelain)" ]]; then
-    git status --porcelain >"${prefix}.tampered.log"
-    log "  review: a reviewer modified the repository; discarding and failing the round"
-    git reset --quiet --hard "${head}"
-    git clean --quiet -fd
-    return 2
-  fi
+  reviewers_tampered "${head}" "${prefix}" && return 2
 
   # The gate checks the reports' evidence against the real changeset (token, commit range, file
   # and hunk references, file coverage) and the ticket's acceptance criteria.
-  node "${REVIEW_GATE}" --block "${REVIEW_BLOCKING}" --register "${DEBT_REGISTER}" \
-    --changeset "${diff_file}" --base "${base}" --head "${head}" --ticket "${ticket}" \
-    --standards "${prefix}.standards.json" --spec "${prefix}.spec.json" \
-    --report "${prefix}.md" --feedback "${REVIEW_FEEDBACK}" --decision "${prefix}.decision.json" \
-    2>>"${LOG_DIR}/${slug}.review.log" || verdict=$?
+  run_gate_on_round "${ticket}" "${prefix}" "${diff_file}" "${base}" "${head}" || verdict=$?
+  ((verdict == 2)) || return "${verdict}"
+
+  # An invalid report says nothing about the code, yet failing the round would discard the other
+  # axis's valid findings and spend a fix round on an unchanged tree. So each invalid reviewer is
+  # asked once more, in a fresh session, with the gate's reasons; its first report is kept. The
+  # gate then judges the new pair exactly as before: a second invalid report fails the round.
+  local axis
+  local -a retried=()
+  for axis in $(invalid_axes "${prefix}.decision.json"); do
+    node -e '
+      const d = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      console.log(d.errors[process.argv[2]].map((e) => `- ${e}`).join("\n"));
+    ' "${prefix}.decision.json" "${axis}" >"${prefix}.${axis}.rejected.txt"
+    mv "${prefix}.${axis}.json" "${prefix}.${axis}.invalid.json"
+    log "  review: the ${axis} report is invalid; asking that reviewer once more"
+    run_reviewer "${axis}" "${ticket}" "${diff_file}" "${base}" "${head}" \
+      "${prefix}.${axis}.json" "${prefix}.${axis}.rejected.txt" &
+    retried+=("$!")
+  done
+  ((${#retried[@]} > 0)) || return 2
+  wait "${retried[@]}"
+  reviewers_tampered "${head}" "${prefix}" && return 2
+  verdict=0
+  run_gate_on_round "${ticket}" "${prefix}" "${diff_file}" "${base}" "${head}" || verdict=$?
   return "${verdict}"
 }
 

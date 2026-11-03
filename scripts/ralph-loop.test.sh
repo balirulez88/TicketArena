@@ -32,7 +32,7 @@ new_repo() {
   local dir="${WORK}/$1"
   mkdir -p "${dir}/scripts" "${dir}/skills/code-review" "${dir}/issues" "${dir}/docs"
   cp "${SOURCE_ROOT}/ralph-loop.sh" "${dir}/"
-  cp "${SOURCE_ROOT}"/scripts/{ralph-review.mjs,ralph-artifacts.mjs,ralph-debt.mjs} "${dir}/scripts/"
+  cp "${SOURCE_ROOT}"/scripts/{ralph-review.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs} "${dir}/scripts/"
   # A register with one deferred finding from an earlier ticket.
   cat >"${dir}/docs/technical-debt.md" <<'REGISTER'
 # Technical Debt Register
@@ -149,7 +149,8 @@ scenario() {
   fi
 }
 
-# Both axes run once per round, so reviewer runs = 2 x rounds. The fourth argument is the gate's
+# Both axes run once per round, so reviewer runs = 2 x rounds, plus one more run in each round
+# for an axis whose report the gate found invalid. The fourth argument is the gate's
 # verdict on the last round ("-": the gate never ran).
 scenario clean-passes merge 2 approved STUB_REVIEW=clean
 scenario medium-is-not-blocking merge 2 approved STUB_REVIEW=medium
@@ -157,25 +158,37 @@ scenario high-blocks-until-rounds-exhausted reject 4 blocked STUB_REVIEW=bug STU
 scenario critical-blocks reject 2 blocked STUB_REVIEW=critical RALPH_MAX_REVIEW_ROUNDS=1
 scenario fixed-slice-passes-re-review merge 4 approved STUB_REVIEW=bug STUB_BUG=1 STUB_FIX=1
 scenario unmet-criterion-blocks reject 2 blocked STUB_REVIEW=unmet RALPH_MAX_REVIEW_ROUNDS=1
-scenario crashed-reviewer-is-not-approval reject 4 invalid STUB_REVIEW=crash RALPH_MAX_REVIEW_ROUNDS=2
-scenario garbage-report-is-not-approval reject 2 invalid STUB_REVIEW=garbage RALPH_MAX_REVIEW_ROUNDS=1
-scenario error-result-is-not-approval reject 2 invalid STUB_REVIEW=error RALPH_MAX_REVIEW_ROUNDS=1
-scenario skipped-axis-is-not-approval reject 2 invalid STUB_REVIEW=skip RALPH_MAX_REVIEW_ROUNDS=1
+scenario crashed-reviewer-is-not-approval reject 6 invalid STUB_REVIEW=crash RALPH_MAX_REVIEW_ROUNDS=2
+scenario garbage-report-is-not-approval reject 3 invalid STUB_REVIEW=garbage RALPH_MAX_REVIEW_ROUNDS=1
+scenario error-result-is-not-approval reject 3 invalid STUB_REVIEW=error RALPH_MAX_REVIEW_ROUNDS=1
+scenario skipped-axis-is-not-approval reject 3 invalid STUB_REVIEW=skip RALPH_MAX_REVIEW_ROUNDS=1
 scenario tampering-reviewer-is-not-approval reject 2 - STUB_REVIEW=tamper RALPH_MAX_REVIEW_ROUNDS=1
-scenario unread-changeset-is-not-approval reject 2 invalid STUB_REVIEW=noread RALPH_MAX_REVIEW_ROUNDS=1
+scenario unread-changeset-is-not-approval reject 3 invalid STUB_REVIEW=noread RALPH_MAX_REVIEW_ROUNDS=1
 # Evidence that cannot be right is an invalid review, never an approval.
-scenario invented-file-is-not-approval reject 2 invalid STUB_REVIEW=badfile RALPH_MAX_REVIEW_ROUNDS=1
-scenario line-outside-hunks-is-not-approval reject 2 invalid STUB_REVIEW=badline RALPH_MAX_REVIEW_ROUNDS=1
-scenario uncovered-file-is-not-approval reject 2 invalid STUB_REVIEW=uncovered RALPH_MAX_REVIEW_ROUNDS=1
-scenario wrong-commit-range-is-not-approval reject 2 invalid STUB_REVIEW=range RALPH_MAX_REVIEW_ROUNDS=1
-scenario missing-criterion-is-not-approval reject 2 invalid STUB_REVIEW=nocriteria RALPH_MAX_REVIEW_ROUNDS=1
-scenario invented-test-is-not-approval reject 2 invalid STUB_REVIEW=faketest RALPH_MAX_REVIEW_ROUNDS=1
+scenario invented-file-is-not-approval reject 3 invalid STUB_REVIEW=badfile RALPH_MAX_REVIEW_ROUNDS=1
+scenario line-outside-hunks-is-not-approval reject 3 invalid STUB_REVIEW=badline RALPH_MAX_REVIEW_ROUNDS=1
+scenario uncovered-file-is-not-approval reject 3 invalid STUB_REVIEW=uncovered RALPH_MAX_REVIEW_ROUNDS=1
+scenario wrong-commit-range-is-not-approval reject 3 invalid STUB_REVIEW=range RALPH_MAX_REVIEW_ROUNDS=1
+scenario missing-criterion-is-not-approval reject 3 invalid STUB_REVIEW=nocriteria RALPH_MAX_REVIEW_ROUNDS=1
+scenario invented-test-is-not-approval reject 3 invalid STUB_REVIEW=faketest RALPH_MAX_REVIEW_ROUNDS=1
 # As in the sandbox: logs outside the workspace must not take the changeset out of reach.
 scenario logs-outside-workspace-still-reviewed merge 2 approved STUB_REVIEW=clean \
   RALPH_LOG_ROOT="${WORK}/logs-outside-workspace-still-reviewed.logs"
+# An invalid report is asked for once more within its round, with the gate's reasons; the gate
+# judges the second report as strictly as the first (a second invalid one fails the round, see
+# the scenarios above). The first report stays in the logs.
+scenario invalid-report-is-asked-again-once merge 3 approved STUB_REVIEW=flaky
+flaky_logs="$(run_logs "${WORK}/invalid-report-is-asked-again-once")"
+check "the rejected report is kept as evidence" "[[ -s '${flaky_logs}/01-demo.review-1.spec.invalid.json' ]]"
+check "the second reviewer was told why" \
+  "grep -q 'is met but names no test' '${flaky_logs}/01-demo.review-1.spec.rejected.txt'"
+# The other axis's blocking finding is fixed after round 1, not a round later: without the second
+# request, round 1 would be lost and round 2 would still find the HIGH.
+scenario invalid-report-does-not-waste-the-fix merge 6 approved STUB_REVIEW=flakybug STUB_BUG=1 \
+  STUB_FIX=1 RALPH_MAX_REVIEW_ROUNDS=2
 # Technical debt register: deferred findings are recorded once, blockers and failures never.
 scenario repeated-medium-across-rounds merge 4 approved STUB_REVIEW=bugmedium STUB_BUG=1 STUB_FIX=1
-scenario unknown-debt-id-is-not-approval reject 2 invalid STUB_REVIEW=baddebt RALPH_MAX_REVIEW_ROUNDS=1
+scenario unknown-debt-id-is-not-approval reject 3 invalid STUB_REVIEW=baddebt RALPH_MAX_REVIEW_ROUNDS=1
 scenario dropped-debt-entry-rejects reject 2 approved STUB_REVIEW=clean STUB_DROP_DEBT=1
 
 echo "technical debt register:"
@@ -237,6 +250,72 @@ check "non-run entries untouched" \
   "[[ -d '${life_dir}/.ralph/logs/keep-me' && -d '${life_dir}/.ralph/logs/20200105-000000-notes' ]]"
 check "the new run's review files deleted after success" "[[ \$(review_dirs '${life_dir}') == 2 ]]"
 ((failures == 0)) || sed 's/^/      | /' "${life_dir}.out"
+
+# The real RED check with stubs: the suite always fails (as it would for any unrelated reason),
+# and the test runner reports the files it is given as failing on an assertion, or as failing to
+# load with STUB_VITEST_LOAD_ERROR set. Only discovery and execution may decide RED then.
+mkdir -p "${WORK}/bin"
+cat >"${WORK}/bin/pnpm" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >>"${PNPM_LOG}"
+case "$1 $2" in
+  "run lint") exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "${WORK}/bin/pnpm"
+cat >"${WORK}/vitest.mjs" <<'EOF'
+import { appendFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+const args = process.argv.slice(2);
+appendFileSync(process.env.PNPM_LOG, `vitest ${args.join(" ")}\n`);
+const out = args.find((arg) => arg.startsWith("--outputFile="))?.slice("--outputFile=".length);
+const files = args.filter((arg) => !arg.startsWith("--") && arg !== "run");
+const failing = [{ status: "failed", fullName: "the missing behaviour" }];
+const testResults = files.map((file) =>
+  process.env.STUB_VITEST_LOAD_ERROR
+    ? { name: resolve(file), status: "failed", message: "Cannot find module", assertionResults: [] }
+    : { name: resolve(file), status: "failed", message: "", assertionResults: failing },
+);
+writeFileSync(out, JSON.stringify({ testResults }));
+process.exit(1);
+EOF
+# Native Windows node does not understand MSYS paths; elsewhere cygpath does not exist.
+vitest_stub="$(cygpath -m "${WORK}/vitest.mjs" 2>/dev/null || echo "${WORK}/vitest.mjs")"
+
+# Prints verify_red's exit code after the test files given are added to a fresh repo.
+red_verdict() {
+  local dir=$1
+  shift
+  (
+    cd "${dir}"
+    printf 'packages:\n  - "packages/*"\n' >pnpm-workspace.yaml
+    mkdir -p packages/messaging/src
+    printf '{"name":"m","scripts":{"test":"vitest run"}}\n' >packages/messaging/package.json
+    git add -A && git -c user.name=t -c user.email=t@t commit --quiet -m scaffold
+    for file in "$@"; do mkdir -p "$(dirname "${file}")" && echo test >"${file}"; done
+    export PATH="${WORK}/bin:${PATH}" PNPM_LOG="${dir}.pnpm" RALPH_TEST_RUNNER="node ${vitest_stub}"
+    # shellcheck source=../ralph-loop.sh
+    source ./ralph-loop.sh
+    verify_red "${dir}.red.log"
+  ) >/dev/null 2>&1 && echo 0 || echo $?
+}
+
+echo "RED needs new tests that were discovered, executed and failed:"
+dir="$(new_repo red-executed)"
+check "a failing test in a scaffolded package proves RED" \
+  "[[ \$(red_verdict '${dir}' packages/messaging/src/relay.test.ts) == 0 ]]"
+check "the suite ran with the Turbo cache bypassed" "grep -qx 'run test --force' '${dir}.pnpm'"
+check "the changed test file itself was run" \
+  "grep -q '^vitest run .*src/relay.test.ts' '${dir}.pnpm'"
+dir="$(new_repo red-undiscovered)"
+check "a test in a package that does not exist yet is rejected although the suite fails" \
+  "[[ \$(red_verdict '${dir}' packages/newpkg/src/relay.test.ts) != 0 ]] &&
+   grep -q 'not inside a workspace package' '${dir}.red.log'"
+dir="$(new_repo red-load-error)"
+check "a test file that fails to load is rejected" \
+  "[[ \$(STUB_VITEST_LOAD_ERROR=1 red_verdict '${dir}' packages/messaging/src/relay.test.ts) != 0 ]] &&
+   grep -q 'failed to load' '${dir}.red.log'"
 
 tamper_dir="${WORK}/tampering-reviewer-is-not-approval"
 echo "tampering reviewer leaves no trace:"

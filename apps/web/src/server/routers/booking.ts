@@ -11,6 +11,7 @@ import {
   MixedCurrencyError,
   SeatUnavailableError,
 } from "@ticketarena/booking";
+import type { Logger } from "@ticketarena/contracts";
 import type { PrismaClient } from "@ticketarena/db";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
@@ -65,8 +66,13 @@ function toBuyer(principal: Principal): Buyer {
 }
 
 // Built per request so the injected clock and db always come from the request context.
-function bookingServiceFor(ctx: { db: PrismaClient; now: () => Date }) {
-  return createBookingService({ db: ctx.db, clock: { now: ctx.now }, newId: randomUUID });
+function bookingServiceFor(ctx: { db: PrismaClient; now: () => Date; logger: Logger }) {
+  return createBookingService({
+    db: ctx.db,
+    clock: { now: ctx.now },
+    newId: randomUUID,
+    logger: ctx.logger,
+  });
 }
 
 export const bookingRouter = createTRPCRouter({

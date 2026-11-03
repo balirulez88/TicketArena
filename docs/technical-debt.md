@@ -36,7 +36,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 5      | 23  | 28    |
+| OPEN          | 0        | 0    | 6      | 30  | 36    |
 | PLANNED       | 0        | 0    | 6      | 2   | 8     |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 0    | 4      | 2   | 6     |
@@ -866,4 +866,157 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `packages/messaging/src/outbox-relay.ts#per-aggregate-ordering-not-exists-older-pending-is-not-in-th`
 - **History:**
   - 2026-11-03: recorded: LOW scope_creep at `packages/messaging/src/outbox-relay.ts:78`, spec axis (ticket 06 review-3 spec, run 20261103-120228)
+
+### TD-043: placeOrder tells the replay result from the fresh result with an `"order" in placed` check
+
+- **Status:** OPEN
+- **Severity:** MEDIUM
+- **Escalation:** none
+- **Source:** ticket 07 (`07-structured-logging`)
+- **Evidence:** `.ralph/logs/20261103-123322/07-structured-logging.review-2.standards.json`
+- **Components:** `packages/booking/src/booking-service.ts:528`
+- **Problem:** The transaction callback returns either an OrderView (idempotent duplicate, line 446) or `{ order, correlationId }` (fresh, line 526). The caller tells them apart with a structural `"order" in placed` check. The two shapes carry no explicit tag. A later field named `order` on OrderView would flip the branch silently.
+- **Impact:** A duplicate request that wrongly takes the fresh branch would log a false "order placed" line. One that is misclassified the other way would return the wrapper instead of an OrderView. Only types guard against this, and that guard disappears if either shape changes.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Return a tagged result such as `{ kind: "created" | "replayed", order, correlationId }` from the transaction. Alternatively log inside a helper that only the fresh path calls.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/booking/src/booking-service.ts#placeorder-tells-the-replay-result-from-the-fresh-result-wit`; `packages/booking/src/booking-service.ts#transaction-result-discriminated-by-an-order-in-placed-check`
+- **History:**
+  - 2026-11-03: recorded: MEDIUM maintainability at `packages/booking/src/booking-service.ts:528`, standards axis (ticket 07 review-2 standards, run 20261103-123322)
+  - 2026-11-03: seen again: LOW maintainability at `packages/booking/src/booking-service.ts:528`, spec axis (ticket 07 review-2 spec, run 20261103-123322)
+
+### TD-044: The message body is JSON-parsed and envelope-validated up to three times per message
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 07 (`07-structured-logging`)
+- **Evidence:** `.ralph/logs/20261103-123322/07-structured-logging.review-2.standards.json`
+- **Components:** `packages/messaging/src/consumer-runner.ts:84`
+- **Problem:** `process` calls `parseJson(message.data)` and then `logBindingsFor`, which runs a full envelope safeParse, at line 60. It calls `parseJson` again at line 84, and `createEmitCausedEvent` runs `parseEnvelope` on every `emit`. The outbox relay (`logBindingsFor` on `row.payload`) repeats the pattern.
+- **Impact:** Every message pays the parse and validation cost repeatedly. The logging and causation paths could also diverge if one of them changes.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Parse once per message with `parseEnvelope(parseJson(data))`. Derive the log bindings and the emit cause from that single result.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/consumer-runner.ts#the-message-body-is-json-parsed-and-envelope-validated-up-to`
+- **History:**
+  - 2026-11-03: recorded: LOW maintainability at `packages/messaging/src/consumer-runner.ts:84`, standards axis (ticket 07 review-2 standards, run 20261103-123322)
+
+### TD-045: The context-injection test is weak and can leak state
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 07 (`07-structured-logging`)
+- **Evidence:** `.ralph/logs/20261103-123322/07-structured-logging.review-2.standards.json`
+- **Components:** `apps/web/src/server/logger.test.ts:27`
+- **Problem:** The test asserts only `typeof ctx.logger.child === "function"`. That cannot tell an injected boundary logger from any object. It also builds a real Prisma client through `database()` and never disconnects it. `vi.unstubAllEnvs()` runs only after the assertion, so a failure leaves the stubbed env in place for later tests.
+- **Impact:** A regression where the context logger stops being the boundary logger (for example the silent logger) would stay green. A failing test can pollute other tests in the file.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Move `vi.unstubAllEnvs()` into `afterEach`. Assert something specific, such as `ctx.logger` being the instance `createWebLogger` built.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/web/src/server/logger.test.ts#the-context-injection-test-is-weak-and-can-leak-state`
+- **History:**
+  - 2026-11-03: recorded: LOW missing_test at `apps/web/src/server/logger.test.ts:27`, standards axis (ticket 07 review-2 standards, run 20261103-123322)
+
+### TD-046: Needless `as Parameters<typeof createConsumerRunner>[0]` cast in the test
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 07 (`07-structured-logging`)
+- **Evidence:** `.ralph/logs/20261103-123322/07-structured-logging.review-2.standards.json`
+- **Components:** `packages/messaging/src/consumer-runner-logging.test.ts:63`
+- **Problem:** The options object is cast to the parameter type although `logger` is a declared option and the handler fits. The recording logger also adds a `debug` method the Logger port lacks. Both look like leftovers from the red phase.
+- **Impact:** The cast disables checking of the options shape and hides future signature drift in this test.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Remove the cast and the unused `debug` member so the compiler checks the call.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/consumer-runner-logging.test.ts#needless-as-parameters-typeof-createconsumerrunner-0-cast-in`
+- **History:**
+  - 2026-11-03: recorded: LOW maintainability at `packages/messaging/src/consumer-runner-logging.test.ts:63`, standards axis (ticket 07 review-2 standards, run 20261103-123322)
+
+### TD-047: pino is added with a caret range while the other runtime dependencies are pinned
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 07 (`07-structured-logging`)
+- **Evidence:** `.ralph/logs/20261103-123322/07-structured-logging.review-2.standards.json`
+- **Components:** `apps/web/package.json:25`
+- **Problem:** `"pino": "^10.4.0"` in web and in worker. Every other runtime dependency (`next`, `zod`, `@trpc/*`, `superjson`) uses an exact version. `tsx` is the only caret, and it is a dev tool.
+- **Impact:** A reinstall without the lockfile could pull a newer pino minor into production and break the reproducibility the other pins give.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Pin `10.4.0` exactly in both manifests, as with the other runtime dependencies.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/web/package.json#pino-is-added-with-a-caret-range-while-the-other-runtime-dep`
+- **History:**
+  - 2026-11-03: recorded: LOW maintainability at `apps/web/package.json:25`, standards axis (ticket 07 review-2 standards, run 20261103-123322)
+
+### TD-048: Handler errors are logged whole with no redaction policy
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 07 (`07-structured-logging`)
+- **Evidence:** `.ralph/logs/20261103-123322/07-structured-logging.review-2.standards.json`
+- **Components:** `packages/messaging/src/consumer-runner.ts:92`
+- **Problem:** `log.error({ err: error, ... })` serializes the full error, message and stack. Prisma and validation errors can embed query arguments such as the buyer's contact email. The pino loggers are built with no redaction setting.
+- **Impact:** Buyer contact details could end up in logs when a handler fails. No test or doc states a policy.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Add a pino `redact` configuration for contact fields in the app loggers, or log only `err.name` and a sanitized message. Document the policy under Logging and ids.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/consumer-runner.ts#handler-errors-are-logged-whole-with-no-redaction-policy`
+- **History:**
+  - 2026-11-03: recorded: LOW unverified_assumption at `packages/messaging/src/consumer-runner.ts:92`, standards axis (ticket 07 review-2 standards, run 20261103-123322)
+
+### TD-049: Router-to-service logger wiring is not tested
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 07 (`07-structured-logging`)
+- **Evidence:** `.ralph/logs/20261103-123322/07-structured-logging.review-2.spec.json`
+- **Components:** `apps/web/src/server/routers/booking.ts:69`
+- **Problem:** bookingServiceFor now passes ctx.logger into createBookingService. Every router test injects silentLogger, so nothing proves the booking procedures actually log with the context logger. The logging test calls the service directly.
+- **Impact:** Dropping `logger: ctx.logger` from bookingServiceFor would silence all booking logs in web and every test would still pass.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Add one router test that calls booking.holdSeats with a recording logger and asserts the lines carry correlationId and holdId.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/web/src/server/routers/booking.ts#router-to-service-logger-wiring-is-not-tested`
+- **History:**
+  - 2026-11-03: recorded: LOW missing_test at `apps/web/src/server/routers/booking.ts:69`, spec axis (ticket 07 review-2 spec, run 20261103-123322)
+
+### TD-050: Causation is enforced only if handlers use emit
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 07 (`07-structured-logging`)
+- **Evidence:** `.ralph/logs/20261103-123322/07-structured-logging.review-2.spec.json`
+- **Components:** `packages/messaging/src/consumer-runner.ts:83`
+- **Problem:** The handler still receives the raw `tx`, so a handler can write an outbox row directly and bypass emit. Only the emit path is tested; nothing detects other writes.
+- **Impact:** A future consumer that writes tx.outboxEvent.create itself can emit events with wrong or missing causationId without any test failing.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** State in the handler docs that emit is the only sanctioned way to write events. When the first real consumer lands, add a test of its emitted ids.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/consumer-runner.ts#causation-is-enforced-only-if-handlers-use-emit`
+- **History:**
+  - 2026-11-03: recorded: LOW unverified_assumption at `packages/messaging/src/consumer-runner.ts:83`, spec axis (ticket 07 review-2 spec, run 20261103-123322)
 <!-- ralph-debt:end -->

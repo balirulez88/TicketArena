@@ -1,3 +1,4 @@
+import { silentLogger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { TRPCError } from "@trpc/server";
@@ -17,6 +18,7 @@ function caller() {
     now: () => new Date("2027-03-01T12:00:00.000Z"),
     principal: { kind: "guest", sessionId: "0123456789abcdef0123456789abcdef" },
     db: db(),
+    logger: silentLogger,
   });
 }
 

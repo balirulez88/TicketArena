@@ -1,9 +1,11 @@
 // Public entry point of the messaging package.
 
+export type { CausedEventInput, EmitCausedEvent, JsonValue } from "./caused-event.js";
 export {
   type ConsumerRunner,
   type ConsumerRunnerOptions,
   createConsumerRunner,
+  type HandlerContext,
 } from "./consumer-runner.js";
 export {
   connectJetStreamMessageBus,

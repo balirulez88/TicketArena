@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 import {
+  envelopeLogBindings,
   envelopeSchema,
+  type Logger,
   orderPlacedPayloadSchema,
   seatHeldPayloadSchema,
+  silentLogger,
 } from "@ticketarena/contracts";
 import type { PrismaClient } from "@ticketarena/db";
 
@@ -22,6 +25,8 @@ export interface BookingServiceDeps {
   readonly clock: Clock;
   /** Mints ids in the application so tests control them; never `gen_random_uuid()`. */
   readonly newId: () => string;
+  /** Injected by the app; lines are bound to the booking's correlation, hold and order ids. */
+  readonly logger?: Logger;
 }
 
 type HoldStatus = "HELD" | "ORDERED" | "RELEASED" | "EXPIRED";
@@ -301,7 +306,12 @@ interface LockedSeat {
   readonly status: string;
 }
 
-export function createBookingService({ db, clock, newId }: BookingServiceDeps): BookingService {
+export function createBookingService({
+  db,
+  clock,
+  newId,
+  logger = silentLogger,
+}: BookingServiceDeps): BookingService {
   async function findByIdempotencyKey(
     client: Pick<PrismaClient, "order">,
     buyer: Buyer,
@@ -329,7 +339,7 @@ export function createBookingService({ db, clock, newId }: BookingServiceDeps): 
       if (new Set(seatIds).size !== seatIds.length) {
         throw new InvalidSeatSelectionError("seatIds contains duplicates");
       }
-      return db.$transaction(async (tx) => {
+      const hold = await db.$transaction(async (tx) => {
         // Waiting (not NOWAIT) lock in id order: a loser sees the winner's committed state
         // instead of a spurious "taken" while the winner might still roll back (ADR 0005).
         const locked = await tx.$queryRaw<LockedSeat[]>`
@@ -398,6 +408,17 @@ export function createBookingService({ db, clock, newId }: BookingServiceDeps): 
           correlationId,
         };
       });
+      // After commit, so a rolled-back hold never claims to have happened.
+      logger
+        .child(
+          envelopeLogBindings({
+            correlationId: hold.correlationId,
+            causationId: null,
+            holdId: hold.id,
+          }),
+        )
+        .info({ eventId, seatIds: hold.seatIds }, "seats held");
+      return hold;
     },
 
     async placeOrder(buyer, holdId, contact, idempotencyKey) {
@@ -409,7 +430,7 @@ export function createBookingService({ db, clock, newId }: BookingServiceDeps): 
       }
 
       try {
-        return await db.$transaction(async (tx) => {
+        const placed = await db.$transaction(async (tx) => {
           // Lock order is hold, then seats by id, matching holdSeats (ADR 0005).
           const holds = await tx.$queryRaw<LockedHold[]>`
             SELECT "buyerKey", status::text AS status, "holdExpiresAt",
@@ -502,8 +523,22 @@ export function createBookingService({ db, clock, newId }: BookingServiceDeps): 
             },
           });
 
-          return toOrderView(created);
+          return { order: toOrderView(created), correlationId: hold.correlationId };
         });
+        if ("order" in placed) {
+          logger
+            .child(
+              envelopeLogBindings({
+                correlationId: placed.correlationId,
+                causationId: null,
+                holdId,
+                orderId: placed.order.id,
+              }),
+            )
+            .info({ totalMinor: placed.order.totalMinor }, "order placed");
+          return placed.order;
+        }
+        return placed;
       } catch (error) {
         // A concurrent duplicate lost the unique-constraint race: return the winner's order.
         if (isUniqueViolation(error)) {

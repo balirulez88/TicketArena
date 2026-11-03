@@ -16,3 +16,12 @@ describe("worker docs", () => {
     });
   }
 });
+
+describe("logging docs", () => {
+  it("docs/architecture describes logger injection, id bindings and causation", () => {
+    const doc = readFileSync(join(docsDir, "architecture", "index.md"), "utf8");
+    for (const term of ["Logger injection", "correlationId", "causationId", "causedBy", "emit"]) {
+      expect(doc).toContain(term);
+    }
+  });
+});

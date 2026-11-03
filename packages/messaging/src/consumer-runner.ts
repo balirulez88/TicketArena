@@ -1,5 +1,7 @@
+import { type Logger, logBindingsFor, silentLogger } from "@ticketarena/contracts";
 import type { PrismaClient, TransactionClient } from "@ticketarena/db";
 import { createBackgroundLoop, sleep } from "./background-loop.js";
+import { createEmitCausedEvent, type EmitCausedEvent } from "./caused-event.js";
 import type { MessageBus, ReceivedMessage } from "./message-bus.js";
 
 const PG_UNIQUE_VIOLATION = "P2002";
@@ -9,6 +11,11 @@ const FETCH_BATCH = 10;
 // JetStream rejects pull requests that expire sooner than one second.
 const FETCH_EXPIRES_MS = 1_000;
 
+export interface HandlerContext {
+  /** Writes an outbox event caused by the handled message (ids derived, same transaction). */
+  readonly emit: EmitCausedEvent;
+}
+
 export interface ConsumerRunnerOptions {
   readonly bus: MessageBus;
   readonly prisma: PrismaClient;
@@ -16,7 +23,12 @@ export interface ConsumerRunnerOptions {
   readonly consumer: string;
   readonly filterSubject: string;
   /** Receives the transaction that also holds the dedupe row, so state and checkpoint commit together. */
-  readonly handler: (tx: TransactionClient, message: ReceivedMessage) => Promise<void>;
+  readonly handler: (
+    tx: TransactionClient,
+    message: ReceivedMessage,
+    context: HandlerContext,
+  ) => Promise<void>;
+  readonly logger?: Logger;
   readonly ackWaitMs?: number;
   readonly retryDelayMs?: (deliveryCount: number) => number;
 }
@@ -40,13 +52,16 @@ export async function createConsumerRunner(
     filterSubject: options.filterSubject,
     ...(options.ackWaitMs === undefined ? {} : { ackWaitMs: options.ackWaitMs }),
   });
+  const logger = (options.logger ?? silentLogger).child({ consumer: options.consumer });
   const retryDelayMs = options.retryDelayMs ?? defaultRetryDelayMs;
 
   async function process(message: ReceivedMessage): Promise<void> {
     const messageId = message.msgId;
+    const log = logger.child({ messageId, ...logBindingsFor(parseJson(message.data)) });
     if (messageId === undefined) {
       // Without an id there is no safe dedupe key, and an empty or shared one would make
       // unrelated messages look like duplicates. Redelivery cannot fix it: stop it here.
+      log.error({ subject: message.subject }, "message has no Nats-Msg-Id; terminated");
       message.term("missing Nats-Msg-Id");
       return;
     }
@@ -65,16 +80,21 @@ export async function createConsumerRunner(
           // real failure and must be retried, not acked.
           throw isUniqueViolation(error) ? new AlreadyProcessed() : error;
         }
-        await options.handler(tx, message);
+        await options.handler(tx, message, {
+          emit: createEmitCausedEvent(tx, parseJson(message.data)),
+        });
       });
     } catch (error) {
       if (error instanceof AlreadyProcessed) {
+        log.info({}, "duplicate message skipped");
         message.ack();
       } else {
+        log.error({ err: error, deliveryCount: message.deliveryCount }, "handler failed; retrying");
         message.nak(retryDelayMs(message.deliveryCount));
       }
       return;
     }
+    log.info({ subject: message.subject }, "message handled");
     message.ack();
   }
 
@@ -99,6 +119,14 @@ export async function createConsumerRunner(
   });
 
   return { pollOnce, ...loop };
+}
+
+function parseJson(data: string): unknown {
+  try {
+    return JSON.parse(data);
+  } catch {
+    return undefined;
+  }
 }
 
 function defaultRetryDelayMs(deliveryCount: number): number {

@@ -61,6 +61,7 @@ below shows what is built.
   event; `orders` and `order_lines` back `booking.placeOrder` / `booking.getOrder`, which write
   `order.placed`; envelope schemas live in `packages/contracts`.
 - `packages/messaging` and `apps/worker`: the `MessageBus` port with its JetStream adapter, the outbox relay (250 ms, batch of 100), the consumer runner and the worker app with `/health`.
+- Structured logging: each app injects a `pino` logger; booking, the relay and the consumer runner log with a child logger bound to `correlationId`/`causationId` (plus `holdId`, `orderId`, `paymentId`). See [architecture/](architecture/index.md#logging-and-ids).
 - Quality gate: Biome (warnings fail), strict `tsc`, Vitest, enforced by `ralph-loop.sh`.
 
 A buyer can hold one seat and place an order for it (`PENDING_PAYMENT`; no queue or payment yet). Remaining features arrive as tickets split from the

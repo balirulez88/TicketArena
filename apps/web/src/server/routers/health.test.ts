@@ -1,3 +1,4 @@
+import { silentLogger } from "@ticketarena/contracts";
 import { createPrismaClient } from "@ticketarena/db";
 import { expect, test } from "vitest";
 import { createCaller } from "./_app";
@@ -12,6 +13,7 @@ test("health check reports ok with the time it was checked", async () => {
     now: () => fixedNow,
     principal: { kind: "guest", sessionId: "0123456789abcdef0123456789abcdef" },
     db: unusedDb(),
+    logger: silentLogger,
   });
 
   const result = await caller.health.check();

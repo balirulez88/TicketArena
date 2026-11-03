@@ -10,8 +10,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ticketarena/contracts": "workspace:*",
     "@ticketarena/db": "workspace:*",
     "@ticketarena/messaging": "workspace:*",
+    "pino": "^10.4.0",
     "zod": "4.6.7"
   },
   "devDependencies": {

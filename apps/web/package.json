@@ -11,10 +11,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@tanstack/react-query": "5.105.0",
     "@ticketarena/booking": "workspace:*",
     "@ticketarena/contracts": "workspace:*",
     "@ticketarena/db": "workspace:*",
-    "@tanstack/react-query": "5.105.0",
     "@trpc/client": "11.19.0",
     "@trpc/server": "11.19.0",
     "@trpc/tanstack-react-query": "11.19.0",
@@ -22,6 +22,7 @@
     "clsx": "2.1.1",
     "lucide-react": "1.61.0",
     "next": "16.4.3",
+    "pino": "^10.4.0",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "superjson": "2.2.6",
@@ -30,8 +31,8 @@
     "zustand": "5.0.16"
   },
   "devDependencies": {
-    "@ticketarena/test-infra": "workspace:*",
     "@tailwindcss/postcss": "4.3.3",
+    "@ticketarena/test-infra": "workspace:*",
     "@types/node": "26.6.5",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",

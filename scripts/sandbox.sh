@@ -46,6 +46,7 @@ MSYS_NO_PATHCONV=1 docker run --rm "${tty_flag[@]}" \
   --env RALPH_MAX_REVIEW_ROUNDS \
   --env RALPH_REVIEW_BLOCKING \
   --env RALPH_REVIEW_TIMEOUT \
+  --env RALPH_TEST_RUNNER \
   --env GIT_AUTHOR_NAME="$(git -C "${REPO_ROOT}" config user.name)" \
   --env GIT_AUTHOR_EMAIL="$(git -C "${REPO_ROOT}" config user.email)" \
   "${IMAGE}" "$@"

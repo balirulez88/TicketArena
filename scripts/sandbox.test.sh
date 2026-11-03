@@ -34,13 +34,20 @@ new_host_repo() {
     >"${dir}/docs/technical-debt.md"
   node "${dir}/scripts/ralph-debt.mjs" format "${dir}/docs/technical-debt.md"
 
-  # A project whose gate passes once feature.txt exists, so RED and GREEN are genuine.
+  # A project whose gate passes once feature.txt exists, so RED and GREEN are genuine. Its one
+  # workspace package owns the RED test; stub/vitest.mjs stands in for Vitest there and reports
+  # each test it is given as failing until feature.txt exists, as the RED check requires.
   printf '{"name":"fixture","private":true,"scripts":{"lint":"node -e 0","typecheck":"node -e 0","test":"node gate.mjs","check:debt":"node scripts/ralph-debt.mjs check docs/technical-debt.md"}}\n' \
     >"${dir}/package.json"
-  printf "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\nimporters:\n\n  .: {}\n" \
+  printf 'packages:\n  - "packages/*"\n' >"${dir}/pnpm-workspace.yaml"
+  mkdir -p "${dir}/packages/demo/src"
+  printf '{"name":"demo","private":true,"scripts":{"test":"node ../../stub/vitest.mjs run"}}\n' \
+    >"${dir}/packages/demo/package.json"
+  printf "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\nimporters:\n\n  .: {}\n\n  packages/demo: {}\n" \
     >"${dir}/pnpm-lock.yaml"
   printf 'import { existsSync } from "node:fs";\nprocess.exit(existsSync("feature.txt") ? 0 : 1);\n' \
     >"${dir}/gate.mjs"
+  cp "${SOURCE_ROOT}/scripts/ralph-stub-vitest.mjs" "${dir}/stub/vitest.mjs"
   printf '.ralph/\nnode_modules/\n' >"${dir}/.gitignore"
   printf 'unrelated notes\n' >"${dir}/notes.md"
   printf '# 01: Demo ticket\n\n**Blocked by:** None (can start immediately)\n\n**Status:** ready-for-agent\n\n- [ ] works\n' \
@@ -48,7 +55,7 @@ new_host_repo() {
   cat >"${dir}/stub/agent.sh" <<'EOF'
 #!/usr/bin/env bash
 case "${RALPH_PHASE}" in
-  red) echo "test" >demo.test.ts ;;
+  red) mkdir -p packages/demo/src && echo "test" >packages/demo/src/demo.test.ts ;;
   green) echo feature >feature.txt ;;
 esac
 EOF
@@ -73,7 +80,7 @@ run_sandbox() {
   local dir=$1
   # Stub agents need no credentials; a placeholder satisfies the scripts' key check.
   ANTHROPIC_API_KEY=placeholder-unused-by-stub-agents CLAUDE_CODE_OAUTH_TOKEN="" \
-    RALPH_AGENT_CMD="bash stub/agent.sh" RALPH_REVIEW_CMD="env STUB_REVIEW=high node stub/ralph-stub-reviewer.mjs" \
+    RALPH_TEST_RUNNER="node ../../stub/vitest.mjs" RALPH_AGENT_CMD="bash stub/agent.sh" RALPH_REVIEW_CMD="env STUB_REVIEW=high node stub/ralph-stub-reviewer.mjs" \
     RALPH_MAX_ATTEMPTS=1 RALPH_MAX_REVIEW_ROUNDS=1 RALPH_BASE_BRANCH="" \
     bash "${dir}/scripts/sandbox.sh" --once >"${dir}.out" 2>&1 && echo 0 || echo $?
 }

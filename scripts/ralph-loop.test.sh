@@ -252,8 +252,8 @@ check "the new run's review files deleted after success" "[[ \$(review_dirs '${l
 ((failures == 0)) || sed 's/^/      | /' "${life_dir}.out"
 
 # The real RED check with stubs: the suite always fails (as it would for any unrelated reason),
-# and the test runner reports the files it is given as failing on an assertion, or as failing to
-# load with STUB_VITEST_LOAD_ERROR set. Only discovery and execution may decide RED then.
+# and scripts/ralph-stub-vitest.mjs reports the files it is given as failing on an assertion, or
+# as failing to load with STUB_VITEST_LOAD_ERROR set. Only discovery and execution decide RED.
 mkdir -p "${WORK}/bin"
 cat >"${WORK}/bin/pnpm" <<'EOF'
 #!/usr/bin/env bash
@@ -264,24 +264,9 @@ case "$1 $2" in
 esac
 EOF
 chmod +x "${WORK}/bin/pnpm"
-cat >"${WORK}/vitest.mjs" <<'EOF'
-import { appendFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-const args = process.argv.slice(2);
-appendFileSync(process.env.PNPM_LOG, `vitest ${args.join(" ")}\n`);
-const out = args.find((arg) => arg.startsWith("--outputFile="))?.slice("--outputFile=".length);
-const files = args.filter((arg) => !arg.startsWith("--") && arg !== "run");
-const failing = [{ status: "failed", fullName: "the missing behaviour" }];
-const testResults = files.map((file) =>
-  process.env.STUB_VITEST_LOAD_ERROR
-    ? { name: resolve(file), status: "failed", message: "Cannot find module", assertionResults: [] }
-    : { name: resolve(file), status: "failed", message: "", assertionResults: failing },
-);
-writeFileSync(out, JSON.stringify({ testResults }));
-process.exit(1);
-EOF
 # Native Windows node does not understand MSYS paths; elsewhere cygpath does not exist.
-vitest_stub="$(cygpath -m "${WORK}/vitest.mjs" 2>/dev/null || echo "${WORK}/vitest.mjs")"
+vitest_stub="$(cygpath -m "${SOURCE_ROOT}/scripts/ralph-stub-vitest.mjs" 2>/dev/null ||
+  echo "${SOURCE_ROOT}/scripts/ralph-stub-vitest.mjs")"
 
 # Prints verify_red's exit code after the test files given are added to a fresh repo.
 red_verdict() {
@@ -294,7 +279,7 @@ red_verdict() {
     printf '{"name":"m","scripts":{"test":"vitest run"}}\n' >packages/messaging/package.json
     git add -A && git -c user.name=t -c user.email=t@t commit --quiet -m scaffold
     for file in "$@"; do mkdir -p "$(dirname "${file}")" && echo test >"${file}"; done
-    export PATH="${WORK}/bin:${PATH}" PNPM_LOG="${dir}.pnpm" RALPH_TEST_RUNNER="node ${vitest_stub}"
+    export PATH="${WORK}/bin:${PATH}" PNPM_LOG="${dir}.pnpm" STUB_VITEST_LOG="${dir}.pnpm" RALPH_TEST_RUNNER="node ${vitest_stub}"
     # shellcheck source=../ralph-loop.sh
     source ./ralph-loop.sh
     verify_red "${dir}.red.log"

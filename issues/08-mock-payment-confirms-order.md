@@ -4,7 +4,7 @@
 
 **Blocked by:** 06, 07
 
-**Status:** ready-for-agent
+**Status:** blocked
 
 - [ ] `payment` schema with its own outbox and `processed_messages`; `payment_attempts` unique `(orderId, attemptNo)` with CHECK `CAPTURED ⇔ capturedAt IS NOT NULL`.
 - [ ] The Payment module consumes `order.placed`, records a captured attempt and emits `payment.succeeded` (`paymentId`, `orderId`, `attemptNo`, `amount`, `currency`, `capturedAt`) via its outbox; randomness and latency come from injected `Random`/`Clock`.

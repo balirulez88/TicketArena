@@ -36,8 +36,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 3      | 16  | 19    |
-| PLANNED       | 0        | 0    | 2      | 2   | 4     |
+| OPEN          | 0        | 0    | 0      | 16  | 16    |
+| PLANNED       | 0        | 0    | 5      | 2   | 7     |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 0    | 4      | 2   | 6     |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
@@ -46,7 +46,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-001: packages/db reads process.env directly
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** MEDIUM
 - **Escalation:** none
 - **Source:** ticket 03 (`03-seeded-catalog-and-seat-map-api`)
@@ -56,12 +56,13 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Impact:** This sets a precedent that weakens the dependency-injection rule. There is no concrete runtime failure, which is why I rate it MEDIUM and not HIGH.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. No correctness impact found in the 2026-10-30 correctness review; config-injection debt, revisit before ticket 38 (deployment).
 - **Remediation:** Take the URL as a CLI argument, or put the entry point in an app or scripts workspace that validates env. Alternatively, record the CLI-entry exception in CLAUDE.md or an ADR so the rule and the code agree.
-- **Target:** none
+- **Target:** ticket 43 (`issues/43-config-injection-and-venue-migration-hardening.md`); must merge before ticket 38 (deployment), which is blocked by it
 - **Resolution:** none
 - **Verification:** none
 - **Fingerprints:** `packages/db/src/seed-main.ts#packages-db-reads-process-env-directly`
 - **History:**
   - 2026-10-30: recorded: MEDIUM architecture at `packages/db/src/seed-main.ts:6`, standards axis (ticket 03 review-2 standards, run 20261030-132411)
+  - 2026-11-03: planned for ticket 43 (`issues/43-config-injection-and-venue-migration-hardening.md`), before ticket 38 (user decision, 2026-11-03)
 
 ### TD-002: Venue seeding is check-then-create on a non-unique column
 
@@ -86,7 +87,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-003: Every request now requires DATABASE_URL, even procedures that do not use the db
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** MEDIUM
 - **Escalation:** none
 - **Source:** ticket 03 (`03-seeded-catalog-and-seat-map-api`)
@@ -96,12 +97,13 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Impact:** A missing or invalid DATABASE_URL turns the health check and whoami into 500s. A liveness probe then cannot tell a running process from an unreachable database. The env error also appears on unrelated routes.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. No correctness impact found in the 2026-10-30 correctness review; config-injection debt, revisit before ticket 38 (deployment).
 - **Remediation:** Make ctx.db a lazy accessor (for example a getter or `db: () => PrismaClient`) that is evaluated only by procedures that need it, or add a separate readiness check so that health.check stays independent of the database.
-- **Target:** none
+- **Target:** ticket 43 (`issues/43-config-injection-and-venue-migration-hardening.md`); must merge before ticket 38 (deployment), which is blocked by it
 - **Resolution:** none
 - **Verification:** none
 - **Fingerprints:** `apps/web/src/server/trpc.ts#every-request-now-requires-database-url-even-procedures-that`
 - **History:**
   - 2026-10-30: recorded: MEDIUM regression_risk at `apps/web/src/server/trpc.ts:36`, standards axis (ticket 03 review-2 standards, run 20261030-132411)
+  - 2026-11-03: planned for ticket 43 (`issues/43-config-injection-and-venue-migration-hardening.md`), before ticket 38 (user decision, 2026-11-03)
 
 ### TD-004: Module-level mutable singleton hides the client lifecycle
 
@@ -280,7 +282,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 - **Status:** PLANNED
 - **Severity:** MEDIUM
-- **Escalation:** Business impact is HIGH for any real on-sale: every abandoned hold makes its seats unsellable for good. Ticket 14 must merge before any deployment (ticket 38).
+- **Escalation:** Booking-correctness risk. Business impact is HIGH for any real on-sale: every abandoned hold makes its seats unsellable for good. No release that depends on expired seats becoming available again may ship before ticket 14 merges and its tests (AT-07: an expired hold's seat can be held by another buyer before the sweeper runs) pass; ticket 38 (deployment) is blocked by ticket 14.
 - **Source:** ticket 04 (`04-hold-one-seat`)
 - **Evidence:** `.ralph/logs/20261030-134316/04-hold-one-seat.review-1.standards.json`; `.ralph/logs/20261030-134316/04-hold-one-seat.review-1.spec.json`
 - **Components:** `packages/booking/src/booking-service.ts:73`, `packages/db/prisma/schema.prisma:143`
@@ -298,6 +300,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-10-30: merged duplicate (spec axis, LOW: the Hold schema comment promises lazy expiry) during backfill
   - 2026-10-30: escalation flagged (correctness review of tickets 03-05, 2026-10-30)
   - 2026-10-30: planned for ticket 14 (`issues/14-hold-expiry.md`), AC1 and AC7 (correctness review of tickets 03-05, 2026-10-30)
+  - 2026-11-03: ticket 38 now lists ticket 14 as a blocker, so deployment cannot start before lazy expiry is verified (user decision, 2026-11-03)
 
 ### TD-014: Duplicate seat ids are not rejected at the service level
 
@@ -577,7 +580,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-028: Unique index on venues.name fails if duplicate venues already exist
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** MEDIUM
 - **Escalation:** none
 - **Source:** ticket 41 (`41-booking-and-catalog-correctness-fixes`)
@@ -586,13 +589,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Problem:** The migration creates a UNIQUE INDEX on venues(name) without removing duplicates first. The old seed was a check-then-create on a non-unique column (TD-002), and that race is the reason for this fix. A database where concurrent seed runs already inserted duplicate venues cannot take the migration.
 - **Impact:** prisma migrate deploy fails on such a database and blocks the deploy. The Ticket 38 deploy hooks that run seeds could hit this. Once the index exists the problem cannot recur.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
-- **Remediation:** Before CREATE UNIQUE INDEX, merge or delete duplicate venue rows. This means repointing sections and events to the surviving row. Alternatively, document that the migration assumes a database with no duplicates and fail early with a clear message.
-- **Target:** none
+- **Remediation:** The migration must succeed on a database that already holds duplicate venue names, even though none is known to exist: before CREATE UNIQUE INDEX, keep one venue per name (a documented, deterministic survivor rule) and repoint its duplicates' sections and events to it. Failing early with a message alone is not enough. Prove it with an integration test that migrates a database seeded with duplicates.
+- **Target:** ticket 43 (`issues/43-config-injection-and-venue-migration-hardening.md`), AC3 and AC4; must merge before ticket 38 (deployment), which is blocked by it
 - **Resolution:** none
 - **Verification:** none
 - **Fingerprints:** `packages/db/prisma/migrations/20261030030000_venue_name_unique_seat_hold_index/migration.sql#unique-index-on-venues-name-fails-if-duplicate-venues-alread`
 - **History:**
   - 2026-10-30: recorded: MEDIUM regression_risk at `packages/db/prisma/migrations/20261030030000_venue_name_unique_seat_hold_index/migration.sql:2`, standards axis (ticket 41 review-1 standards, run 20261030-175150)
+  - 2026-11-03: planned for ticket 43 (`issues/43-config-injection-and-venue-migration-hardening.md`), before ticket 38; remediation narrowed to merging duplicates (user decision, 2026-11-03)
 
 ### TD-029: MixedCurrencyError doubles as the empty-set error
 

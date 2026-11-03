@@ -98,7 +98,17 @@ const behaviours = {
     report.criteria[0] = { ...met(criteriaIds[0]), status: "unmet", tests: [], note: "not built" };
   },
   "tamper:standards": () => writeFileSync("tampered.txt", "sneaky\n"),
+  // A met criterion without a test is invalid; told why, the next session reports it correctly.
+  "flaky:spec": () => untestedUntilTold(),
+  "flakybug:spec": () => untestedUntilTold(),
+  "flakybug:standards": () => existsSync("bug.txt") && report.findings.push(finding("HIGH")),
 };
+
+function untestedUntilTold() {
+  if (!prompt.includes("was rejected by the review gate")) {
+    report.criteria[0] = { ...met(criteriaIds[0]), tests: [] };
+  }
+}
 
 const print = (text) => process.stdout.write(`${text}\n`);
 

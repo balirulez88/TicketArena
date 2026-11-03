@@ -73,8 +73,16 @@ For each ticket whose `**Status:**` is `ready-for-agent` and whose blockers are 
 
 1. Create branch `slice/<NN>-<slug>` from `main`.
 2. **RED:** the agent writes failing test(s) for the first acceptance criterion. The harness
-   requires a changed test file, lint passing, and `pnpm run test` **failing**. A test that
-   passes before any implementation proves nothing and is rejected.
+   requires a changed test file, lint passing, and `pnpm run test --force` **failing** (Turbo's
+   cache bypassed, so no replayed result stands in for running the new tests). Then
+   `scripts/ralph-red.mjs` runs exactly the changed test files through their package's own Vitest
+   and accepts RED only if each one belongs to a workspace package with a `test` script, executes
+   at least one test, and at least one test fails (on an assertion, or on an error inside a test
+   such as calling a function that does not exist yet). The evidence directory is emptied first,
+   so an earlier attempt's report never counts. A test that passes before any implementation, one
+   no package discovers (e.g. in a package that has no scaffolding yet), one that fails to load,
+   or one that is all skipped proves nothing and is rejected. A brand-new package therefore needs
+   its scaffolding merged first, as a separately reviewed change.
 3. **GREEN:** the agent implements until the full gate passes. Gate output from a failed attempt
    is fed into the next one, up to `RALPH_MAX_ATTEMPTS`.
 4. **REFACTOR + DOCS:** the agent runs the code-review/refactor pass and `update-docs`. The gate
@@ -186,6 +194,12 @@ non-interactive mode. TicketArena's rules for reviewers are in [code-review.md](
   so does any acceptance criterion that is `partial`, `unmet` or `unverifiable`;
   `MEDIUM` and `LOW` are logged, not blocking. A crashed or timed-out reviewer, an error result,
   invalid JSON, a skipped axis or a tampered tree is a **failed** review, never an approval.
+- **Invalid report, asked once more.** An invalid report says nothing about the code, so the
+  harness does not spend a fix round on it: each reviewer whose report is invalid is asked again
+  **once** within the same round, in a fresh session, with the gate's reasons
+  (`<slug>.review-<round>.<axis>.rejected.txt`; the first report stays as `.invalid.json`). The
+  gate then judges the pair exactly as before; a second invalid report fails the round. Without
+  this, the other axis's valid blocking findings would wait a round unfixed.
 - **Bounded.** Up to `RALPH_MAX_REVIEW_ROUNDS` (default 3) rounds; each round except the last
   may trigger a fix. A slice still blocked, or without a valid approval, after the last round is
   rejected and quarantined like any other failure.

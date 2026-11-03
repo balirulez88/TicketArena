@@ -263,6 +263,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@ticketarena/booking':
+        specifier: workspace:*
+        version: link:../../packages/booking
       '@ticketarena/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

@@ -3,6 +3,7 @@ import type { PrismaClient, TransactionClient } from "@ticketarena/db";
 import { createBackgroundLoop, sleep } from "./background-loop.js";
 import { createEmitCausedEvent, type EmitCausedEvent } from "./caused-event.js";
 import type { MessageBus, ReceivedMessage } from "./message-bus.js";
+import { type ServiceName, serviceStore } from "./service-store.js";
 
 const PG_UNIQUE_VIOLATION = "P2002";
 // ADR 0011 transient-failure schedule, indexed by delivery count; the last entry repeats.
@@ -19,6 +20,8 @@ export interface HandlerContext {
 export interface ConsumerRunnerOptions {
   readonly bus: MessageBus;
   readonly prisma: PrismaClient;
+  /** Whose `processed_messages` and outbox the handler runs against; defaults to booking. */
+  readonly service?: ServiceName;
   /** Durable name; also the `consumer` half of the `processed_messages` key. */
   readonly consumer: string;
   readonly filterSubject: string;
@@ -53,6 +56,7 @@ export async function createConsumerRunner(
     ...(options.ackWaitMs === undefined ? {} : { ackWaitMs: options.ackWaitMs }),
   });
   const logger = (options.logger ?? silentLogger).child({ consumer: options.consumer });
+  const store = serviceStore(options.service ?? "booking");
   const retryDelayMs = options.retryDelayMs ?? defaultRetryDelayMs;
 
   async function process(message: ReceivedMessage): Promise<void> {
@@ -68,12 +72,10 @@ export async function createConsumerRunner(
     try {
       await options.prisma.$transaction(async (tx) => {
         try {
-          await tx.processedMessage.create({
-            data: {
-              consumer: options.consumer,
-              messageId,
-              streamSeq: BigInt(message.streamSeq),
-            },
+          await store.insertProcessed(tx, {
+            consumer: options.consumer,
+            messageId,
+            streamSeq: BigInt(message.streamSeq),
           });
         } catch (error) {
           // Only THIS insert may mean "duplicate": a unique violation from the handler is a
@@ -81,7 +83,7 @@ export async function createConsumerRunner(
           throw isUniqueViolation(error) ? new AlreadyProcessed() : error;
         }
         await options.handler(tx, message, {
-          emit: createEmitCausedEvent(tx, parseJson(message.data)),
+          emit: createEmitCausedEvent(tx, parseJson(message.data), store),
         });
       });
     } catch (error) {

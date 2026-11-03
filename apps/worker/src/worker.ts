@@ -42,16 +42,22 @@ export async function startWorker(options: WorkerOptions): Promise<RunningWorker
       }),
     ),
   );
-  const relay = createOutboxRelay({
-    bus: options.bus,
-    prisma: options.prisma,
-    ...loggerOption,
-    ...options.relay,
-  });
+  // One relay per service outbox (ADR 0009).
+  const relays = (["booking", "payment"] as const).map((service) =>
+    createOutboxRelay({
+      bus: options.bus,
+      prisma: options.prisma,
+      service,
+      ...loggerOption,
+      ...options.relay,
+    }),
+  );
   for (const runner of runners) {
     runner.start();
   }
-  relay.start();
+  for (const relay of relays) {
+    relay.start();
+  }
 
   const server = createServer((request, response) => {
     if (request.method === "GET" && request.url === "/health") {
@@ -67,7 +73,7 @@ export async function startWorker(options: WorkerOptions): Promise<RunningWorker
     port: (server.address() as AddressInfo).port,
     async stop() {
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      await relay.stop();
+      await Promise.all(relays.map((relay) => relay.stop()));
       await Promise.all(runners.map((runner) => runner.stop()));
     },
   };

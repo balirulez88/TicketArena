@@ -54,16 +54,36 @@ Each slice that emits an event adds a row here. Every event travels in the envel
 `packages/contracts` (`id`, `type`, `version`, `occurredAt`, `correlationId`, `causationId`,
 optional `holdId`/`orderId`, `payload`); the full envelope is stored as the outbox row payload.
 
-| Event type     | Producer                              | Consumers | Payload version |
-| -------------- | ------------------------------------- | --------- | --------------- |
-| `seat.held`    | `BookingService.holdSeats` (same TX)  | none yet  | 1               |
-| `order.placed` | `BookingService.placeOrder` (same TX) | none yet  | 1               |
+| Event type          | Producer                                         | Consumers      | Payload version |
+| ------------------- | ------------------------------------------------ | -------------- | --------------- |
+| `seat.held`         | `BookingService.holdSeats` (same TX)             | none yet       | 1               |
+| `order.placed`      | `BookingService.placeOrder` (same TX)            | `payment`      | 1               |
+| `payment.succeeded` | mock Payment handler (same TX, `payment` outbox) | `booking-saga` | 1               |
+| `order.confirmed`   | booking saga handler (same TX)                   | none yet       | 1               |
 
 `seat.held` payload: `holdId`, `eventId`, `seatIds`, `holdExpiresAt`. Its `correlationId` is
 minted here and reused by every later event of the booking.
 
 `order.placed` payload: `orderId`, `holdId`, `amountMinor`, `currency`, `paymentDeadline`, `contact`
 (`email`, optional `phone`). It carries the hold's `correlationId`.
+
+`payment.succeeded` payload: `paymentId`, `orderId`, `attemptNo`, `amount` (minor units), `currency`,
+`capturedAt` (provider time). `order.confirmed` payload: `orderId`, `seatIds`, `totalMinor`, `currency`,
+`contact`.
+
+## Payment saga (happy path)
+
+`apps/worker/src/consumers.ts` registers two durable consumers. `payment` (`service: "payment"`)
+handles `order.placed` in `apps/worker/src/payment/`: one CAPTURED `payment.payment_attempts` row and a
+`payment.succeeded` event, with latency and outcome drawn from the injected `Random`/`Clock`. A
+`+dup@` email emits the result twice under distinct event ids. `booking-saga` handles
+`payment.succeeded` (`createPaymentSagaHandler`, `packages/booking`): lock the order, ignore a known
+`paymentId`, else in one transaction set the order `CONFIRMED`, insert the `APPLIED` ledger row, set
+the seats `SOLD` and write `order.confirmed`. Late, mismatched or non-pending cases throw (retried)
+until the later tickets build the rest of the decision matrix.
+
+Relay and runner take a `service` (`booking` default, or `payment`) that selects the outbox and
+`processed_messages` of that schema (ADR 0009); the worker runs one relay per outbox.
 
 ## Decided, not yet built
 

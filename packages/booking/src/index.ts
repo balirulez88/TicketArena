@@ -17,3 +17,9 @@ export {
   type OrderView,
   SeatUnavailableError,
 } from "./booking-service";
+export {
+  createPaymentSagaHandler,
+  type PaymentSagaDeps,
+  type SagaContext,
+  type SagaMessage,
+} from "./payment-saga";

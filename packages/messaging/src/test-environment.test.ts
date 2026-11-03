@@ -14,7 +14,7 @@ describe("messaging test environment", () => {
     const prisma = createPrismaClient({ connectionString: database.url, driver: "pg" });
     try {
       const rows = await prisma.$queryRaw<{ table_name: string }[]>`
-        SELECT table_name FROM information_schema.tables WHERE table_name = 'outbox_events'`;
+        SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'outbox_events'`;
       expect(rows).toEqual([{ table_name: "outbox_events" }]);
     } finally {
       await prisma.$disconnect();

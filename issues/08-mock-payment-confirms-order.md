@@ -13,3 +13,4 @@
 - [ ] A test proves atomicity: a failure injected after the ledger insert leaves neither the `CONFIRMED` order nor the `APPLIED` row.
 - [ ] `+dup@` makes Payment publish its result twice; the second delivery causes no state change (first half of AT-14).
 - [ ] Integration test: hold → order → worker → `CONFIRMED` with exactly one `APPLIED` row.
+- [ ] TD-040: the consumer runner's AT-31 test proves the redelivery was acked, not nak'd (e.g. consumer info shows no pending or ack-pending message after the second delivery), so a duplicate can never loop; the register entry is `RESOLVED` with that test in `Verification`.

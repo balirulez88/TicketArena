@@ -36,8 +36,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 6      | 23  | 29    |
-| PLANNED       | 0        | 0    | 5      | 2   | 7     |
+| OPEN          | 0        | 0    | 5      | 23  | 28    |
+| PLANNED       | 0        | 0    | 6      | 2   | 8     |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 0    | 4      | 2   | 6     |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
@@ -811,9 +811,9 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-040: AT-31 test does not prove the redelivery was acked as a duplicate
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** MEDIUM
-- **Escalation:** none
+- **Escalation:** Acceptance gap: ticket 06 AC9 (AT-31) is approved, but its test proves the redelivery and the single side effect, not the duplicate ack the criterion names. A regression that naks duplicates forever would stay green, and every later consumer (first: ticket 08) relies on this path. Severity kept at MEDIUM as reported; fix before any consumer ships.
 - **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
 - **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.spec.json`
 - **Components:** `packages/messaging/src/consumer-runner.test.ts:221`
@@ -821,12 +821,13 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Impact:** A regression that naks real duplicates forever would stay green, which is a delivery-loop failure in production.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
 - **Remediation:** Assert the ack directly, for example with the consumer info (num_ack_pending and num_pending both 0 after the second delivery). Alternatively, record the ack and nak calls on the wrapped message and assert that the second delivery was acked and not nak'd.
-- **Target:** none
+- **Target:** ticket 08 (`issues/08-mock-payment-confirms-order.md`), last AC
 - **Resolution:** none
 - **Verification:** none
 - **Fingerprints:** `packages/messaging/src/consumer-runner.test.ts#at-31-test-does-not-prove-the-redelivery-was-acked-as-a-dupl`
 - **History:**
   - 2026-11-03: recorded: MEDIUM missing_test at `packages/messaging/src/consumer-runner.test.ts:221`, spec axis (ticket 06 review-3 spec, run 20261103-120228)
+  - 2026-11-03: escalation flagged and planned for ticket 08: the test leaves ticket 06 AC9 partly unproven (acceptance review of ticket 06, 2026-11-03)
 
 ### TD-041: The 250 ms default is asserted only as an exported constant
 

@@ -26,7 +26,7 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Sweeper**           | Worker job that expires holds and overdue orders and frees their seats.                               |
 | **Reconciler**        | Worker job that re-emits stale refund obligations and escalates them to manual review.                |
 | **Correlation id**    | Minted once at `holdSeats`; unchanged across hold, order, payment, refund, notification.              |
-| **Causation id**      | The id of the event that caused the current event.                                                    |
+| **Causation id**      | The `id` of the message being handled when the event was written; `null` for a chain's first event.   |
 | **DLQ**               | Dead-letter stream `TICKETARENA_DLQ` for messages past their retry budget or poison.                  |
 | **Ack floor**         | The stream sequence up to which a consumer has acked everything; the safe resume point.               |
 | **Race lost**         | A hold refused because another buyer locked the seat first: a prevented double booking.               |

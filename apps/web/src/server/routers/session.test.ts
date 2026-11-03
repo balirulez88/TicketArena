@@ -1,3 +1,4 @@
+import { silentLogger } from "@ticketarena/contracts";
 import { createPrismaClient } from "@ticketarena/db";
 import { expect, test } from "vitest";
 import { createCaller } from "./_app";
@@ -8,7 +9,12 @@ const unusedDb = () =>
 
 test("whoami returns the principal on the context", async () => {
   const principal = { kind: "guest", sessionId: "0123456789abcdef0123456789abcdef" } as const;
-  const caller = createCaller({ now: () => new Date(), principal, db: unusedDb() });
+  const caller = createCaller({
+    now: () => new Date(),
+    principal,
+    db: unusedDb(),
+    logger: silentLogger,
+  });
 
   expect(await caller.session.whoami()).toEqual(principal);
 });

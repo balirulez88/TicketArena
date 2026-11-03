@@ -8,7 +8,7 @@
 | -------------------- | --------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
 | `apps/web`           | Next.js App Router UI and the tRPC API (the only public entry)                                                        | `db`, `booking`, `contracts` |
 | `packages/db`        | Prisma schema, migrations, client factory over the Neon adapter                                                       | (none)                       |
-| `packages/contracts` | Zod schemas for the event envelope and event payloads (`seat.held`, `order.placed`)                                   | (none)                       |
+| `packages/contracts` | Zod schemas for the event envelope and payloads (`seat.held`, `order.placed`); `Logger` port, id helpers              | (none)                       |
 | `packages/booking`   | `BookingService`: `holdSeats`, `getHold`, `placeOrder`, `getOrder`                                                    | `contracts`, `db`            |
 | `packages/messaging` | `MessageBus` port, JetStream adapter (the only `@nats-io/*` importer), outbox relay, consumer runner                  | `db`                         |
 | `apps/worker`        | Long-running worker: validates env, ensures the topology, runs the relay and hosts consumer runners, serves `/health` | `db`, `messaging`            |
@@ -71,6 +71,21 @@ Code: `apps/worker/src/`; decision: [ADR 0013](../adr/0013-deployment-topology.m
 the JetStream topology first, then starts the outbox **relay** (polls every 250 ms, batch of 100) and one
 **consumer runner** per registered consumer, and serves `GET /health`. Configuration is validated once in
 `parseWorkerEnv` (`DATABASE_URL`, `NATS_URL`, `PORT`) and injected. Details: [messaging](../messaging/index.md).
+
+## Logging and ids
+
+- **Logger injection:** each app creates a `pino` logger at its boundary (`apps/web`
+  `createTRPCContext`, `apps/worker` `main.ts`) and injects it (`TRPCContext.logger`,
+  `WorkerOptions.logger`). Packages accept an optional `Logger` (the narrow port in
+  `packages/contracts`, default `silentLogger`) and never create one from global state.
+- **Ids on every line:** booking, the outbox relay and the consumer runner log through a child
+  logger bound by `envelopeLogBindings` to `correlationId`, `causationId` and, when known,
+  `holdId`, `orderId`, `paymentId`. A body that is not a valid envelope is logged without ids.
+- **Causation:** a consumer handler writes follow-up events through `emit` (the third handler
+  argument of the consumer runner). `emit` applies `causedBy(message)` itself: the
+  `correlationId` is unchanged and `causationId` is the handled message's `id`; the outbox row
+  commits in the handler's transaction and a non-envelope message cannot emit. Events from
+  `holdSeats`/`placeOrder` start the chain with `causationId: null`.
 
 ## Children
 

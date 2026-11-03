@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { Logger } from "@ticketarena/contracts";
 import type { PrismaClient } from "@ticketarena/db";
 import {
   type ConsumerRunnerOptions,
@@ -13,9 +14,10 @@ export interface WorkerOptions {
   readonly bus: MessageBus;
   readonly prisma: PrismaClient;
   readonly port: number;
+  readonly logger?: Logger;
   readonly relay?: Pick<OutboxRelayOptions, "intervalMs" | "batchSize">;
   /** Durable consumers this worker hosts; services register theirs here. */
-  readonly consumers?: readonly Omit<ConsumerRunnerOptions, "bus" | "prisma">[];
+  readonly consumers?: readonly Omit<ConsumerRunnerOptions, "bus" | "prisma" | "logger">[];
 }
 
 export interface RunningWorker {
@@ -27,14 +29,23 @@ export async function startWorker(options: WorkerOptions): Promise<RunningWorker
   // The relay must never publish into a stream that does not exist yet (ADR 0004).
   await options.bus.ensureTopology();
 
+  // exactOptionalPropertyTypes forbids passing `logger: undefined`; omit it so packages default.
+  const loggerOption = options.logger === undefined ? {} : { logger: options.logger };
+
   const runners = await Promise.all(
     (options.consumers ?? []).map((consumer) =>
-      createConsumerRunner({ ...consumer, bus: options.bus, prisma: options.prisma }),
+      createConsumerRunner({
+        ...consumer,
+        bus: options.bus,
+        prisma: options.prisma,
+        ...loggerOption,
+      }),
     ),
   );
   const relay = createOutboxRelay({
     bus: options.bus,
     prisma: options.prisma,
+    ...loggerOption,
     ...options.relay,
   });
   for (const runner of runners) {

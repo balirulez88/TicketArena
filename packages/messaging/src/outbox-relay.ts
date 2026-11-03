@@ -1,3 +1,4 @@
+import { type Logger, logBindingsFor, silentLogger } from "@ticketarena/contracts";
 import type { PrismaClient, TransactionClient } from "@ticketarena/db";
 import { createBackgroundLoop, sleep } from "./background-loop.js";
 import type { MessageBus } from "./message-bus.js";
@@ -10,6 +11,7 @@ const CLAIM_TRANSACTION_TIMEOUT_MS = 60_000;
 export interface OutboxRelayOptions {
   readonly bus: MessageBus;
   readonly prisma: PrismaClient;
+  readonly logger?: Logger;
   readonly intervalMs?: number;
   readonly batchSize?: number;
 }
@@ -42,9 +44,11 @@ interface ClaimedRow {
 export function createOutboxRelay(options: OutboxRelayOptions): OutboxRelay {
   const intervalMs = options.intervalMs ?? DEFAULT_RELAY_INTERVAL_MS;
   const batchSize = options.batchSize ?? DEFAULT_RELAY_BATCH_SIZE;
+  const logger = (options.logger ?? silentLogger).child({ component: "outbox-relay" });
 
   /** Publishes one claimed row and records the outcome on it; false when the publish failed. */
   async function publishRow(tx: TransactionClient, row: ClaimedRow): Promise<boolean> {
+    const log = logger.child({ outboxId: row.id, ...logBindingsFor(row.payload) });
     try {
       await options.bus.publish({
         subject: `ta.${row.eventType}`,
@@ -52,6 +56,7 @@ export function createOutboxRelay(options: OutboxRelayOptions): OutboxRelay {
         msgId: row.id,
       });
     } catch (error) {
+      log.warn({ err: error, eventType: row.eventType }, "outbox publish failed; will retry");
       await tx.outboxEvent.update({
         where: { id: row.id },
         data: {
@@ -65,6 +70,7 @@ export function createOutboxRelay(options: OutboxRelayOptions): OutboxRelay {
       where: { id: row.id },
       data: { status: "PUBLISHED", publishedAt: new Date() },
     });
+    log.info({ eventType: row.eventType }, "outbox event published");
     return true;
   }
 

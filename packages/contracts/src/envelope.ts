@@ -26,7 +26,7 @@ export type Envelope<Payload> = {
   occurredAt: string;
   correlationId: string;
   causationId: string | null;
-  holdId?: string;
-  orderId?: string;
+  holdId?: string | undefined;
+  orderId?: string | undefined;
   payload: Payload;
 };

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { silentLogger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -18,7 +19,7 @@ const alice: Principal = { kind: "guest", sessionId: "a".repeat(32) };
 const bob: Principal = { kind: "guest", sessionId: "b".repeat(32) };
 
 function caller(principal: Principal) {
-  return createCaller({ now: () => NOW, principal, db: db() });
+  return createCaller({ now: () => NOW, principal, db: db(), logger: silentLogger });
 }
 
 async function availableSeat() {
@@ -166,6 +167,7 @@ describe("booking.placeOrder / getOrder", () => {
       now: () => new Date("2027-03-01T12:10:00.000Z"),
       principal: alice,
       db: db(),
+      logger: silentLogger,
     });
 
     await expect(

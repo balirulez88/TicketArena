@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 import { setupTestNats } from "@ticketarena/test-infra";
 import { describe, expect, it } from "vitest";
 import * as messaging from "./index.js";
@@ -53,7 +53,10 @@ describe("MessageBus port and JetStream adapter", () => {
   });
 
   it("keeps @nats-io/* imports inside the adapter module across apps and packages", () => {
-    const sources = listSources(repoRoot).map((file) => relative(repoRoot, file));
+    // Repo-relative with `/` on every platform, the form ADAPTER_PATH and TEST_SUPPORT use.
+    const sources = listSources(repoRoot).map((file) =>
+      relative(repoRoot, file).split(sep).join("/"),
+    );
     expect(sources).toContain(ADAPTER_PATH);
     const offenders = sources.filter(
       (file) =>

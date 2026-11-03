@@ -22,7 +22,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { DEBT_ID, parseRegister } from "./ralph-debt.mjs";
+import { DEBT_ID, isSet, parseRegister } from "./ralph-debt.mjs";
 
 export const SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 export const FINDING_KINDS = [
@@ -218,6 +218,20 @@ function locationError(finding, where, context) {
   return undefined;
 }
 
+// What the gate needs to know about the register: which ids exist, and which are RESOLVED yet
+// escalated (see debtErrors).
+export function debtContext(registerText) {
+  const { entries } = parseRegister(registerText);
+  return {
+    debtIds: new Set(entries.map((entry) => entry.id)),
+    resolvedEscalatedIds: new Set(
+      entries
+        .filter((entry) => entry.fields.Status === "RESOLVED" && isSet(entry.fields.Escalation))
+        .map((entry) => entry.id),
+    ),
+  };
+}
+
 // `debt` links a finding to an existing register entry (scripts/ralph-debt.mjs). Like a file
 // reference, an id the register does not contain is evidence that cannot be right.
 function debtErrors(finding, where, context) {
@@ -229,6 +243,19 @@ function debtErrors(finding, where, context) {
   }
   if (context.debtIds && !context.debtIds.has(finding.debt)) {
     return [`${where}.debt ${finding.debt} is not an entry of the technical debt register`];
+  }
+  // Recording a finding against a RESOLVED entry reopens it as OPEN, which an escalated entry may
+  // never be. Nor is it the same problem at a lower severity: an escalated problem that is back,
+  // or a resolution its test does not prove, blocks; a different remaining concern is new debt.
+  if (
+    context.resolvedEscalatedIds?.has(finding.debt) &&
+    !context.blocking?.includes(finding.severity)
+  ) {
+    return [
+      `${where}.debt ${finding.debt} is a RESOLVED, escalated entry: if its problem is back or ` +
+        "its resolution is unproven, the finding is blocking; otherwise report the remaining " +
+        'concern as a new finding with debt ""',
+    ];
   }
   return [];
 }
@@ -453,7 +480,10 @@ export function evaluate({ standardsOutput, specOutput, blocking, context }) {
     const extracted = extractReport(output);
     results[axis] = extracted.error
       ? { errors: [extracted.error] }
-      : { report: extracted.report, errors: validateReport(extracted.report, axis, context) };
+      : {
+          report: extracted.report,
+          errors: validateReport(extracted.report, axis, { ...context, blocking }),
+        };
   }
 
   const invalid = AXES.some((axis) => results[axis].errors.length > 0);
@@ -572,13 +602,7 @@ function main() {
       token: changeset.token,
       files: changeset.files,
       criteria: parseCriteria(readText(values.ticket)),
-      ...(values.register === undefined
-        ? {}
-        : {
-            debtIds: new Set(
-              parseRegister(readFileSync(values.register, "utf8")).entries.map((e) => e.id),
-            ),
-          }),
+      ...(values.register === undefined ? {} : debtContext(readFileSync(values.register, "utf8"))),
       // Test references are workspace-relative; anything else cannot name a test of this repo.
       pathExists: (path) =>
         path.length > 0 &&

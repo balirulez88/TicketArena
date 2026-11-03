@@ -592,6 +592,8 @@ $(axis_brief "${axis}")
   is known. If this change makes a deferred problem worse or newly reachable, rate it by its real
   impact now, which may be HIGH or CRITICAL. If the changeset marks an entry RESOLVED, check the
   fix and its test: a resolution its Verification test does not prove is a HIGH finding.
+  Cite a RESOLVED entry with an Escalation only at a blocking severity (its problem is back or
+  unproven); a different, remaining concern about its fix is a new finding with \`debt\` "".
 - You are read-only: do not modify any file. Return only the report matching the JSON schema.
 EOF
 }

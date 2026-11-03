@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   annotateChangeset,
+  debtContext,
   evaluate,
   parseBlocking,
   parseChangeset,
@@ -496,6 +497,48 @@ describe("technical debt references", () => {
 
   it("rejects a malformed id", () => {
     assertInvalid(gate("debt-1"), /debt must be "" or a register id/);
+  });
+
+  describe("a RESOLVED, escalated entry", () => {
+    // TD-001 resolved and escalated, TD-002 resolved only, TD-003 escalated but still planned.
+    const register = debtContext(
+      [
+        "# Register",
+        "",
+        "<!-- ralph-debt:begin -->",
+        "### TD-001: a",
+        "- **Status:** RESOLVED",
+        "- **Escalation:** business impact is HIGH",
+        "### TD-002: b",
+        "- **Status:** RESOLVED",
+        "- **Escalation:** none",
+        "### TD-003: c",
+        "- **Status:** PLANNED",
+        "- **Escalation:** business impact is HIGH",
+        "<!-- ralph-debt:end -->",
+        "",
+      ].join("\n"),
+    );
+    const cite = (severity, debt) =>
+      run(
+        envelope(report("standards", { findings: [finding(severity, { debt })] })),
+        envelope(report("spec")),
+        { ...CONTEXT, ...register },
+      );
+
+    it("cannot be cited by a non-blocking finding, which would reopen it as OPEN", () => {
+      assertInvalid(cite("LOW", "TD-001"), /TD-001 is a RESOLVED, escalated entry/);
+      assertInvalid(cite("MEDIUM", "TD-001"), /report the remaining concern as a new finding/);
+    });
+
+    it("can be cited by a blocking finding: the problem is back", () => {
+      assert.equal(cite("HIGH", "TD-001").verdict, "blocked");
+    });
+
+    it("leaves other entries citable at any severity", () => {
+      assert.equal(cite("LOW", "TD-002").verdict, "approved");
+      assert.equal(cite("LOW", "TD-003").verdict, "approved");
+    });
   });
 
   it("hands every finding of a valid round to the harness, with its axis", () => {

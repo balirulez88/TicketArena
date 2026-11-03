@@ -118,6 +118,11 @@ describe("RED evidence", () => {
     assert.equal(verdict.ok, false);
     assert.match(verdict.errors.join(), /every new test ran and passed/);
   });
+
+  it("leaves an empty file list to the discovery errors instead of claiming tests passed", () => {
+    // Every file was already rejected as undiscovered; that reason must stand alone.
+    assert.deepEqual(evaluate([], [], { root }), { ok: true, errors: [], failed: [] });
+  });
 });
 
 describe("the command", () => {

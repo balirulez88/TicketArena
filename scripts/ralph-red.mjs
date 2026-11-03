@@ -121,7 +121,7 @@ export function evaluate(files, reports, { root }) {
       failed.push(`${file} > ${assertion.fullName}`);
     }
   }
-  if (errors.length === 0 && failed.length === 0) {
+  if (files.length > 0 && errors.length === 0 && failed.length === 0) {
     errors.push("every new test ran and passed, so none of them proves a missing behaviour");
   }
   return { ok: errors.length === 0, errors, failed };
@@ -182,7 +182,7 @@ function main() {
   for (const problem of problems) {
     process.stdout.write(`RED rejected: ${problem}\n`);
   }
-  process.exit(problems.length === 0 && verdict.ok ? 0 : 1);
+  process.exit(problems.length === 0 && verdict.ok && reports.length > 0 ? 0 : 1);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {

@@ -36,10 +36,10 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 6      | 30  | 36    |
-| PLANNED       | 0        | 0    | 6      | 2   | 8     |
+| OPEN          | 0        | 0    | 7      | 35  | 42    |
+| PLANNED       | 0        | 0    | 5      | 2   | 7     |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
-| RESOLVED      | 0        | 0    | 4      | 2   | 6     |
+| RESOLVED      | 0        | 0    | 5      | 2   | 7     |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 ## Entries
@@ -672,9 +672,10 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** none
 - **Resolution:** none
 - **Verification:** none
-- **Fingerprints:** `packages/messaging/src/consumer-runner.ts#handler-errors-are-nak-d-with-no-trace-and-the-poll-loop-swa`
+- **Fingerprints:** `packages/messaging/src/consumer-runner.ts#handler-errors-are-nak-d-with-no-trace-and-the-poll-loop-swa`; `packages/booking/src/payment-saga.ts#unhandled-saga-cases-throw-into-an-invisible-unbounded-redel`
 - **History:**
   - 2026-11-03: recorded: MEDIUM defect at `packages/messaging/src/consumer-runner.ts:74`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
+  - 2026-11-03: seen again: MEDIUM regression_risk at `packages/booking/src/payment-saga.ts:88`, standards axis (ticket 08 review-2 standards, run 20261103-160343)
 
 ### TD-033: Retention is documented but no job exists
 
@@ -811,7 +812,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-040: AT-31 test does not prove the redelivery was acked as a duplicate
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** MEDIUM
 - **Escalation:** Acceptance gap: ticket 06 AC9 (AT-31) is approved, but its test proves the redelivery and the single side effect, not the duplicate ack the criterion names. A regression that naks duplicates forever would stay green, and every later consumer (first: ticket 08) relies on this path. Severity kept at MEDIUM as reported; fix before any consumer ships.
 - **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
@@ -822,12 +823,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
 - **Remediation:** Assert the ack directly, for example with the consumer info (num_ack_pending and num_pending both 0 after the second delivery). Alternatively, record the ack and nak calls on the wrapped message and assert that the second delivery was acked and not nak'd.
 - **Target:** ticket 08 (`issues/08-mock-payment-confirms-order.md`), last AC
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** The AT-31 test records every ack and nak the runner issues per delivery and asserts `["ack:1", "ack:2"]` (the first ack is the simulated crash, the second is the duplicate ack, no nak), then reads the consumer info and asserts `num_pending` and `num_ack_pending` are both 0 after the second delivery. With the duplicate branch changed to nak, the test fails.
+- **Verification:** `packages/messaging/src/consumer-runner.test.ts::consumer runner acks a redelivery after a crash between commit and ack as a duplicate (AT-31)`
 - **Fingerprints:** `packages/messaging/src/consumer-runner.test.ts#at-31-test-does-not-prove-the-redelivery-was-acked-as-a-dupl`
 - **History:**
   - 2026-11-03: recorded: MEDIUM missing_test at `packages/messaging/src/consumer-runner.test.ts:221`, spec axis (ticket 06 review-3 spec, run 20261103-120228)
   - 2026-11-03: escalation flagged and planned for ticket 08: the test leaves ticket 06 AC9 partly unproven (acceptance review of ticket 06, 2026-11-03)
+  - 2026-11-03: resolved in ticket 08: the AT-31 test now proves the duplicate was acked and nothing is pending
+  - 2026-11-03: resolution verified: quality gate green and independent review approved (ticket 08 review-2, run 20261103-160343)
 
 ### TD-041: The 250 ms default is asserted only as an exported constant
 
@@ -1019,4 +1022,118 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `packages/messaging/src/consumer-runner.ts#causation-is-enforced-only-if-handlers-use-emit`
 - **History:**
   - 2026-11-03: recorded: LOW unverified_assumption at `packages/messaging/src/consumer-runner.ts:83`, spec axis (ticket 07 review-2 spec, run 20261103-123322)
+
+### TD-051: Provider latency is awaited inside the runner's DB transaction
+
+- **Status:** OPEN
+- **Severity:** MEDIUM
+- **Escalation:** none
+- **Source:** ticket 08 (`08-mock-payment-confirms-order`)
+- **Evidence:** `.ralph/logs/20261103-160343/08-mock-payment-confirms-order.review-2.standards.json`
+- **Components:** `apps/worker/src/payment/payment-handler.ts:53`
+- **Problem:** The handler runs inside the runner's interactive Prisma transaction, which already holds the processed_messages insert, and awaits clock.sleep(waitMs) there. Prisma's default interactive-transaction timeout is 5 s, and the runner sets no timeout.
+- **Impact:** A configured latencyMs above a few seconds makes the transaction time out, so the message is retried forever. Even short waits hold a pooled connection while idle, which limits throughput. The default (no latency) and the test sleep stub hide this.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Do the latency wait before the transaction (for example a handler pre-step), or document and enforce a latency bound below the transaction timeout. Add a test with a real sleep close to the timeout.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/worker/src/payment/payment-handler.ts#provider-latency-is-awaited-inside-the-runner-s-db-transacti`
+- **History:**
+  - 2026-11-03: recorded: MEDIUM defect at `apps/worker/src/payment/payment-handler.ts:53`, standards axis (ticket 08 review-2 standards, run 20261103-160343)
+
+### TD-052: bookingStore and paymentStore are line-for-line copies; service names are listed in two places
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 08 (`08-mock-payment-confirms-order`)
+- **Evidence:** `.ralph/logs/20261103-160343/08-mock-payment-confirms-order.review-2.standards.json`
+- **Components:** `packages/messaging/src/service-store.ts:55`
+- **Problem:** The two stores differ only in the Prisma delegate and the table name. worker.ts separately hard-codes the list ["booking","payment"], and serviceStore picks via a ternary instead of a total map.
+- **Impact:** A third service means editing the ServiceName union, the ternary and the worker list, with the Prisma delegate copies drifting. The compiler does not catch a service missing from the worker's list.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Build the stores from a small factory over the delegate accessors. Use a Record<ServiceName, ServiceStore>, and derive the worker's relay list from Object.keys of that record or an exported constant.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/service-store.ts#bookingstore-and-paymentstore-are-line-for-line-copies-servi`
+- **History:**
+  - 2026-11-03: recorded: LOW maintainability at `packages/messaging/src/service-store.ts:55`, standards axis (ticket 08 review-2 standards, run 20261103-160343)
+
+### TD-053: Payment redelivery/poison paths are untested
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 08 (`08-mock-payment-confirms-order`)
+- **Evidence:** `.ralph/logs/20261103-160343/08-mock-payment-confirms-order.review-2.standards.json`
+- **Components:** `apps/worker/src/payment/payment-handler.test.ts:129`
+- **Problem:** The tests cover only the happy path, the +dup@ double emit and the latency wait. There is no test for a redelivered order.placed under a new event id, which hits the (orderId, attemptNo) unique violation, or for an invalid payload.
+- **Impact:** The behaviour of the Payment consumer on a repeated order.placed (a transaction failure that retries forever) is unspecified and unproven.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Add a test pinning the intended behaviour: either an idempotent skip when an attempt already exists for the order, or an asserted failure plus the redelivery outcome.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/worker/src/payment/payment-handler.test.ts#payment-redelivery-poison-paths-are-untested`
+- **History:**
+  - 2026-11-03: recorded: LOW missing_test at `apps/worker/src/payment/payment-handler.test.ts:129`, standards axis (ticket 08 review-2 standards, run 20261103-160343)
+
+### TD-054: Consumer-info assertion may read the state before the broker has processed the ack
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 08 (`08-mock-payment-confirms-order`)
+- **Evidence:** `.ralph/logs/20261103-160343/08-mock-payment-confirms-order.review-2.spec.json`
+- **Components:** `packages/messaging/src/consumer-runner.test.ts:237`
+- **Problem:** The runner's ack is fire-and-forget. The consumer info is read on a new connection straight after the last pollOnce, with no wait for the broker to apply the ack. The ack:2 outcome assertion proves the runner's decision, but num_ack_pending === 0 depends on timing.
+- **Impact:** The test could flake under load on the ack-pending assertion. The ack-versus-nak guarantee itself is already proven by the outcomes assertion.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Wrap the info assertions in expect.poll, or flush the connection before reading the info.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/consumer-runner.test.ts#consumer-info-assertion-may-read-the-state-before-the-broker`
+- **History:**
+  - 2026-11-03: recorded: LOW unverified_assumption at `packages/messaging/src/consumer-runner.test.ts:237`, spec axis (ticket 08 review-2 spec, run 20261103-160343)
+
+### TD-055: CHECK constraint is tested by its definition text, not by its behaviour
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 08 (`08-mock-payment-confirms-order`)
+- **Evidence:** `.ralph/logs/20261103-160343/08-mock-payment-confirms-order.review-2.spec.json`
+- **Components:** `packages/db/src/payment-schema.test.ts:47`
+- **Problem:** The test regex-matches pg_get_constraintdef for 'CAPTURED' and 'capturedAt'. It never inserts a CAPTURED row without capturedAt, or a non-CAPTURED row with capturedAt, to show the database rejects them.
+- **Impact:** A wrong CHECK, such as one that enforces only one direction of the equivalence, would still pass.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Insert both violating rows through raw SQL or Prisma and assert each is rejected.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/db/src/payment-schema.test.ts#check-constraint-is-tested-by-its-definition-text-not-by-its`
+- **History:**
+  - 2026-11-03: recorded: LOW missing_test at `packages/db/src/payment-schema.test.ts:47`, spec axis (ticket 08 review-2 spec, run 20261103-160343)
+
+### TD-056: Ledger and payment schema carry columns and values beyond the ticket
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 08 (`08-mock-payment-confirms-order`)
+- **Evidence:** `.ralph/logs/20261103-160343/08-mock-payment-confirms-order.review-2.spec.json`
+- **Components:** `packages/db/prisma/schema.prisma:251`
+- **Problem:** order_payments adds refundRequestedAt and refundAttempts. The disposition enum includes REFUND_REQUESTED, MANUAL_REVIEW and REFUNDED. payment_attempts adds ATTEMPTING and FAILED statuses with a second CHECK. None of these are used by this slice.
+- **Impact:** The schema exposes unexercised states, and later tickets may want different shapes. The cost is low because the migration is still unreleased.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Defer the refund columns and the unused statuses to the tickets that use them, or confirm they come from the spec's data model.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/db/prisma/schema.prisma#ledger-and-payment-schema-carry-columns-and-values-beyond-th`
+- **History:**
+  - 2026-11-03: recorded: LOW scope_creep at `packages/db/prisma/schema.prisma:251`, spec axis (ticket 08 review-2 spec, run 20261103-160343)
 <!-- ralph-debt:end -->

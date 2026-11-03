@@ -23,18 +23,19 @@
 All tables live in the `public` schema (`multiSchema` with `schemas = ["public"]`; every model and
 enum carries `@@schema("public")`).
 
-| Table                | Purpose                                                                                                      |
-| -------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `outbox_events`      | Transactional outbox: integration events written in the business TX                                          |
-| `processed_messages` | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007)      |
-| `venues`             | Seeded venues                                                                                                |
-| `sections`           | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                 |
-| `rows`               | Row label within a section                                                                                   |
-| `events`             | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                      |
-| `seats`              | **Per event** seat: `status` `AVAILABLE\|HELD\|IN_CHECKOUT\|SOLD`, `holdId?`, `claimBuyerKey?`               |
-| `holds`              | A buyer's hold: `buyerKey`, `status` `HELD\|ORDERED\|RELEASED\|EXPIRED`, `holdExpiresAt`, `correlationId`    |
-| `orders`             | One per hold: contact, `totalMinor`, `status`, fixed `paymentDeadline`, unique `(sessionId, idempotencyKey)` |
-| `order_lines`        | Seat prices copied at placement                                                                              |
+| Table                | Purpose                                                                                                           |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `outbox_events`      | Transactional outbox: integration events written in the business TX                                               |
+| `processed_messages` | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007)           |
+| `venues`             | Seeded venues                                                                                                     |
+| `sections`           | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                      |
+| `rows`               | Row label within a section                                                                                        |
+| `events`             | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                           |
+| `seats`              | **Per event** seat: `status` `AVAILABLE\|HELD\|IN_CHECKOUT\|SOLD`, `holdId?`, `claimBuyerKey?`                    |
+| `holds`              | A buyer's hold: `buyerKey`, `status` `HELD\|ORDERED\|RELEASED\|EXPIRED`, `holdExpiresAt`, `correlationId`         |
+| `orders`             | One per hold: contact, `totalMinor`, `status`, fixed `paymentDeadline`, unique `(sessionId, idempotencyKey)`      |
+| `order_lines`        | Seat prices copied at placement                                                                                   |
+| `order_payments`     | Ledger of captured money: `paymentId` PK, `amount`, `capturedAt`, `disposition` (`APPLIED` for a confirmed order) |
 
 Catalog data is seeded, never edited through the API. `seedCatalog(prisma, now)`
 (`packages/db/src/seed.ts`, run with `pnpm --filter @ticketarena/db db:seed`) only inserts
@@ -59,6 +60,8 @@ and concurrent seed runs leave one row per venue.
 | `orders_holdId_key`                           | `orders(holdId)` unique                     | A hold yields at most one order                  |
 | `orders_sessionId_idempotencyKey_key`         | `orders(sessionId, idempotencyKey)` unique  | Idempotent `placeOrder`                          |
 | `order_lines_orderId_seatId_key`              | `order_lines(orderId, seatId)` unique       | One line per seat                                |
+| `order_payments_orderId_idx`                  | `order_payments(orderId)`                   | Ledger lookup per order (FK)                     |
+| `order_payments_orderId_applied_key`          | `order_payments(orderId)` unique, partial   | At most one `APPLIED` payment per order          |
 | `outbox_events_status_createdAt_idx`          | `outbox_events(status, createdAt)`          | Relay polling                                    |
 | `outbox_events_aggregateType_aggregateId_idx` | `outbox_events(aggregateType, aggregateId)` | Aggregate lookup                                 |
 
@@ -88,6 +91,17 @@ stored order; the same key with a different `requestHash` (hold + contact) fails
 
 Catalog API (`apps/web`): `events.list`, `events.get`, `seats.map`. Inputs and outputs are zod
 validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.
+
+### `payment` schema
+
+The mock Payment service ([ADR 0009](../adr/0009-per-service-schemas.md)) owns tables in the
+`payment` schema; booking never reads them and they carry no foreign keys to `public`.
+
+| Table                        | Purpose                                                                                                                                       |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `payment.outbox_events`      | Payment's own outbox, same shape as `public.outbox_events`; the relay drains both                                                             |
+| `payment.processed_messages` | Payment consumer dedupe, same shape as `public.processed_messages`                                                                            |
+| `payment.payment_attempts`   | One row per provider attempt: unique `(orderId, attemptNo)`; CHECKs `CAPTURED ⇔ capturedAt IS NOT NULL`, `FAILED ⇔ failureReason IS NOT NULL` |
 
 ### `outbox_events`
 

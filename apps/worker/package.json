@@ -10,6 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ticketarena/booking": "workspace:*",
     "@ticketarena/contracts": "workspace:*",
     "@ticketarena/db": "workspace:*",
     "@ticketarena/messaging": "workspace:*",

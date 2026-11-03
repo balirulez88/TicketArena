@@ -1,4 +1,5 @@
-// Domain models arrive slice by slice under TDD. Payment tables are still to come.
+// Domain models arrive slice by slice under TDD. `public` is booking; `payment` is the mock
+// Payment service, which owns its own outbox and processed_messages (ADR 0009).
 
 generator client {
   provider = "prisma-client"
@@ -7,7 +8,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  schemas  = ["public"]
+  schemas  = ["public", "payment"]
 }
 
 enum OutboxStatus {
@@ -190,6 +191,7 @@ model Order {
   correlationId   String      @db.Uuid
   createdAt       DateTime    @db.Timestamptz(3)
   lines           OrderLine[]
+  payments        OrderPayment[]
 
   @@unique([sessionId, idempotencyKey])
   @@map("orders")
@@ -223,4 +225,101 @@ model ProcessedMessage {
   @@id([consumer, messageId])
   @@map("processed_messages")
   @@schema("public")
+}
+
+enum OrderPaymentDisposition {
+  APPLIED
+  REFUND_REQUESTED
+  MANUAL_REVIEW
+  REFUNDED
+
+  @@schema("public")
+}
+
+/// The booking ledger of captured money only (ADR 0006). A row is written in the SAME
+/// transaction as the order decision it justifies. The partial unique index
+/// `order_payments_orderId_applied_key` (migration SQL; Prisma cannot express it) allows at most
+/// one APPLIED payment per order.
+model OrderPayment {
+  paymentId         String                  @id @db.Uuid
+  orderId           String                  @db.Uuid
+  order             Order                   @relation(fields: [orderId], references: [id])
+  amount            Int
+  currency          String
+  capturedAt        DateTime                @db.Timestamptz(3)
+  disposition       OrderPaymentDisposition
+  refundRequestedAt DateTime?               @db.Timestamptz(3)
+  refundAttempts    Int                     @default(0)
+
+  @@index([orderId])
+  @@map("order_payments")
+  @@schema("public")
+}
+
+enum PaymentOutboxStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+
+  @@map("OutboxStatus")
+  @@schema("payment")
+}
+
+enum PaymentAttemptStatus {
+  ATTEMPTING
+  CAPTURED
+  FAILED
+
+  @@schema("payment")
+}
+
+/// The Payment service's own outbox: same shape and rules as the booking one, separate table.
+model PaymentOutboxEvent {
+  id            String              @id @default(uuid()) @db.Uuid
+  aggregateType String
+  aggregateId   String
+  eventType     String
+  payload       Json
+  status        PaymentOutboxStatus @default(PENDING)
+  attempts      Int                 @default(0)
+  lastError     String?
+  createdAt     DateTime            @default(now())
+  publishedAt   DateTime?
+
+  @@index([status, createdAt])
+  @@index([aggregateType, aggregateId])
+  @@map("outbox_events")
+  @@schema("payment")
+}
+
+/// The Payment consumer's idempotency checkpoint (ADR 0007), separate from booking's.
+model PaymentProcessedMessage {
+  consumer    String
+  messageId   String
+  streamSeq   BigInt
+  processedAt DateTime @default(now())
+
+  @@id([consumer, messageId])
+  @@map("processed_messages")
+  @@schema("payment")
+}
+
+/// One provider attempt for an order. The CHECKs (migration SQL) tie `status` to the columns
+/// that justify it, so a CAPTURED attempt always has the time money was captured.
+model PaymentAttempt {
+  paymentId     String               @id @db.Uuid
+  orderId       String               @db.Uuid
+  attemptNo     Int
+  status        PaymentAttemptStatus
+  capturedAt    DateTime?            @db.Timestamptz(3)
+  failureReason String?
+  amount        Int
+  currency      String
+  contactEmail  String
+  contactPhone  String?
+  createdAt     DateTime             @db.Timestamptz(3)
+
+  @@unique([orderId, attemptNo])
+  @@map("payment_attempts")
+  @@schema("payment")
 }

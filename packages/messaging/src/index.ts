@@ -29,3 +29,4 @@ export {
   type OutboxRelay,
   type OutboxRelayOptions,
 } from "./outbox-relay.js";
+export type { ServiceName } from "./service-store.js";

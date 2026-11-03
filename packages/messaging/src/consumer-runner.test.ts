@@ -1,4 +1,4 @@
-import { jetstream } from "@nats-io/jetstream";
+import { jetstream, jetstreamManager } from "@nats-io/jetstream";
 import { connect } from "@nats-io/transport-node";
 import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
 import { setupTestDatabase, setupTestNats } from "@ticketarena/test-infra";
@@ -172,6 +172,8 @@ describe("consumer runner", () => {
     const id = newUuid();
     let acksToDrop = 1;
     const deliveryCounts: number[] = [];
+    // What the runner did with each delivery: the dropped ack is the simulated crash.
+    const outcomes: string[] = [];
     // The crash is simulated at the broker boundary: the commit happened, the ack never arrives.
     const crashingBus: MessageBus = {
       ...bus,
@@ -187,11 +189,16 @@ describe("consumer runner", () => {
               return {
                 ...message,
                 ack: () => {
+                  outcomes.push(`ack:${message.deliveryCount}`);
                   if (acksToDrop > 0) {
                     acksToDrop -= 1;
                     return;
                   }
                   message.ack();
+                },
+                nak: (delayMs) => {
+                  outcomes.push(`nak:${message.deliveryCount}`);
+                  message.nak(delayMs);
                 },
               };
             }),
@@ -219,6 +226,19 @@ describe("consumer runner", () => {
 
     // JetStream really redelivered it (count 2) and the runner acked it, so nothing is left.
     expect(deliveryCounts).toEqual([1, 2]);
+    // The redelivery was acked as a duplicate, never nak'd, so it cannot loop.
+    expect(outcomes).toEqual(["ack:1", "ack:2"]);
+    const connection = await connect({ servers: nats.url });
+    try {
+      const info = await (await jetstreamManager(connection)).consumers.info(
+        `${nats.streamPrefix}TICKETARENA`,
+        name,
+      );
+      expect(info.num_pending).toBe(0);
+      expect(info.num_ack_pending).toBe(0);
+    } finally {
+      await connection.close();
+    }
     expect(afterwards).toBe(0);
     expect(sideEffects).toBe(1);
     expect(await prisma.outboxEvent.count({ where: { id } })).toBe(1);

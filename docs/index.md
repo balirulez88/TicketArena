@@ -36,16 +36,16 @@ capacity by orders of magnitude within seconds. The system must:
 The diagram shows the target of the [MVP spec](specs/ticketarena-mvp.md); "What exists today"
 below shows what is built.
 
-| Area                | Status                    | Map                                    |
-| ------------------- | ------------------------- | -------------------------------------- |
-| Monorepo & modules  | scaffolded                | [architecture/](architecture/index.md) |
-| Database & Prisma   | catalog, holds, orders    | [database/](database/index.md)         |
-| Async messaging     | relay and consumer runner | [messaging/](messaging/index.md)       |
-| Agent workflow & CI | operational               | [workflow/](workflow/index.md)         |
-| Technical debt      | tracked                   | [technical-debt.md](technical-debt.md) |
-| Decisions (ADRs)    | 13 accepted               | [adr/](adr/index.md)                   |
-| Feature specs       | MVP ready                 | [specs/](specs/index.md)               |
-| Domain vocabulary   | seeded                    | [glossary.md](glossary.md)             |
+| Area                | Status                                 | Map                                    |
+| ------------------- | -------------------------------------- | -------------------------------------- |
+| Monorepo & modules  | scaffolded                             | [architecture/](architecture/index.md) |
+| Database & Prisma   | catalog, holds, orders, payment schema | [database/](database/index.md)         |
+| Async messaging     | relay and consumer runner              | [messaging/](messaging/index.md)       |
+| Agent workflow & CI | operational                            | [workflow/](workflow/index.md)         |
+| Technical debt      | tracked                                | [technical-debt.md](technical-debt.md) |
+| Decisions (ADRs)    | 13 accepted                            | [adr/](adr/index.md)                   |
+| Feature specs       | MVP ready                              | [specs/](specs/index.md)               |
+| Domain vocabulary   | seeded                                 | [glossary.md](glossary.md)             |
 
 ## What exists today
 
@@ -64,7 +64,7 @@ below shows what is built.
 - Structured logging: each app injects a `pino` logger; booking, the relay and the consumer runner log with a child logger bound to `correlationId`/`causationId` (plus `holdId`, `orderId`, `paymentId`). See [architecture/](architecture/index.md#logging-and-ids).
 - Quality gate: Biome (warnings fail), strict `tsc`, Vitest, enforced by `ralph-loop.sh`.
 
-A buyer can hold one seat and place an order for it (`PENDING_PAYMENT`; no queue or payment yet). Remaining features arrive as tickets split from the
+A buyer can hold one seat and place an order for it; the mock Payment service captures it and the booking saga confirms the order (`CONFIRMED`, seats `SOLD`, ledger `APPLIED`). Failures, late payments and refunds are still to come; no queue yet. Remaining features arrive as tickets split from the
 [MVP spec](specs/ticketarena-mvp.md) by `/to-tickets`.
 
 ## Decisions

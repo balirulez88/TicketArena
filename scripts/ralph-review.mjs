@@ -22,7 +22,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { DEBT_ID, NONE, parseRegister } from "./ralph-debt.mjs";
+import { DEBT_ID, isSet, parseRegister } from "./ralph-debt.mjs";
 
 export const SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 export const FINDING_KINDS = [
@@ -222,12 +222,11 @@ function locationError(finding, where, context) {
 // escalated (see debtErrors).
 export function debtContext(registerText) {
   const { entries } = parseRegister(registerText);
-  const escalated = (entry) => ![undefined, "", NONE].includes(entry.fields.Escalation?.trim());
   return {
     debtIds: new Set(entries.map((entry) => entry.id)),
     resolvedEscalatedIds: new Set(
       entries
-        .filter((entry) => entry.fields.Status === "RESOLVED" && escalated(entry))
+        .filter((entry) => entry.fields.Status === "RESOLVED" && isSet(entry.fields.Escalation))
         .map((entry) => entry.id),
     ),
   };

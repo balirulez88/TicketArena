@@ -52,7 +52,7 @@ const REQUIRED = ["Source", "Evidence", "Components", "Problem", "Impact", "Reme
 // A deferral is a decision, so it must say why (MEDIUM/LOW may wait; they may not wait silently).
 const NEEDS_JUSTIFICATION = ["OPEN", "PLANNED", "IN_PROGRESS", "ACCEPTED_RISK"];
 
-const isSet = (value) => typeof value === "string" && value.trim() !== "" && value !== NONE;
+export const isSet = (value) => typeof value === "string" && value.trim() !== "" && value !== NONE;
 const idNumber = (id) => Number(id.slice(3));
 
 // --- Parsing and rendering ------------------------------------------------------------------

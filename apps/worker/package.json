@@ -1,0 +1,24 @@
+{
+  "name": "@ticketarena/worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Long-running worker: outbox relay and durable consumers (ADR 0013).",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ticketarena/db": "workspace:*",
+    "@ticketarena/messaging": "workspace:*",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@ticketarena/test-infra": "workspace:*",
+    "@types/node": "26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "6.0.3",
+    "vitest": "5.0.5"
+  }
+}

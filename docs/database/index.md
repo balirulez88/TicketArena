@@ -23,17 +23,18 @@
 All tables live in the `public` schema (`multiSchema` with `schemas = ["public"]`; every model and
 enum carries `@@schema("public")`).
 
-| Table           | Purpose                                                                                                      |
-| --------------- | ------------------------------------------------------------------------------------------------------------ |
-| `outbox_events` | Transactional outbox: integration events written in the business TX                                          |
-| `venues`        | Seeded venues                                                                                                |
-| `sections`      | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                 |
-| `rows`          | Row label within a section                                                                                   |
-| `events`        | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                      |
-| `seats`         | **Per event** seat: `status` `AVAILABLE\|HELD\|IN_CHECKOUT\|SOLD`, `holdId?`, `claimBuyerKey?`               |
-| `holds`         | A buyer's hold: `buyerKey`, `status` `HELD\|ORDERED\|RELEASED\|EXPIRED`, `holdExpiresAt`, `correlationId`    |
-| `orders`        | One per hold: contact, `totalMinor`, `status`, fixed `paymentDeadline`, unique `(sessionId, idempotencyKey)` |
-| `order_lines`   | Seat prices copied at placement                                                                              |
+| Table                | Purpose                                                                                                      |
+| -------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `outbox_events`      | Transactional outbox: integration events written in the business TX                                          |
+| `processed_messages` | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007)      |
+| `venues`             | Seeded venues                                                                                                |
+| `sections`           | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                 |
+| `rows`               | Row label within a section                                                                                   |
+| `events`             | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                      |
+| `seats`              | **Per event** seat: `status` `AVAILABLE\|HELD\|IN_CHECKOUT\|SOLD`, `holdId?`, `claimBuyerKey?`               |
+| `holds`              | A buyer's hold: `buyerKey`, `status` `HELD\|ORDERED\|RELEASED\|EXPIRED`, `holdExpiresAt`, `correlationId`    |
+| `orders`             | One per hold: contact, `totalMinor`, `status`, fixed `paymentDeadline`, unique `(sessionId, idempotencyKey)` |
+| `order_lines`        | Seat prices copied at placement                                                                              |
 
 Catalog data is seeded, never edited through the API. `seedCatalog(prisma, now)`
 (`packages/db/src/seed.ts`, run with `pnpm --filter @ticketarena/db db:seed`) only inserts

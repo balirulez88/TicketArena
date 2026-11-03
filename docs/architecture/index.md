@@ -4,15 +4,16 @@
 
 ## Module boundaries
 
-| Workspace            | Responsibility                                                                                                          | Depends on                   |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| `apps/web`           | Next.js App Router UI and the tRPC API (the only public entry)                                                          | `db`, `booking`, `contracts` |
-| `packages/db`        | Prisma schema, migrations, client factory over the Neon adapter                                                         | (none)                       |
-| `packages/contracts` | Zod schemas for the event envelope and event payloads (`seat.held`, `order.placed`)                                     | (none)                       |
-| `packages/booking`   | `BookingService`: `holdSeats`, `getHold`, `placeOrder`, `getOrder`                                                      | `contracts`, `db`            |
-| `packages/messaging` | Scaffolding only (ticket 42); ticket 06 adds the `MessageBus` port, JetStream adapter, outbox relay and consumer runner | `db`                         |
+| Workspace            | Responsibility                                                                                                        | Depends on                   |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| `apps/web`           | Next.js App Router UI and the tRPC API (the only public entry)                                                        | `db`, `booking`, `contracts` |
+| `packages/db`        | Prisma schema, migrations, client factory over the Neon adapter                                                       | (none)                       |
+| `packages/contracts` | Zod schemas for the event envelope and event payloads (`seat.held`, `order.placed`)                                   | (none)                       |
+| `packages/booking`   | `BookingService`: `holdSeats`, `getHold`, `placeOrder`, `getOrder`                                                    | `contracts`, `db`            |
+| `packages/messaging` | `MessageBus` port, JetStream adapter (the only `@nats-io/*` importer), outbox relay, consumer runner                  | `db`                         |
+| `apps/worker`        | Long-running worker: validates env, ensures the topology, runs the relay and hosts consumer runners, serves `/health` | `db`, `messaging`            |
 
-Planned (created by tickets, not up front): a waiting-room module (Redis queue logic), the worker app hosting the outbox relay, and payment/notification consumers.
+Planned (created by tickets, not up front): a waiting-room module (Redis queue logic) and payment/notification consumers.
 New modules are added when a slice needs them, not speculatively.
 
 ## Conventions that shape the code
@@ -63,6 +64,13 @@ zod schemas in `catalog-schemas.ts`. They read through `ctx.db`, a process-wide 
 created lazily from `DATABASE_URL` (`parseDatabaseEnv` validates only that variable). A missing
 event is a `NOT_FOUND` tRPC error. Integration tests run against real Postgres. See
 [database](../database/index.md).
+
+## Worker
+
+Code: `apps/worker/src/`; decision: [ADR 0013](../adr/0013-deployment-topology.md). `startWorker` ensures
+the JetStream topology first, then starts the outbox **relay** (polls every 250 ms, batch of 100) and one
+**consumer runner** per registered consumer, and serves `GET /health`. Configuration is validated once in
+`parseWorkerEnv` (`DATABASE_URL`, `NATS_URL`, `PORT`) and injected. Details: [messaging](../messaging/index.md).
 
 ## Children
 

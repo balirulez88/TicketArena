@@ -1,6 +1,6 @@
 import { PrismaNeon } from "@prisma/adapter-neon";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "./generated/prisma/client";
+import { type Prisma, PrismaClient } from "./generated/prisma/client";
 
 export type {
   Event,
@@ -11,6 +11,7 @@ export type {
   OrderStatus,
   OutboxEvent,
   OutboxStatus,
+  ProcessedMessage,
   Seat,
   SeatStatus,
   Section,
@@ -47,3 +48,6 @@ export function createPrismaClient({
     driver === "neon" ? new PrismaNeon({ connectionString }) : new PrismaPg({ connectionString });
   return new PrismaClient({ adapter });
 }
+
+/** The client handed to an interactive `$transaction` callback. */
+export type TransactionClient = Prisma.TransactionClient;

@@ -36,16 +36,16 @@ capacity by orders of magnitude within seconds. The system must:
 The diagram shows the target of the [MVP spec](specs/ticketarena-mvp.md); "What exists today"
 below shows what is built.
 
-| Area                | Status                 | Map                                    |
-| ------------------- | ---------------------- | -------------------------------------- |
-| Monorepo & modules  | scaffolded             | [architecture/](architecture/index.md) |
-| Database & Prisma   | catalog, holds, orders | [database/](database/index.md)         |
-| Async messaging     | designed               | [messaging/](messaging/index.md)       |
-| Agent workflow & CI | operational            | [workflow/](workflow/index.md)         |
-| Technical debt      | tracked                | [technical-debt.md](technical-debt.md) |
-| Decisions (ADRs)    | 13 accepted            | [adr/](adr/index.md)                   |
-| Feature specs       | MVP ready              | [specs/](specs/index.md)               |
-| Domain vocabulary   | seeded                 | [glossary.md](glossary.md)             |
+| Area                | Status                    | Map                                    |
+| ------------------- | ------------------------- | -------------------------------------- |
+| Monorepo & modules  | scaffolded                | [architecture/](architecture/index.md) |
+| Database & Prisma   | catalog, holds, orders    | [database/](database/index.md)         |
+| Async messaging     | relay and consumer runner | [messaging/](messaging/index.md)       |
+| Agent workflow & CI | operational               | [workflow/](workflow/index.md)         |
+| Technical debt      | tracked                   | [technical-debt.md](technical-debt.md) |
+| Decisions (ADRs)    | 13 accepted               | [adr/](adr/index.md)                   |
+| Feature specs       | MVP ready                 | [specs/](specs/index.md)               |
+| Domain vocabulary   | seeded                    | [glossary.md](glossary.md)             |
 
 ## What exists today
 
@@ -60,6 +60,7 @@ below shows what is built.
   `booking.holdSeats` / `booking.getHold` (`packages/booking`), which write a `seat.held` outbox
   event; `orders` and `order_lines` back `booking.placeOrder` / `booking.getOrder`, which write
   `order.placed`; envelope schemas live in `packages/contracts`.
+- `packages/messaging` and `apps/worker`: the `MessageBus` port with its JetStream adapter, the outbox relay (250 ms, batch of 100), the consumer runner and the worker app with `/health`.
 - Quality gate: Biome (warnings fail), strict `tsc`, Vitest, enforced by `ralph-loop.sh`.
 
 A buyer can hold one seat and place an order for it (`PENDING_PAYMENT`; no queue or payment yet). Remaining features arrive as tickets split from the

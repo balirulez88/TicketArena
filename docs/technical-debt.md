@@ -36,7 +36,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 0      | 16  | 16    |
+| OPEN          | 0        | 0    | 6      | 23  | 29    |
 | PLANNED       | 0        | 0    | 5      | 2   | 7     |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 0    | 4      | 2   | 6     |
@@ -456,9 +456,10 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** none
 - **Resolution:** none
 - **Verification:** none
-- **Fingerprints:** `packages/booking/src/booking-service.ts#pg-unique-violation-holds-a-prisma-error-code`
+- **Fingerprints:** `packages/booking/src/booking-service.ts#pg-unique-violation-holds-a-prisma-error-code`; `packages/messaging/src/consumer-runner.ts#pg-unique-violation-holds-prisma-s-p2002-again`
 - **History:**
   - 2026-10-30: recorded: LOW maintainability at `packages/booking/src/booking-service.ts:124`, standards axis (ticket 05 review-2 standards, run 20261030-135423)
+  - 2026-11-03: seen again: LOW maintainability at `packages/messaging/src/consumer-runner.ts:5`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
 
 ### TD-022: Racing-duplicate test checks only the returned order ids
 
@@ -617,4 +618,251 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-10-30: recorded: LOW maintainability at `packages/booking/src/booking-service.ts:215`, standards axis (ticket 41 review-1 standards, run 20261030-175150)
   - 2026-10-30: seen again: LOW maintainability at `packages/booking/src/booking-service.ts:215`, spec axis (ticket 41 review-1 spec, run 20261030-175150)
+
+### TD-030: processedAt column type in the migration does not match the Prisma schema
+
+- **Status:** OPEN
+- **Severity:** MEDIUM
+- **Escalation:** none
+- **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
+- **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.standards.json`
+- **Components:** `packages/db/prisma/schema.prisma:221`
+- **Problem:** The migration creates "processedAt" as TIMESTAMPTZ(3), but the model declares `DateTime @default(now())` with no `@db.Timestamptz(3)`. Prisma maps that to TIMESTAMP(3), so the schema and migration disagree.
+- **Impact:** `prisma migrate diff` or `migrate dev` reports drift and generates a corrective migration that changes the column type. The schema is not the source of truth for the DB. Where Prisma writes the value (`@default(now())` is client-side for some paths), the timezone semantics are ambiguous.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Add `@db.Timestamptz(3)` to `processedAt` so the schema matches the migration.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/db/prisma/schema.prisma#processedat-column-type-in-the-migration-does-not-match-the-`
+- **History:**
+  - 2026-11-03: recorded: MEDIUM defect at `packages/db/prisma/schema.prisma:221`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
+
+### TD-031: Relay loop swallows every tick error without any signal
+
+- **Status:** OPEN
+- **Severity:** MEDIUM
+- **Escalation:** none
+- **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
+- **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.standards.json`
+- **Components:** `packages/messaging/src/outbox-relay.ts:103`
+- **Problem:** `catch {}` in the background loop drops database and broker outage errors with no log or counter. `lastError` is recorded only for publish failures inside a claimed row, not when claim, update or commit fails.
+- **Impact:** If the database or NATS is down, or the claim query is broken, the worker keeps looping every 250 ms while `/health` reports ok. Pending events pile up and nobody can see why.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Inject a logger or onError callback and report each failed tick (rate-limited). Consider a health signal for consecutive failures.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/outbox-relay.ts#relay-loop-swallows-every-tick-error-without-any-signal`
+- **History:**
+  - 2026-11-03: recorded: MEDIUM defect at `packages/messaging/src/outbox-relay.ts:103`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
+
+### TD-032: Handler errors are nak'd with no trace, and the poll loop swallows all errors
+
+- **Status:** OPEN
+- **Severity:** MEDIUM
+- **Escalation:** none
+- **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
+- **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.standards.json`
+- **Components:** `packages/messaging/src/consumer-runner.ts:74`
+- **Problem:** When the handler or transaction throws, the runner calls `nak` and discards the error. The loop's `catch {}` at line 95 also drops fetch errors. MaxDeliver is -1, so a deterministic handler failure is redelivered forever, every 2 minutes after the 4th attempt, with the cause never recorded.
+- **Impact:** A poison message loops indefinitely and is invisible. The docs admit the DLQ gate is not built, but there is not even a log of the failure.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Pass the error and delivery count to an injected error reporter before nak. Track the open DLQ gate as technical debt if it is deferred.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/consumer-runner.ts#handler-errors-are-nak-d-with-no-trace-and-the-poll-loop-swa`
+- **History:**
+  - 2026-11-03: recorded: MEDIUM defect at `packages/messaging/src/consumer-runner.ts:74`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
+
+### TD-033: Retention is documented but no job exists
+
+- **Status:** OPEN
+- **Severity:** MEDIUM
+- **Escalation:** none
+- **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
+- **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.standards.json`
+- **Components:** `packages/db/prisma/schema.prisma:215`
+- **Problem:** The model comment says rows are "Kept 14 days, longer than the 7-day stream". Nothing in the change deletes `processed_messages` rows, and docs/database does not mention retention.
+- **Impact:** The table grows without bound, one row per message per consumer. A reader will assume cleanup exists.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Reword the comment to say retention is not implemented yet and register it as technical debt, or add the cleanup.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/db/prisma/schema.prisma#retention-is-documented-but-no-job-exists`
+- **History:**
+  - 2026-11-03: recorded: MEDIUM maintainability at `packages/db/prisma/schema.prisma:215`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
+
+### TD-034: Startup leaks the running relay and consumers if the HTTP server fails to listen
+
+- **Status:** OPEN
+- **Severity:** MEDIUM
+- **Escalation:** none
+- **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
+- **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.standards.json`
+- **Components:** `apps/worker/src/worker.ts:53`
+- **Problem:** The runners and relay are started (lines 40-43) before `server.listen`. A listen error (port in use) is emitted as an unhandled 'error' event and rejects nothing, so there is no cleanup path. `startWorker` also never stops the relay or runners if it throws after they start.
+- **Impact:** In embedded or test use the loops keep running against closed resources after a failed start. In main.ts it is an uncaught exception with no graceful drain of in-flight claims.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Bind the server first and reject on its 'error' event. Start the relay and runners last, or stop them in a catch.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/worker/src/worker.ts#startup-leaks-the-running-relay-and-consumers-if-the-http-se`
+- **History:**
+  - 2026-11-03: recorded: MEDIUM defect at `apps/worker/src/worker.ts:53`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
+
+### TD-035: Shutdown has no error handling or timeout
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
+- **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.standards.json`
+- **Components:** `apps/worker/src/main.ts:12`
+- **Problem:** `shutdown` is an async signal handler with no try/catch. A rejection during `worker.stop()` or `bus.close()` becomes an unhandled rejection and skips `process.exit`, which leaves the process hung or crashing with a misleading status. There is also no bound on how long stop waits for an in-flight 60 s relay transaction.
+- **Impact:** A SIGTERM during a slow tick can exceed the orchestrator's kill grace period. Failures in the shutdown path are unreported.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Wrap shutdown in try/catch and set a nonzero exit code on error. Add a deadline after which it exits.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/worker/src/main.ts#shutdown-has-no-error-handling-or-timeout`
+- **History:**
+  - 2026-11-03: recorded: LOW defect at `apps/worker/src/main.ts:12`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
+
+### TD-036: ensureTopology treats any `add` failure as a config mismatch
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
+- **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.standards.json`
+- **Components:** `packages/messaging/src/jetstream-message-bus.ts:112`
+- **Problem:** The bare `catch {}` around `streams.add` falls through to `update` for every error, including timeouts, permission failures and invalid config. The update then surfaces a different error and the original cause is lost.
+- **Impact:** Startup diagnosis is harder: the reported error describes the update, not the add failure.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Catch only the JetStream 'stream name already in use' error (or look the stream up first) and rethrow anything else.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/jetstream-message-bus.ts#ensuretopology-treats-any-add-failure-as-a-config-mismatch`
+- **History:**
+  - 2026-11-03: recorded: LOW defect at `packages/messaging/src/jetstream-message-bus.ts:112`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
+
+### TD-037: Reflect.get indirection kept after the export exists
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
+- **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.standards.json`
+- **Components:** `packages/messaging/src/message-bus.test.ts:36`
+- **Problem:** `connectJetStreamMessageBus` is read via `Reflect.get(messaging, ...)` with a cast and a hand-written `BusHandle`/`ConnectBus` type. That was useful while the code was missing, but it now bypasses type checking of the real signature.
+- **Impact:** The test compiles even if the factory's signature changes, and it adds noise.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Import `connectJetStreamMessageBus` directly and drop the local types.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/message-bus.test.ts#reflect-get-indirection-kept-after-the-export-exists`
+- **History:**
+  - 2026-11-03: recorded: LOW maintainability at `packages/messaging/src/message-bus.test.ts:36`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
+
+### TD-038: A permanently unpublishable row blocks its whole aggregate
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
+- **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.standards.json`
+- **Components:** `packages/messaging/src/outbox-relay.ts:50`
+- **Problem:** A row whose `eventType` maps to a subject outside the stream's subjects (or whose payload cannot be published) fails on every tick. `attempts` grows with no cap or terminal status, and the NOT EXISTS ordering rule then keeps every later row of that aggregate from being claimed.
+- **Impact:** One bad event stalls that aggregate's events forever at 250 ms retry churn. There is no alert or dead-letter path.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Define a maximum attempts policy (FAILED status or a DLQ route) or track the gap as technical debt.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/outbox-relay.ts#a-permanently-unpublishable-row-blocks-its-whole-aggregate`
+- **History:**
+  - 2026-11-03: recorded: LOW maintainability at `packages/messaging/src/outbox-relay.ts:50`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
+
+### TD-039: The same bus and prisma setup is repeated in three test files
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
+- **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.standards.json`
+- **Components:** `packages/messaging/src/outbox-relay.test.ts:22`
+- **Problem:** The `beforeAll`/`afterAll` that creates the prisma client and the prefixed JetStream bus is copied into outbox-relay.test.ts, consumer-runner.test.ts and worker.test.ts.
+- **Impact:** A change to the isolation scheme has to be made in several places.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Extract a shared test helper (for example in test-infra or a messaging test-support module).
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/outbox-relay.test.ts#the-same-bus-and-prisma-setup-is-repeated-in-three-test-file`
+- **History:**
+  - 2026-11-03: recorded: LOW maintainability at `packages/messaging/src/outbox-relay.test.ts:22`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
+
+### TD-040: AT-31 test does not prove the redelivery was acked as a duplicate
+
+- **Status:** OPEN
+- **Severity:** MEDIUM
+- **Escalation:** none
+- **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
+- **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.spec.json`
+- **Components:** `packages/messaging/src/consumer-runner.test.ts:221`
+- **Problem:** The test asserts deliveryCounts [1,2], zero messages on the third poll, and one side effect. It never asserts that the second delivery was acked. If the P2002 to AlreadyProcessed mapping broke, the runner would nak with a 1 s delay. The third poll would still usually return 0 messages and side effects would still be 1, so the test would pass. No test pins the unique-violation-to-ack path directly.
+- **Impact:** A regression that naks real duplicates forever would stay green, which is a delivery-loop failure in production.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Assert the ack directly, for example with the consumer info (num_ack_pending and num_pending both 0 after the second delivery). Alternatively, record the ack and nak calls on the wrapped message and assert that the second delivery was acked and not nak'd.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/consumer-runner.test.ts#at-31-test-does-not-prove-the-redelivery-was-acked-as-a-dupl`
+- **History:**
+  - 2026-11-03: recorded: MEDIUM missing_test at `packages/messaging/src/consumer-runner.test.ts:221`, spec axis (ticket 06 review-3 spec, run 20261103-120228)
+
+### TD-041: The 250 ms default is asserted only as an exported constant
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
+- **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.spec.json`
+- **Components:** `packages/messaging/src/outbox-relay.test.ts:86`
+- **Problem:** The test compares DEFAULT_RELAY_INTERVAL_MS to 250. Nothing shows that createOutboxRelay or the worker loop uses the constant as its pacing. The batch default is covered by the 120-row test, but the interval default is not exercised.
+- **Impact:** Changing the fallback in outbox-relay.ts to a literal value would not fail any test.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Assert the effective interval, for example with fake timers and a spy on bus.publish that counts ticks, or have the test pass no options and check the pacing.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/outbox-relay.test.ts#the-250-ms-default-is-asserted-only-as-an-exported-constant`
+- **History:**
+  - 2026-11-03: recorded: LOW missing_test at `packages/messaging/src/outbox-relay.test.ts:86`, spec axis (ticket 06 review-3 spec, run 20261103-120228)
+
+### TD-042: Per-aggregate ordering (NOT EXISTS older PENDING) is not in the ticket
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
+- **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.spec.json`
+- **Components:** `packages/messaging/src/outbox-relay.ts:78`
+- **Problem:** The claim query adds a self-referencing NOT EXISTS subquery so that only the oldest PENDING row of each aggregate is claimable. This limits throughput to one row per aggregate per tick, and no acceptance criterion asks for it. It is documented and tested, but it is an unrequested design decision that changes the 'batch of 100' semantics when rows share an aggregate.
+- **Impact:** Hot aggregates drain at 4 rows per second. The cost is acceptable for the MVP, but the decision was never put to the ticket owner.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Keep it only if an ADR or the spec requires per-aggregate order. Otherwise record it as an explicit decision in the ticket or an ADR.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/messaging/src/outbox-relay.ts#per-aggregate-ordering-not-exists-older-pending-is-not-in-th`
+- **History:**
+  - 2026-11-03: recorded: LOW scope_creep at `packages/messaging/src/outbox-relay.ts:78`, spec axis (ticket 06 review-3 spec, run 20261103-120228)
 <!-- ralph-debt:end -->

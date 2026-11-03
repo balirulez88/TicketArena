@@ -1,4 +1,29 @@
-// Public entry point of the messaging package. Scaffolding only (ticket 42): ticket 06 adds the
-// MessageBus port, the JetStream adapter, the outbox relay and the consumer runner here, and its
-// tests import them through this module so they run, and fail, before the code exists.
-export {};
+// Public entry point of the messaging package.
+
+export {
+  type ConsumerRunner,
+  type ConsumerRunnerOptions,
+  createConsumerRunner,
+} from "./consumer-runner.js";
+export {
+  connectJetStreamMessageBus,
+  DEFAULT_ACK_WAIT_MS,
+  type JetStreamMessageBusOptions,
+} from "./jetstream-message-bus.js";
+export type {
+  ConsumerSpec,
+  FetchOptions,
+  MessageBus,
+  MessageSubscription,
+  PublishAck,
+  PublishInput,
+  ReceivedMessage,
+  StreamKind,
+} from "./message-bus.js";
+export {
+  createOutboxRelay,
+  DEFAULT_RELAY_BATCH_SIZE,
+  DEFAULT_RELAY_INTERVAL_MS,
+  type OutboxRelay,
+  type OutboxRelayOptions,
+} from "./outbox-relay.js";

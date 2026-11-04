@@ -36,7 +36,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 1    | 3      | 35  | 39    |
+| OPEN          | 0        | 1    | 3      | 36  | 40    |
 | PLANNED       | 0        | 0    | 9      | 2   | 11    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 1    | 5      | 2   | 8     |
@@ -1180,4 +1180,23 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `ralph-loop.sh#in-container-review-verdicts-share-a-user-with-the-agent`
 - **History:**
   - 2026-11-04: recorded: HIGH security limitation remaining after ticket 47 (trust boundary), raised for a user decision
+
+### TD-059: Rejected work is imported as ordinary branches
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 47 (`47-sandbox-trust-boundary`), Spec review round 4 (2026-11-04)
+- **Evidence:** `scripts/ralph-accept.mjs` (`createBranch` for `rejected/<slug>-<run-id>`), `docs/workflow/index.md` (trust boundary, blocked-status commit)
+- **Components:** `scripts/ralph-accept.mjs:926`, `scripts/ralph-batch.mjs:222`
+- **Problem:** A rejected run's work is imported as `refs/heads/rejected/<slug>-<run-id>`. Its tree passed no path rule. Only a documentation note says to inspect it with `git log -p` or `git show` rather than check it out, and a broad push (`git push --all`) would publish it, so its own `.github/workflows` would run on GitHub.
+- **Impact:** None while operators follow the note and push only `main`, as the batch does. A careless checkout writes untrusted files into the host working tree; a broad push runs untrusted workflows with the repository's secrets.
+- **Justification:** Deferred from ticket 47: the batch (`rejectedRefs`) and `ralph-loop.sh` outside the sandbox both find rejections under `refs/heads/rejected/`, so moving them changes the batch's rejection detection and the non-sandbox loop together. The batch itself never checks out or pushes these branches.
+- **Remediation:** Import rejected work under `refs/ralph/rejected/<slug>-<run-id>` (outside `refs/heads`) and have the batch detect rejections there; keep `refs/heads/rejected/` only for runs outside the sandbox.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-accept.mjs#rejected-work-is-imported-as-ordinary-branches`
+- **History:**
+  - 2026-11-04: recorded: LOW finding deferred from ticket 47's Spec review (round 4)
 <!-- ralph-debt:end -->

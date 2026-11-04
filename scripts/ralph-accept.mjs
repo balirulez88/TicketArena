@@ -44,12 +44,14 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual, parseArgs } from "node:util";
@@ -79,19 +81,24 @@ export const PROTECTED_FILES = [
   ".dockerignore",
   "tsconfig.base.json",
   "turbo.json",
-  "pnpm-workspace.yaml",
   "docker-compose.yml",
   ".nvmrc",
+  // The host-only rule below reads the host's own ignore rules; a slice that could drop one in
+  // an earlier run would open that path for a later one.
+  ".gitignore",
 ];
 export const PROTECTED_DIRS = ["scripts/", ".github/", "skills/", "docs/workflow/", "infra/"];
-// Anywhere in the tree: Biome and Turborepo read nested configuration, pnpm nested settings and
-// manifests in any of its formats (only package.json is judged by its content, below), and
-// node-gyp builds any package with a binding.gyp on install.
+// Anywhere in the tree: Biome and Turborepo read nested configuration, pnpm nested settings
+// (`scriptShell` in a package's pnpm-workspace.yaml changes what its scripts run) and manifests in
+// any of its formats (only package.json is judged by its content, below), node-gyp builds any
+// package with a binding.gyp on install, and Claude Code loads .mcp.json.
 const NESTED_GATE_FILES = [
   "biome.json",
   "biome.jsonc",
   "turbo.json",
+  "turbo.jsonc",
   ".npmrc",
+  "pnpm-workspace.yaml",
   ".mcp.json",
   "package.yaml",
   "package.json5",
@@ -100,13 +107,13 @@ const NESTED_GATE_FILES = [
 // Anywhere in the tree, by name: pnpm hooks in any module format, Docker Compose files (an
 // override is merged in by itself, and `compose.yaml` wins over `docker-compose.yml`), and what
 // Claude Code and editors load by themselves for host sessions and for the next agent and its
-// reviewers (CLAUDE.md, CLAUDE.local.md, .claude/, .mcp.json, .vscode/).
+// reviewers (CLAUDE.md, CLAUDE.local.md, .claude/, .vscode/, .idea/).
 const NESTED_GATE_NAMES = [
   /^\.pnpmfile\./,
   /^(docker-)?compose([.-].*)?\.ya?ml$/,
   /^claude(\.local)?\.md$/,
 ];
-const NESTED_GATE_DIRS = [".claude", ".vscode"];
+const NESTED_GATE_DIRS = [".claude", ".vscode", ".idea"];
 // Anywhere in the tree: they bring Git filters, diff drivers or other repositories with them.
 const GIT_METADATA = [".gitattributes", ".gitmodules"];
 const COMMIT_TYPES = ["feat", "fix", "refactor", "perf", "test", "docs", "chore"];
@@ -285,8 +292,8 @@ const DEPENDENCY_FIELDS = [
   "optionalDependencies",
   "peerDependencies",
 ];
-class Unparseable extends Error {}
-/** The manifest at `path` on `sha`: null if absent, Unparseable if it is not a JSON object. */
+const UNPARSEABLE = Object.freeze({});
+/** The manifest at `path` on `sha`: null if absent, UNPARSEABLE if it is not a JSON object. */
 function manifest(sha, path) {
   const text = show(sha, path);
   if (text === null) {
@@ -300,7 +307,7 @@ function manifest(sha, path) {
   } catch {
     // Reported below like any other manifest that is not an object.
   }
-  return new Unparseable();
+  return UNPARSEABLE;
 }
 const pick = (object, names) =>
   Object.fromEntries(Object.entries(object ?? {}).filter(([name]) => names.includes(name)));
@@ -310,13 +317,13 @@ const omit = (object, names) =>
 function scriptsError(from, to, path) {
   const before = manifest(from, path);
   const after = manifest(to, path);
-  if (after instanceof Unparseable) {
+  if (after === UNPARSEABLE) {
     return "not a JSON object, so pnpm and this check could read it differently";
   }
   if (before !== null && after === null) {
     return "removing a package removes its tests from the gate";
   }
-  const scripts = (pkg) => (pkg instanceof Unparseable ? {} : (pkg?.scripts ?? {}));
+  const scripts = (pkg) => (pkg === UNPARSEABLE ? {} : (pkg?.scripts ?? {}));
   if (
     !isDeepStrictEqual(
       pick(scripts(before), INSTALL_SCRIPTS),
@@ -325,7 +332,7 @@ function scriptsError(from, to, path) {
   ) {
     return "install scripts cannot change through a run";
   }
-  if (before === null || before instanceof Unparseable) {
+  if (before === null || before === UNPARSEABLE) {
     return null;
   }
   // The root manifest is the gate and the host's tooling: only its dependencies may change.
@@ -755,11 +762,20 @@ function importLogs(outDir) {
       if (lstatSafe(target) !== null) {
         log(`skipped logs/${run}: the host already has logs for that run`);
       } else {
-        copyLogs(join(logs, run), target);
-        // Retention is decided from run.json, so the host writes its own once it has a verdict.
-        rmSync(join(target, "run.json"), { force: true });
-        redactRun(target, secretValues(env));
-        imported.push(target);
+        // Staged next to the target and renamed into place once complete, so a copy that fails
+        // halfway leaves nothing behind: no unredacted file, no container run.json.
+        const staging = `${target}.importing`;
+        rmSync(staging, { recursive: true, force: true });
+        try {
+          copyLogs(join(logs, run), staging);
+          // Retention is decided from run.json, so the host writes its own with its verdict.
+          rmSync(join(staging, "run.json"), { force: true });
+          redactRun(staging, secretValues(env));
+          renameSync(staging, target);
+          imported.push(target);
+        } finally {
+          rmSync(staging, { recursive: true, force: true });
+        }
       }
       // The run directory is kept after a refusal: only the bounded, redacted copy remains.
       rmSync(join(logs, run), { recursive: true, force: true });
@@ -798,10 +814,57 @@ function hostReady(base) {
   return null;
 }
 
+// Bundle fetches skip fetch.fsckObjects (Git 2.45), and an object that reached the host's store
+// would stay there after a refusal and fail every later check. So the bundle is first fetched
+// into a scratch repository that borrows the host's objects through an alternate, and only the
+// objects the bundle adds are checked there, strictly, before the host fetches anything.
+function assertWellFormed(bundle) {
+  const scratch = mkdtempSync(join(tmpdir(), "ralph-accept-objects-"));
+  try {
+    const inScratch = (args) => git(args, { cwd: scratch });
+    inScratch(["init", "--quiet", "--bare", "."]);
+    const objects = gitOut("rev-parse", "--path-format=absolute", "--git-path", "objects");
+    writeFileSync(join(scratch, "objects", "info", "alternates"), `${objects}\n`);
+    // unpackLimit 1 keeps every fetch as a pack, so the check below sees all of it.
+    const fetched = inScratch([
+      "-c",
+      "fetch.unpackLimit=1",
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--no-write-fetch-head",
+      bundle,
+      "+refs/heads/*:refs/check/*",
+    ]);
+    if (fetched.status !== 0) {
+      refuse(`result.bundle could not be read: ${fetched.stderr.trim()}`);
+    }
+    const added = readdirSync(join(scratch, "objects", "pack")).filter((name) =>
+      name.endsWith(".pack"),
+    );
+    for (const pack of added) {
+      const checked = inScratch([
+        "index-pack",
+        "--strict",
+        "--fsck-objects",
+        "-o",
+        join(scratch, `${pack}.check.idx`),
+        join(scratch, "objects", "pack", pack),
+      ]);
+      if (checked.status !== 0) {
+        refuse(`result.bundle holds malformed objects: ${checked.stderr.trim().split("\n")[0]}`);
+      }
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 function fetchBundle(bundle, namespace) {
   if (git(["bundle", "verify", "--quiet", bundle]).status !== 0) {
     refuse("result.bundle is not a valid Git bundle for this repository");
   }
+  assertWellFormed(bundle);
   const fetched = git([
     "-c",
     "transfer.fsckObjects=true",
@@ -824,21 +887,6 @@ function fetchBundle(bundle, namespace) {
     .filter(Boolean)) {
     const [sha, ref] = line.split(" ");
     incoming.set(ref.slice(namespace.length + 1), sha);
-  }
-  // fetch.fsckObjects does not check objects read from a bundle (Git 2.45), so every object the
-  // run's branches reach is checked here, strictly, before anything is judged by its content.
-  if (incoming.size > 0) {
-    const checked = git([
-      "fsck",
-      "--strict",
-      "--no-dangling",
-      "--no-progress",
-      ...incoming.values(),
-    ]);
-    if (checked.status !== 0) {
-      const first = `${checked.stderr}${checked.stdout}`.trim().split("\n")[0];
-      refuse(`result.bundle holds malformed objects: ${first}`);
-    }
   }
   return incoming;
 }

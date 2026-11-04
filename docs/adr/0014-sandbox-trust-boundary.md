@@ -24,8 +24,9 @@ a trusted host step has validated it.
   `--cap-drop ALL` and `no-new-privileges`.
 - **Transport:** inside the container, Ralph pushes to a staging bare repository that only the
   container has. At exit, its branches leave as `result.bundle`. The host reads that bundle with
-  its own Git into a quarantine namespace (`refs/ralph/incoming/<run>/`), then checks every
-  object the run's branches reach with `git fsck --strict`.
+  its own Git into a quarantine namespace (`refs/ralph/incoming/<run>/`). Before that, every
+  object the bundle adds is checked strictly (`index-pack --strict --fsck-objects`) in a scratch
+  repository, so a malformed object never reaches the host's object store.
   The host never runs Git inside a repository the container wrote, so no hook or config of the
   container's can execute on the host.
 - **Acceptance** (`scripts/ralph-accept.mjs`, the only code that changes the host from a run):

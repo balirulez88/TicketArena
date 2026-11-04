@@ -379,9 +379,11 @@ private staging bare repository and a workspace, and Ralph pushes to that stagin
 `scripts/ralph-accept.mjs` then decides on the host. It is the only code that changes the host
 repository from a run, and everything in `out/` is data to it:
 
-- The bundle is fetched by the host's own Git into `refs/ralph/incoming/<run>/`, and every
-  object its branches reach is then checked with `git fsck --strict` (fetching from a bundle does
-  not apply `fetch.fsckObjects`). No Git command ever runs inside a repository the container
+- The bundle is fetched by the host's own Git into `refs/ralph/incoming/<run>/`. Fetching from
+  a bundle does not apply `fetch.fsckObjects`, so every object the bundle adds is first checked
+  with `index-pack --strict --fsck-objects` in a scratch repository that borrows the host's
+  objects. A malformed object is refused before it reaches the host's object store, where it
+  would outlive the refusal and fail every later check. No Git command ever runs inside a repository the container
   wrote, so no hook or config of the container's can execute on the host.
 - `main` may gain only Ralph's own shapes, checked against the base the run started from:
   - a **slice merge**: one squashed commit on the base, under `Merge slice/<slug>: <title>` with
@@ -393,10 +395,11 @@ repository from a run, and everything in `out/` is data to it:
     inspect it with `git log -p` or `git show`, never by checking it out.
 - **Protected paths** may not change through a run: `ralph-loop.sh`, `scripts/`, `Dockerfile`,
   `.dockerignore`, `.github/`, `skills/`, `infra/`, `docs/workflow/`, `tsconfig.base.json`,
-  `turbo.json`, `pnpm-workspace.yaml`, `.nvmrc`; and in any directory `biome.json(c)`,
-  `turbo.json`, `.npmrc`, `.pnpmfile.*`, `package.yaml`, `package.json5`, `binding.gyp`, Docker
+  `turbo.json`, `.nvmrc`, `.gitignore` (the host-only rule reads it); and in any directory
+  `biome.json(c)`, `turbo.json(c)`, `.npmrc`, `pnpm-workspace.yaml` (its `scriptShell` changes
+  what a package's scripts run), `.pnpmfile.*`, `package.yaml`, `package.json5`, `binding.gyp`, Docker
   Compose files (`compose*.y(a)ml`, `docker-compose*.y(a)ml`), `CLAUDE.md`, `CLAUDE.local.md`,
-  `.mcp.json`, and anything under `.claude/` or `.vscode/`. In the root `package.json` only the
+  `.mcp.json`, and anything under `.claude/`, `.vscode/` or `.idea/`. In the root `package.json` only the
   dependency maps may change. In any other `package.json`, the gate scripts (`lint`, `typecheck`, `test`,
   `check`, `check:debt`, `test:harness`, and their `pre`/`post` scripts) are fixed and the
   package may not be deleted; its dependencies and other scripts may change, and new packages

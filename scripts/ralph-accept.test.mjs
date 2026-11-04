@@ -307,10 +307,13 @@ describe("ralph-accept: a genuine slice merge", () => {
         write(
           dir,
           "package.json",
-          '{"scripts":{"test":"vitest"},"devDependencies":{},"packageManager":"pnpm@8.0.0"}\n',
+          '{"scripts":{"test":"vitest"},"devDependencies":{},"packageManager":"pnpm@8.0.0","engines":{"node":">=10"}}\n',
         ),
     });
-    assert.match(assertRefused(host, finish(host, ws), { base }).output, /define the gate/);
+    assert.match(
+      assertRefused(host, finish(host, ws), { base }).output,
+      /package\.json: the scripts and settings that define the gate/,
+    );
   });
 
   it("accepts a slice that changes dependencies but not the root scripts", () => {
@@ -459,7 +462,20 @@ describe("ralph-accept: attack path 2, Git configuration, hooks and links", () =
     );
     const bad = git(ws, "hash-object", "-t", "commit", "--literally", "-w", file);
     git(ws, "update-ref", "refs/heads/evidence", bad);
-    assert.match(assertRefused(host, finish(host, ws), { base }).output, /malformed objects/);
+    const before = snapshot(host);
+    const result = accept(host, finish(host, ws), { base });
+    assert.equal(result.code, UNTRUSTED, result.output);
+    assert.match(result.output, /malformed objects/);
+    assert.deepEqual(snapshot(host), before);
+    // Checked before the host fetched anything: its object store never held the object.
+    assert.equal(spawnSync("git", ["cat-file", "-e", bad], { cwd: host }).status, 1);
+    assert.equal(spawnSync("git", ["fsck", "--strict"], { cwd: host }).status, 0);
+
+    // So the next, genuine run is judged on its own.
+    const next = container(host);
+    merge(next);
+    const genuine = accept(host, finish(host, next, { name: "run2" }), { base });
+    assert.equal(genuine.code, 0, genuine.output);
   });
 
   for (const [name, path, text] of [
@@ -651,6 +667,10 @@ describe("ralph-accept: attack path 3, harness, CI and gate definitions", () => 
     ["the infrastructure directory", "infra/nats.conf", "jetstream: off\n"],
     ["the Node version", ".nvmrc", "18\n"],
     ["a nested Turborepo configuration", "packages/demo/turbo.json", '{"tasks":{}}\n'],
+    ["a nested Turborepo JSONC configuration", "packages/demo/turbo.jsonc", '{"tasks":{}}\n'],
+    ["a nested pnpm workspace file", "packages/demo/pnpm-workspace.yaml", "scriptShell: node\n"],
+    ["the host's ignore rules", ".gitignore", "# nothing ignored\n"],
+    ["IDE settings", ".idea/watcherTasks.xml", "<project/>\n"],
     ["a YAML package manifest", "packages/a/package.yaml", "scripts:\n  postinstall: node x\n"],
     ["a JSON5 package manifest", "packages/a/package.json5", "{scripts:{postinstall:'node x'}}\n"],
     ["a native build file", "packages/a/binding.gyp", "{'targets':[]}\n"],
@@ -674,17 +694,29 @@ describe("ralph-accept: attack path 3, harness, CI and gate definitions", () => 
     });
   }
 
-  for (const [name, change] of [
+  const GATE = /packages\/[a-z]+\/package\.json: the scripts and settings that define the gate/;
+  const INSTALL = /packages\/[a-z]+\/package\.json: install scripts cannot change/;
+  for (const [name, change, reason] of [
     [
       "redefines a package's test script",
       (dir) => write(dir, "packages/demo/package.json", '{"scripts":{"test":"true","dev":"x"}}\n'),
+      GATE,
     ],
     [
       "removes a package's test script",
       (dir) => write(dir, "packages/demo/package.json", '{"scripts":{"dev":"x"}}\n'),
+      GATE,
     ],
-    ["deletes a package", (dir) => rmSync(join(dir, "packages/demo/package.json"))],
-    ["breaks a package manifest", (dir) => write(dir, "packages/demo/package.json", "{oops\n")],
+    [
+      "deletes a package",
+      (dir) => rmSync(join(dir, "packages/demo/package.json")),
+      /removes its tests from the gate/,
+    ],
+    [
+      "breaks a package manifest",
+      (dir) => write(dir, "packages/demo/package.json", "{oops\n"),
+      /not a JSON object/,
+    ],
     [
       "redefines what runs before a package's tests",
       (dir) =>
@@ -693,6 +725,7 @@ describe("ralph-accept: attack path 3, harness, CI and gate definitions", () => 
           "packages/demo/package.json",
           '{"scripts":{"test":"vitest run","pretest":"x"}}\n',
         ),
+      GATE,
     ],
     [
       "gives a package an install script",
@@ -702,10 +735,12 @@ describe("ralph-accept: attack path 3, harness, CI and gate definitions", () => 
           "packages/demo/package.json",
           '{"scripts":{"test":"vitest run","dev":"x","postinstall":"node evil.js"}}\n',
         ),
+      INSTALL,
     ],
     [
       "adds a package with an install script",
       (dir) => write(dir, "packages/new/package.json", '{"scripts":{"prepare":"node evil.js"}}\n'),
+      INSTALL,
     ],
   ]) {
     it(`refuses a slice that ${name}`, () => {
@@ -713,10 +748,7 @@ describe("ralph-accept: attack path 3, harness, CI and gate definitions", () => 
       const base = git(host, "rev-parse", "main");
       const ws = container(host);
       merge(ws, "01-demo", { change });
-      assert.match(
-        assertRefused(host, finish(host, ws), { base }).output,
-        /define the gate|removes its tests|install scripts|not a JSON object/,
-      );
+      assert.match(assertRefused(host, finish(host, ws), { base }).output, reason);
     });
   }
 

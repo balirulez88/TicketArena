@@ -298,6 +298,14 @@ non-interactive mode. TicketArena's rules for reviewers are in [code-review.md](
 - **Bounded.** Up to `RALPH_MAX_REVIEW_ROUNDS` (default 3) rounds; each round except the last
   may trigger a fix. A slice still blocked, or without a valid approval, after the last round is
   rejected and quarantined like any other failure.
+- **The host's review decides** ([ADR 0015](../adr/0015-review-and-verification-isolation.md)).
+  In the sandbox, these rounds run in the agent's container and only drive its fix loop. Before a
+  slice reaches `main`, the host runs one more round of its own (`scripts/ralph-host-review.mjs`):
+  the same prompts (`scripts/ralph-review-prompt.mjs`), schema and gate, with a changeset and token
+  the host made, each reviewer a fresh session in its own container (read-only root and input, read-only tools) that sees exactly the
+  candidate commit and has no output mount. Its reports and decision are in
+  `.ralph/host-review/<run>/<slug>/`. An invalid report is asked for once more; both axes must
+  approve. The host records that round's deferred findings in the register in its own commit.
 
 ## Technical debt register
 
@@ -395,17 +403,29 @@ repository from a run, and everything in `out/` is data to it:
     branch `rejected/<slug>-<run-id>` is imported as a new branch. Its tree is unvalidated:
     inspect it with `git log -p` or `git show`, never by checking it out.
 - **Protected paths** may not change through a run: `ralph-loop.sh`, `scripts/`, `Dockerfile`,
-  `.dockerignore`, `.github/`, `skills/`, `infra/`, `docs/workflow/`, `tsconfig.base.json`,
-  `turbo.json`, `.nvmrc`; and in any directory `.gitignore` (the host-only rule reads it),
+  `.dockerignore`, `.github/`, `skills/`, `infra/`, `docs/workflow/`, `packages/test-infra/`,
+  `tsconfig.base.json`, `turbo.json`, `.nvmrc`; and in any directory `.gitignore` (the host-only
+  rule reads it), what runs or decides what runs in the verifier's trusted processes
+  (`vite(st).config.*`, `vitest.workspace.*`, `postcss.config.*`, `tailwind.config.*`,
+  `prisma.config.*`, `tsconfig*.json`, `.editorconfig`; ADR 0015),
   `biome.json(c)`, `turbo.json(c)`, `.npmrc`, `pnpm-workspace.yaml` (its `scriptShell` changes
   what a package's scripts run), `.pnpmfile.*`, `package.yaml`, `package.json5`, `binding.gyp`,
   Docker Compose files (`compose*.y(a)ml`, `docker-compose*.y(a)ml`), `CLAUDE.md`,
   `CLAUDE.local.md`, `.mcp.json`, and anything under `.claude/`, `.vscode/` or `.idea/`. In the
   root `package.json` only the dependency maps may change. In any other `package.json`, the gate
-  scripts (`lint`, `typecheck`, `test`, `check`, `check:debt`, `test:harness`, and their
-  `pre`/`post` scripts) are fixed and the package may not be deleted; its dependencies and other
+  scripts (`lint`, `typecheck`, `test`, `check`, `check:debt`, `test:harness`, `db:generate`, and
+  their `pre`/`post` scripts) are fixed and the package may not be deleted; a new package's gate
+  scripts other than `test` must run a command a package of the base runs under that name; its dependencies and other
   scripts may change, and new packages may be added. No package, new or old, may gain an install script (`preinstall`, `install`,
   `postinstall`, `prepare` and the like), and a manifest that is not a JSON object is refused.
+  Prisma `generator` blocks may not change (a generator names a program `prisma generate` runs).
+- **The toolchain's locked dependencies** (ADR 0015): in `pnpm-lock.yaml`, an entry the base
+  locks may be dropped but not redefined; Vitest, Vite, TypeScript, Turbo, Biome, Prisma, esbuild,
+  the CSS tooling Vite loads, and every dependency of the root manifest and of the test
+  infrastructure must resolve to entries the base locks (a `link:` only where the base has the
+  same link); packages allowed to run build scripts may
+  not gain versions; pnpm's own entry, the settings and overrides are fixed; YAML aliases, tags,
+  anchors, merge keys and duplicate keys are refused. Ordinary dependencies may change.
 - **Host-only paths** may not be written: `.ralph/`, `node_modules/`, `.pnpm-store/`, `.turbo/`,
   `.env` files (examples aside), and anything the host's own ignore rules match. A fast-forward
   would overwrite such ignored files without a trace, planting state, credentials or
@@ -419,9 +439,21 @@ repository from a run, and everything in `out/` is data to it:
   (`ſ` is `s`), as HFS+ and APFS do. Names Windows would resolve elsewhere (8.3 short names such
   as `SCRIPT~1`, stream syntax, device names such as `aux.ts`, reserved characters) and names with
   control characters are refused, as is a tree in which two paths fold to the same name.
-- The **full gate runs again** on the merged tree before `main` moves, in a fresh sandbox with no
-  agent and no key (`sandbox.sh --verify <sha>`). The register check runs first, before
-  `pnpm install` or any of the slice's code could rewrite it in that checkout.
+- The **full gate runs again** on the merged tree before `main` moves, with no agent and no key
+  (`sandbox.sh --verify <sha>`, `scripts/ralph-verify.mjs`), in staged disposable containers
+  sharing one workspace volume. Each drops all capabilities, has memory, CPU and process limits
+  and a timeout, and mounts nothing of the host but the read-only input. **prepare** (network on)
+  checks the register before anything is installed, installs, refuses any package outside the
+  toolchain whose bin shadows a command the gate trusts (`scripts/ralph-bins.mjs`), and
+  generates; **tools** (no
+  network) runs the register check, lint, typecheck and harness tests, none of which execute the
+  slice's code; **test** runs each workspace package's `test` script in its own container with no
+  network, a read-only root file system and a read-only workspace, against its own services, and
+  only if Yama restricts `ptrace`. The verdict is the containers' exit status, nothing else.
+- The **host's own review** then judges the exact slice commit (see Independent review). If it
+  does not approve, none of the run lands: the host blocks the ticket in its own commit and keeps
+  the work on `rejected/<slug>-<run>`. A reviewer cut off by the provider leaves the host
+  unchanged.
 - A **pause** is adopted only if it is exactly what `pause_ticket` writes. It must belong to the
   run's ticket and to parked work that is in the bundle on the base, with `paused^ = gated` and
   attempt and round within limits, and the parked work must obey the path rules. The host
@@ -442,17 +474,19 @@ archives; Git config, hooks and links; harness, CI and gate definitions; forged 
 well as genuine merges, rejections, pause and resume, and interrupted runs.
 `pnpm test:sandbox` (Docker; also a CI job) proves the boundary through the real sandbox. Inside
 the container, it checks that the host repository is absent, the input is read-only, there is no
-Docker socket, and only the two run directories are mounted. It also runs a merge (re-gated by
-the host), a rejection, a usage-limit pause and its resume, a malicious agent's forged merge and
-forged resume state (refused, with the host's refs, Git config, hooks and scripts byte-for-byte
-unchanged), and a dirty host checkout (refused before any container starts).
+Docker socket, and only the two run directories are mounted. It also runs a merge (re-gated and
+reviewed by the host), a rejection, a usage-limit pause and its resume, a malicious agent's forged
+merge and forged resume state (refused, with the host's refs, Git config, hooks and scripts
+byte-for-byte unchanged), a slice linking a package whose bin is named `node` (refused by the bin check before any script
+runs), a malicious agent whose tests attack the host's gate (they cannot
+rewrite another test, the runner or the dependencies, reach the network or the host, and the gate
+fails), a slice the agent's reviewers approve but the host's isolated reviewers block (not merged;
+the reviewer containers see exactly the candidate, read-only, with no output mount), and a dirty
+host checkout (refused before any container starts).
 
-**Remaining limitation** (TD-058): inside the container, the agent runs as the same user as
-Ralph's own gates and reviewers. A deliberately malicious agent could therefore tamper with an
-in-container verdict, for example by rewriting a review report before the review gate reads it.
-The host independently re-checks everything deterministic: shape, paths, the gate, and GitHub CI
-after the push. The approval of the two LLM reviews, however, is still produced inside the
-container.
+The threat model and the limitations that remain (prompt injection of the reviewers, shared state
+within one package's test run, network during install, hoisted modules, merged code running on
+developer machines and in CI) are in [ADR 0015](../adr/0015-review-and-verification-isolation.md).
 
 `pnpm sandbox --verify [commit]` runs just the gate inside the sandbox (no agent, no API key):
 use it after changing the image. The agent runs with permission prompts disabled **only** inside

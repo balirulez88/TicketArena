@@ -48,12 +48,18 @@ RUN npm install --global "pnpm@${PNPM_VERSION}" "@anthropic-ai/claude-code@${CLA
 COPY infra/nats/nats.conf /etc/nats/nats.conf
 COPY --chmod=0755 scripts/sandbox-services.sh /usr/local/lib/sandbox-services.sh
 COPY --chmod=0755 scripts/sandbox-entrypoint.sh /usr/local/bin/sandbox-entrypoint
+# The verifier's bin check runs from the image, never from the workspace it judges (ADR 0015).
+COPY scripts/ralph-bins.mjs scripts/ralph-toolchain.mjs /usr/local/lib/ralph/
 
 ENV RALPH_SANDBOX=1 \
   CI=1 \
   NEXT_TELEMETRY_DISABLED=1 \
   TURBO_TELEMETRY_DISABLED=1 \
   DISABLE_AUTOUPDATER=1
+
+# The verifier's workspace volume (scripts/ralph-verify.mjs) is mounted here; a new volume takes
+# this directory's owner, so the unprivileged user can prepare it.
+RUN install --directory --owner=node --group=node /workspace
 
 USER node
 WORKDIR /home/node

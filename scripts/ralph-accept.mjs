@@ -21,8 +21,17 @@
 //     skills, the root package.json scripts, every package's gate and install scripts), Git
 //     attributes or submodules, or add a symlink or submodule. So the host scripts the batch
 //     runs, and the definition of the gate the agent is judged by, cannot change through a run.
-//   - The full quality gate passes again on the merged tree, in a fresh sandbox with no agent
-//     (RALPH_ACCEPT_VERIFY).
+//   - What runs in a trusted role while the gate judges the slice is fixed by the base (ADR 0015):
+//     test and build configuration, the test infrastructure, Prisma generators, and the
+//     toolchain's locked dependencies (lockfileErrors).
+//   - The full quality gate passes again on the merged tree, in hardened staged containers with no
+//     agent (RALPH_ACCEPT_VERIFY, scripts/ralph-verify.mjs); its verdict is their exit status.
+//   - The host's own Standards and Spec reviewers, each in an isolated read-only container with a
+//     snapshot of exactly the slice commit, approve it (scripts/ralph-host-review.mjs). Nothing the
+//     agent's container produced about its reviews is read. Not approved: the host blocks the
+//     ticket in its own commit and keeps the slice on rejected/<slug>-<run> (exit 1). A provider
+//     cut-off leaves the host unchanged (exit 1). Approved: the host records the review's deferred
+//     findings in the register in its own commit.
 //   - A pause is adopted only if it is exactly what Ralph writes for the ticket's parked ref. It
 //     must sit on the base the run started from, with `paused^ = gated`, and the parked work must
 //     pass the same path rules. The host rewrites it in canonical form.
@@ -52,10 +61,20 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual, parseArgs } from "node:util";
+import { isMap, isScalar, parse, parseAllDocuments, visit } from "yaml";
 import { cleanup, initRoot, markRun, redactRun, secretValues } from "./ralph-artifacts.mjs";
+import {
+  checkRegisterText,
+  parseRegister,
+  recordFindings,
+  renderRegister,
+  validateRegister,
+} from "./ralph-debt.mjs";
+import { hostReview } from "./ralph-host-review.mjs";
+import { isToolchain, TOOLCHAIN_IMPORTERS } from "./ralph-toolchain.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const env = process.env;
@@ -64,6 +83,9 @@ const VERIFY = env.RALPH_ACCEPT_VERIFY ?? "bash scripts/sandbox.sh --verify";
 const MAX_ATTEMPTS = Number(env.RALPH_MAX_ATTEMPTS || 5);
 const MAX_ROUNDS = Number(env.RALPH_MAX_REVIEW_ROUNDS || 3);
 const LOG_ROOT = join(root, ".ralph/logs");
+// Host-written only: the container's logs are imported under .ralph/logs/<run id>, never here.
+const REVIEW_ROOT = join(root, ".ralph/host-review");
+const REGISTER = "docs/technical-debt.md";
 const STATE_DIR = join(root, ".ralph/state");
 const PAUSED_EXIT = 75;
 const UNTRUSTED_EXIT = 3;
@@ -84,7 +106,16 @@ export const PROTECTED_FILES = [
   "docker-compose.yml",
   ".nvmrc",
 ];
-export const PROTECTED_DIRS = ["scripts/", ".github/", "skills/", "docs/workflow/", "infra/"];
+// packages/test-infra holds the Vitest global setup, which runs inside the Vitest main process
+// that reports the test verdict (ADR 0015), so it is part of the gate's runner, not of a slice.
+export const PROTECTED_DIRS = [
+  "scripts/",
+  ".github/",
+  "skills/",
+  "docs/workflow/",
+  "infra/",
+  "packages/test-infra/",
+];
 // Anywhere in the tree: Biome and Turborepo read nested configuration, pnpm nested settings
 // (`scriptShell` in a package's pnpm-workspace.yaml changes what its scripts run) and manifests in
 // any of its formats (only package.json is judged by its content, below), node-gyp builds any
@@ -103,15 +134,28 @@ const NESTED_GATE_FILES = [
   "package.yaml",
   "package.json5",
   "binding.gyp",
+  // Biome can take its formatting from it.
+  ".editorconfig",
 ];
 // Anywhere in the tree, by name: pnpm hooks in any module format, Docker Compose files (an
 // override is merged in by itself, and `compose.yaml` wins over `docker-compose.yml`), and what
 // Claude Code and editors load by themselves for host sessions and for the next agent and its
 // reviewers (CLAUDE.md, CLAUDE.local.md, .claude/, .vscode/, .idea/).
+//
+// And the configuration that runs, or decides what runs, inside the verifier's trusted processes
+// (ADR 0015): Vitest and Vite configuration executes in the Vitest main process, which reports
+// the verdict, and so do the PostCSS and Tailwind configuration Vite loads for stylesheets;
+// `prisma.config.*` executes when the client is generated; `tsconfig*.json` decides what the type
+// check covers.
 const NESTED_GATE_NAMES = [
   /^\.pnpmfile\./,
   /^(docker-)?compose([.-].*)?\.ya?ml$/,
   /^claude(\.local)?\.md$/,
+  /^vite(st)?\.(config|workspace|projects)(\.|$)/,
+  /^(postcss|tailwind)\.config\./,
+  /^\.postcssrc/,
+  /^prisma\.config\./,
+  /^[tj]sconfig(\..*)?\.json$/,
 ];
 const NESTED_GATE_DIRS = [".claude", ".vscode", ".idea"];
 // Anywhere in the tree: they bring Git filters, diff drivers or other repositories with them.
@@ -269,9 +313,17 @@ const hasControl = (text) => printable(text) !== text;
 
 // The scripts that make up the gate, in any package. A slice may add a package or change its
 // dependencies, but not redefine what `lint`, `typecheck` or `test` run for an existing one.
-const GATE_SCRIPTS = ["lint", "typecheck", "test", "check", "check:debt", "test:harness"].flatMap(
-  (name) => [name, `pre${name}`, `post${name}`],
-);
+// `db:generate` is one too: the gate's typecheck and test tasks depend on it (turbo.json), and the
+// verifier runs it while it prepares the workspace.
+const GATE_SCRIPTS = [
+  "lint",
+  "typecheck",
+  "test",
+  "check",
+  "check:debt",
+  "test:harness",
+  "db:generate",
+].flatMap((name) => [name, `pre${name}`, `post${name}`]);
 // What pnpm runs by itself on `pnpm install` for every workspace package, before any gate and on
 // every developer machine: no package may gain one, new packages included.
 const INSTALL_SCRIPTS = [
@@ -333,7 +385,7 @@ function scriptsError(from, to, path) {
     return "install scripts cannot change through a run";
   }
   if (before === null || before === UNPARSEABLE) {
-    return null;
+    return newPackageError(from, scripts(after));
   }
   // The root manifest is the gate and the host's tooling: only its dependencies may change.
   const same =
@@ -341,6 +393,229 @@ function scriptsError(from, to, path) {
       ? isDeepStrictEqual(omit(before, DEPENDENCY_FIELDS), omit(after, DEPENDENCY_FIELDS))
       : isDeepStrictEqual(pick(scripts(before), GATE_SCRIPTS), pick(scripts(after), GATE_SCRIPTS));
   return same ? null : "the scripts and settings that define the gate cannot change through a run";
+}
+
+/** The commands the base's packages run for each gate script, by script name. */
+function baseGateCommands(sha) {
+  const commands = new Map();
+  const manifests = gitOut("ls-tree", "-r", "-z", "--name-only", sha)
+    .split("\0")
+    .filter((path) => path.endsWith("/package.json"));
+  for (const path of manifests) {
+    const pkg = manifest(sha, path);
+    for (const [name, command] of Object.entries(pick(pkg?.scripts, GATE_SCRIPTS))) {
+      commands.set(name, [...(commands.get(name) ?? []), command]);
+    }
+  }
+  return commands;
+}
+
+/**
+ * A new package's lint, typecheck and db:generate (and their pre/post scripts) run in the
+ * verifier's install and tools stages, whose workspace every later stage trusts. So each must run
+ * a command some package of the base already runs under that name. Only `test` is the package's
+ * own: it runs in the test stage, offline and read-only, in a container of its own.
+ */
+function newPackageError(from, scripts) {
+  const allowed = baseGateCommands(from);
+  const foreign = Object.entries(pick(scripts, GATE_SCRIPTS))
+    .filter(([name, command]) => name !== "test" && !(allowed.get(name) ?? []).includes(command))
+    .map(([name]) => name);
+  return foreign.length === 0
+    ? null
+    : `a new package's gate scripts (${foreign.join(", ")}) must run what the base's packages run; its own code runs only in its tests`;
+}
+
+// A Prisma `generator` names a program that `prisma generate` runs (its `provider` may be any
+// command), and the verifier generates the client before any test. Slices change models, never
+// generators. Comments are dropped first; a `generator` keyword the block pattern does not account
+// for (written some other way) counts as a change, so the comparison fails closed.
+function generators(text) {
+  const code = (text ?? "").replace(/\r/g, "").replace(/\/\/[^\n]*/g, "");
+  const blocks = (code.match(/\bgenerator\s+\w+\s*\{[^}]*\}/g) ?? []).map((block) =>
+    block.replace(/\s+/g, " "),
+  );
+  return { blocks, keywords: (code.match(/\bgenerator\b/g) ?? []).length };
+}
+function schemaError(from, to, path) {
+  const before = generators(show(from, path));
+  const after = generators(show(to, path));
+  return isDeepStrictEqual(before, after)
+    ? null
+    : "Prisma generators run programs when the client is generated; they cannot change through a run";
+}
+
+// --- The toolchain's locked dependencies (ADR 0015) ----------------------------------------------
+
+// What the toolchain is: scripts/ralph-toolchain.mjs. Its locked versions and every locked
+// dependency beneath them must stay those of the base, so a slice cannot swap in code that judges it.
+const DEPENDENCY_SECTIONS = ["dependencies", "devDependencies", "optionalDependencies"];
+const packageName = (key) => /^(@[^/@]+\/[^@]+|[^@]+)@/.exec(key)?.[1] ?? key;
+
+/**
+ * The lockfile's YAML documents, each with its source text and top-level entries. pnpm reads the
+ * file with a different YAML parser, so everything the two could read differently is refused:
+ * aliases, tags and merge keys. Entries are compared by their source text, never by parsed value.
+ */
+function lockDocuments(text) {
+  const parsed = parseAllDocuments(text, { uniqueKeys: true, strict: true, merge: false });
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  return parsed.map((doc) => {
+    if (doc.errors.length > 0) {
+      throw new Error(`not valid YAML: ${doc.errors[0].message.split("\n")[0]}`);
+    }
+    visit(doc, {
+      Alias() {
+        throw new Error("YAML aliases are not allowed");
+      },
+      Pair(_, pair) {
+        if (isScalar(pair.key) && pair.key.value === "<<") {
+          throw new Error("YAML merge keys are not allowed");
+        }
+      },
+      Node(_, node) {
+        if (node.tag !== undefined || node.anchor !== undefined) {
+          throw new Error("YAML tags and anchors are not allowed");
+        }
+      },
+    });
+    const source = (node) => (node?.range ? text.slice(node.range[0], node.range[1]) : "");
+    const entries = (node) =>
+      new Map(
+        (isMap(node) ? node.items : []).map((pair) => [
+          String(isScalar(pair.key) ? pair.key.value : source(pair.key)),
+          { node: pair.value, text: source(pair.value).replace(/\r/g, "") },
+        ]),
+      );
+    const top = entries(doc.contents);
+    return {
+      text: source(doc.contents).replace(/\r/g, ""),
+      top,
+      packages: entries(top.get("packages")?.node),
+      snapshots: entries(top.get("snapshots")?.node),
+      importers: doc.toJS()?.importers ?? {},
+    };
+  });
+}
+
+/** Changes to anything but the dependency entries: pnpm's own entry, settings, overrides. */
+function headerErrors(before, after) {
+  const errors = [];
+  // pnpm's own entry (the package manager it switches to) lives in the leading documents.
+  if (before.slice(0, -1).some((doc, i) => doc.text !== after[i].text)) {
+    errors.push("the package manager's locked entry cannot change through a run");
+  }
+  const [base, next] = [before.at(-1), after.at(-1)];
+  const entries = ["importers", "packages", "snapshots"];
+  for (const [key, entry] of base.top) {
+    if (!entries.includes(key) && next.top.get(key)?.text !== entry.text) {
+      errors.push(`its ${key} cannot change through a run`);
+    }
+  }
+  for (const key of next.top.keys()) {
+    if (!base.top.has(key)) {
+      errors.push(`its ${key} cannot be added through a run`);
+    }
+  }
+  return errors;
+}
+
+/** An entry both sides lock is the same package: it may be dropped, never redefined. */
+function redefinedErrors(base, next) {
+  return ["packages", "snapshots"].flatMap((section) =>
+    [...base[section]]
+      .filter(([key, entry]) => {
+        const now = next[section].get(key);
+        return now !== undefined && now.text !== entry.text;
+      })
+      .map(([key]) => `${key} is locked differently than on the base`),
+  );
+}
+
+/** Every [importer, name, locked version] an importers section resolves. */
+function resolutions(importers) {
+  return Object.entries(importers).flatMap(([importer, sections]) =>
+    DEPENDENCY_SECTIONS.flatMap((section) =>
+      Object.entries(sections?.[section] ?? {}).map(([name, dep]) => [
+        importer,
+        name,
+        String(dep?.version ?? ""),
+      ]),
+    ),
+  );
+}
+// A `link:` version is a directory relative to its importer: a workspace package or any other.
+const linkTarget = (importer, version) =>
+  version.startsWith("link:") ? posix.normalize(posix.join(importer, version.slice(5))) : null;
+
+/** Why one toolchain resolution is not the base's, or null. */
+function resolutionError(importer, name, version, base, baseLinks) {
+  // A link resolves the name to a directory of the slice: only where the base links it too.
+  const target = linkTarget(importer, version);
+  if (target !== null) {
+    return baseLinks.has(`${name}\0${target}`)
+      ? null
+      : `${importer} links ${name} to ${target}, which the base does not`;
+  }
+  // An aliased dependency names its target package in the version itself.
+  const key = /^(@[^/@]+\/[^@]+|[^@(]+)@/.test(version) ? version : `${name}@${version}`;
+  return base.snapshots.has(key)
+    ? null
+    : `${importer} resolves ${name} to ${key}, which the base does not lock`;
+}
+
+/** Toolchain dependencies must resolve to what the base resolves them to, so they bring its closure. */
+function toolchainErrors(base, next) {
+  const baseLinks = new Set(
+    resolutions(base.importers)
+      .filter(([importer, , version]) => linkTarget(importer, version) !== null)
+      .map(([importer, name, version]) => `${name}\0${linkTarget(importer, version)}`),
+  );
+  return resolutions(next.importers)
+    .filter(([importer, name]) => TOOLCHAIN_IMPORTERS.includes(importer) || isToolchain(name))
+    .map(([importer, name, version]) => resolutionError(importer, name, version, base, baseLinks))
+    .filter((error) => error !== null);
+}
+
+/** Why the lockfile change between two commits could alter the toolchain, or an empty list. */
+function lockfileErrors(from, to, allowBuilds) {
+  let before;
+  let after;
+  try {
+    before = lockDocuments(show(from, "pnpm-lock.yaml") ?? "");
+    after = lockDocuments(show(to, "pnpm-lock.yaml") ?? "");
+  } catch (error) {
+    return [error instanceof Error ? error.message : String(error)];
+  }
+  if (before.length === 0 || before.length !== after.length) {
+    return ["the lockfile's documents cannot be added or removed through a run"];
+  }
+  const [base, next] = [before.at(-1), after.at(-1)];
+  // pnpm runs build scripts by package name: a new version of one is new code run at install.
+  const builds = [...next.packages.keys()]
+    .filter((key) => allowBuilds.includes(packageName(key)) && !base.packages.has(key))
+    .map((key) => `${key} runs build scripts at install, and the base does not lock it`);
+  return [
+    ...headerErrors(before, after),
+    ...redefinedErrors(base, next),
+    ...toolchainErrors(base, next),
+    ...builds,
+  ];
+}
+
+/** The packages pnpm-workspace.yaml (protected) allows to run build scripts. */
+function allowedBuilds(sha) {
+  try {
+    const config = parse(show(sha, "pnpm-workspace.yaml") ?? "") ?? {};
+    return [
+      ...Object.keys(config.allowBuilds ?? {}),
+      ...(Array.isArray(config.onlyBuiltDependencies) ? config.onlyBuiltDependencies : []),
+    ].map(String);
+  } catch {
+    return [];
+  }
 }
 
 // What is wrong with one change, or null. `issues` judges a change under issues/ (true = allowed).
@@ -368,8 +643,17 @@ function changeError({ path, newMode, status }, issues) {
   return null;
 }
 
+/** What is wrong with a change's content, for files whose content decides what runs. */
+function contentError(from, to, path) {
+  const name = fold(path).split("/").at(-1) ?? "";
+  if (name === "package.json") {
+    return scriptsError(from, to, path);
+  }
+  return name.endsWith(".prisma") ? schemaError(from, to, path) : null;
+}
+
 /** Problems with the changes between two commits, whoever made them. */
-function pathErrors(from, to, issues) {
+export function pathErrors(from, to, issues) {
   const errors = [];
   const list = changes(from, to);
   const hostOnly = hostOnlyPaths(list.filter((change) => change.status !== "D"));
@@ -379,11 +663,15 @@ function pathErrors(from, to, issues) {
       (hostOnly.has(change.path)
         ? "the host keeps this path out of Git (state, credentials, dependencies)"
         : null) ??
-      (fold(change.path).split("/").at(-1) === "package.json"
-        ? scriptsError(from, to, change.path)
-        : null);
+      contentError(from, to, change.path);
     if (error) {
       errors.push(`${change.path}: ${error}`);
+    }
+  }
+  const lockfile = list.find((change) => fold(change.path) === "pnpm-lock.yaml");
+  if (lockfile) {
+    for (const problem of lockfileErrors(from, to, allowedBuilds(from))) {
+      errors.push(`${lockfile.path}: ${problem}`);
     }
   }
   return errors;
@@ -909,6 +1197,73 @@ function verifyGate(sha) {
   }
 }
 
+/**
+ * The host's own review of every slice the run merged (scripts/ralph-host-review.mjs), in order.
+ * Stops at the first that is not approved. For the approved ones, the register as the host
+ * records their deferred findings, or null when it has nothing to add.
+ */
+function reviewMerges(merges, { base, label }) {
+  const findings = [];
+  for (const { slug, slice } of merges) {
+    const result = hostReview({
+      base: parents(slice)[0],
+      slice,
+      ticket: `issues/done/${slug}.md`,
+      logDir: join(REVIEW_ROOT, label, slug),
+      workDir: join(root, ".ralph", "sandbox", `review-${label}`),
+      label: `${label}-${slug.slice(0, 2)}`,
+    });
+    if (result.verdict !== "approved") {
+      return { rejected: { slug, slice, verdict: result.verdict, reason: result.reason } };
+    }
+    findings.push({
+      slug,
+      findings: result.decision.findings ?? [],
+      blocking: result.decision.blocking,
+    });
+  }
+  return { register: recordHostFindings(merges.at(-1).merge, base, findings, label) };
+}
+
+/**
+ * The run's register with the host review's deferred findings added. The base's entries must all
+ * still be there: an agent that drops one hides debt, which is a forgery, not a review result.
+ */
+function recordHostFindings(tip, base, reviews, label) {
+  const text = show(tip, REGISTER);
+  if (text === null) {
+    return null;
+  }
+  const before = show(base, REGISTER);
+  let register = parseRegister(text);
+  const errors = [];
+  for (const { slug, findings, blocking } of reviews) {
+    const result = recordFindings(register, {
+      findings,
+      blocking,
+      base: before === null ? undefined : parseRegister(before),
+      source: {
+        ticketLabel: `ticket ${slug.slice(0, 2)} (\`${slug}\`)`,
+        ref: `ticket ${slug.slice(0, 2)} host review`,
+        run: label,
+        evidence: `.ralph/host-review/${label}/${slug}`,
+        date: new Date().toISOString().slice(0, 10),
+        justification:
+          `Non-blocking under the merge policy (blocking: ${blocking.join(", ")}); ` +
+          "deferred when the host's own review approved the ticket. Escalate if its real impact grows.",
+      },
+    });
+    errors.push(...result.errors);
+    register = result.register;
+  }
+  errors.push(...validateRegister(register));
+  if (errors.length > 0) {
+    refuse(`the debt register: ${errors.join("; ")}`);
+  }
+  const rendered = renderRegister(register);
+  return rendered === text ? null : rendered;
+}
+
 function writeState(slug, files) {
   mkdirSync(STATE_DIR, { recursive: true });
   for (const suffix of [".pause", ...PAUSE_DATA]) {
@@ -955,15 +1310,61 @@ function validate(outDir, { base, status, only, namespace }) {
   if (merges.length > 0) {
     verifyGate(merges.at(-1).merge);
   }
+  // Only after everything deterministic passed: the review is the expensive, judged part.
+  const review =
+    merges.length > 0 ? reviewMerges(merges, { base, label: basename(namespace) }) : {};
   const blocked = outcomes.find((outcome) => outcome.kind === "blocked");
   const quarantines = [...incoming].filter(([name]) => {
     const match = /^rejected\/(\d{2}-[a-z0-9-]+)-\d{8}-\d{6}$/.exec(name);
     return match !== null && blocked?.slug === match[1];
   });
-  return { incoming, tip, outcomes, pause, blocked, quarantines };
+  return { incoming, tip, outcomes, pause, blocked, quarantines, review };
 }
 
-function apply({ tip, outcomes, pause, quarantines }, { base, namespace }) {
+function clearNamespace(namespace) {
+  for (const ref of gitOut("for-each-ref", "--format=%(refname)", `${namespace}/`).split("\n")) {
+    if (ref !== "") {
+      gitOut("update-ref", "-d", ref);
+    }
+  }
+}
+
+// The run stamp of a quarantine branch: the run directory's name starts with it.
+const stampOf = (label) =>
+  /^\d{8}-\d{6}/.exec(label)?.[0] ??
+  new Date()
+    .toISOString()
+    .replace(/\D/g, "")
+    .replace(/^(\d{8})(\d{6}).*/, "$1-$2");
+
+/**
+ * The host's review did not approve a slice: none of the run reaches the base branch. As
+ * reject_slice does, the work is kept on a new quarantine branch and the ticket is blocked, here
+ * in the host's own commit, so the batch stops on it as a rejection.
+ */
+function applyReviewRejection({ review }, { namespace }) {
+  const { slug, slice, verdict } = review.rejected;
+  const quarantine = `rejected/${slug}-${stampOf(basename(namespace))}`;
+  createBranch(quarantine, slice);
+  const file = `issues/${slug}.md`;
+  const text = readFileSync(join(root, file), "utf8");
+  writeFileSync(join(root, file), text.replace(/^(\*\*Status:\*\* ).*$/m, "$1blocked"));
+  gitOut("add", "--", file);
+  gitOut(
+    "commit",
+    "--quiet",
+    "-m",
+    `chore(issues): block ${file} after the host review`,
+    "-m",
+    `The host's isolated Standards and Spec review of slice/${slug} (${short(slice)}) was ` +
+      `${verdict}, so the slice did not merge. It is preserved on ${quarantine}. ` +
+      `Report: .ralph/host-review/${basename(namespace)}/${slug}/review.md`,
+  );
+  clearNamespace(namespace);
+  log(`ticket ${slug} blocked: the host review was ${verdict}; the work is on ${quarantine}`);
+}
+
+function apply({ tip, outcomes, pause, quarantines, review }, { base, namespace }) {
   if (tip !== base) {
     gitOut("merge", "--ff-only", "--no-overwrite-ignore", "--quiet", tip);
     // A checkout that does not match the accepted tree means the file system merged paths that
@@ -991,11 +1392,30 @@ function apply({ tip, outcomes, pause, quarantines }, { base, namespace }) {
     writeState(pause.slug, { ...pause.files, fields: pause.fields });
     log(`accepted: ticket ${pause.slug} paused in ${pause.fields.phase} (${pause.fields.reason})`);
   }
-  for (const ref of gitOut("for-each-ref", "--format=%(refname)", `${namespace}/`).split("\n")) {
-    if (ref !== "") {
-      gitOut("update-ref", "-d", ref);
+  if (review?.register) {
+    // The host's review is the authoritative one, so its deferred findings reach the register in
+    // the host's own commit, after the merge it approved.
+    const errors = checkRegisterText(review.register, { root });
+    if (errors.length > 0) {
+      throw new Error(`the host review's register is invalid: ${errors.join("; ")}`);
     }
+    writeFileSync(join(root, REGISTER), review.register);
+    gitOut("add", "--", REGISTER);
+    gitOut(
+      "commit",
+      "--quiet",
+      "-m",
+      "chore(debt): record the host review's deferred findings",
+      "-m",
+      `Findings of the host's isolated Standards and Spec review of ` +
+        `${outcomes
+          .filter((outcome) => outcome.kind === "merged")
+          .map((outcome) => `slice/${outcome.slug}`)
+          .join(", ")}. Reports: .ralph/host-review/${basename(namespace)}/`,
+    );
+    log("recorded the host review's deferred findings in the debt register");
   }
+  clearNamespace(namespace);
 }
 
 function decide(runDir, run) {
@@ -1009,6 +1429,14 @@ function decide(runDir, run) {
   if (problem) {
     log(`${problem}; refusing to apply the run`);
     return { exit: 1, outcome: "host-changed" };
+  }
+  if (plan.review.rejected) {
+    if (plan.review.rejected.verdict === "unavailable") {
+      log(`the host review could not run: ${plan.review.rejected.reason}; nothing is applied`);
+      return { exit: 1, outcome: "review-unavailable", reason: plan.review.rejected.reason };
+    }
+    applyReviewRejection(plan, run);
+    return { exit: 1, outcome: "review-rejected" };
   }
   apply(plan, run);
   if (plan.pause) {

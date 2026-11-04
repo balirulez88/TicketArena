@@ -41,7 +41,7 @@ new_repo() {
   local dir="${WORK}/$1"
   mkdir -p "${dir}/scripts" "${dir}/skills/code-review" "${dir}/issues/done"
   cp "${SOURCE_ROOT}/ralph-loop.sh" "${dir}/"
-  cp "${SOURCE_ROOT}"/scripts/{ralph-review.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs} "${dir}/scripts/"
+  cp "${SOURCE_ROOT}"/scripts/{ralph-review.mjs,ralph-review-prompt.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs} "${dir}/scripts/"
   cp "${SOURCE_ROOT}/skills/code-review/report.schema.json" "${dir}/skills/code-review/"
   # An empty, canonical technical debt register (preflight requires one).
   mkdir -p "${dir}/docs"

@@ -77,7 +77,8 @@ a trusted host step has validated it.
 - `pnpm sandbox` needs a clean `main` checkout to start. The sandbox no longer uses Ralph's
   `ralph/blocked-*` side-branch fallback for a dirty checkout; it remains only for Ralph runs
   outside the sandbox.
-- **Remaining limitations:**
+- **Remaining limitations** (the first two are closed by [ADR 0015](0015-review-and-verification-isolation.md),
+  which has the current threat model):
   - Inside the container, the agent runs as the same user as Ralph's gates and reviewers. A
     deliberately malicious agent could leave a background process that rewrites a review report
     before the in-container review gate reads it. The host re-runs the deterministic gate, checks

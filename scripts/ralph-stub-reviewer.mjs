@@ -98,6 +98,10 @@ const behaviours = {
     report.criteria[0] = { ...met(criteriaIds[0]), status: "unmet", tests: [], note: "not built" };
   },
   "tamper:standards": () => writeFileSync("tampered.txt", "sneaky\n"),
+  // A report for the other axis: right evidence, wrong reviewer.
+  "wrongaxis:standards": () => {
+    report.axis = "spec";
+  },
   // A met criterion without a test is invalid; told why, the next session reports it correctly.
   "flaky:spec": () => untestedUntilTold(),
   "flakybug:spec": () => untestedUntilTold(),
@@ -118,6 +122,10 @@ switch (`${mode}:${axis}`) {
     break;
   case "garbage:standards":
     print("LGTM, ship it");
+    break;
+  case "limit:standards":
+    print("Claude AI usage limit reached|1762300000");
+    process.exit(1);
     break;
   case "error:standards":
     print(JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true }));

@@ -985,7 +985,10 @@ finalize_slice() {
   git merge --quiet --no-ff "${branch}" -m "Merge ${branch}: ${title}"
   log "  merged ${branch} into ${BASE_BRANCH}"
   if [[ -n "${PUSH_REMOTE}" ]]; then
-    git push --quiet "${PUSH_REMOTE}" "${branch}" "${BASE_BRANCH}"
+    # Checked explicitly: errexit is off here. An unpushed merge must not count as done (the
+    # sandbox clone dies with it), nor may the ticket's pause state be cleared after it.
+    git push --quiet "${PUSH_REMOTE}" "${branch}" "${BASE_BRANCH}" ||
+      die "merged ${branch} locally but could not push it to ${PUSH_REMOTE}; the ticket is NOT done there"
     log "  pushed ${branch} and ${BASE_BRANCH} to ${PUSH_REMOTE}"
   fi
 }
@@ -1047,14 +1050,20 @@ pause_ticket() {
   ref="ralph/paused/${slug}"
   state="${STATE_DIR}/${slug}.pause"
   gated="$(git rev-parse HEAD)"
-  git add -A
-  git commit --quiet --allow-empty -m "wip(ralph): paused in ${PAUSE_PHASE} (${PROVIDER_PAUSE})"
-  git branch --quiet --force "${ref}" HEAD
+  # process_ticket runs with errexit off (it is called in a `||` list), so every step is checked:
+  # the slice branch is deleted only once the parked ref provably holds the work.
+  if ! { git add -A &&
+    git commit --quiet --allow-empty -m "wip(ralph): paused in ${PAUSE_PHASE} (${PROVIDER_PAUSE})" &&
+    git branch --quiet --force "${ref}" HEAD &&
+    [[ "$(git rev-parse "${ref}^")" == "${gated}" ]] &&
+    git switch --quiet "${BASE_BRANCH}"; }; then
+    log "  ERROR: could not park ${slug}; its work stays on ${branch} for inspection, not resumable"
+    return 1
+  fi
   mkdir -p "${STATE_DIR}"
   rm -f "${state}" "${STATE_DIR}/${slug}.feedback.log" "${STATE_DIR}/${slug}.blocking.md"
   [[ ! -s "${PAUSE_FEEDBACK}" ]] || cp "${PAUSE_FEEDBACK}" "${STATE_DIR}/${slug}.feedback.log"
   [[ "${PAUSE_PHASE}" != review-fix ]] || cp "${REVIEW_FEEDBACK}" "${STATE_DIR}/${slug}.blocking.md"
-  git switch --quiet "${BASE_BRANCH}"
   git branch --quiet -D "${branch}"
   CURRENT_BRANCH=""
   if [[ -n "${PUSH_REMOTE}" ]] && ! git push --quiet --force "${PUSH_REMOTE}" "${ref}"; then
@@ -1152,7 +1161,8 @@ phase_due() { (($(phase_rank "$1") >= $(phase_rank "${2:-red}"))); }
 stop_ticket() {
   local ticket=$1 branch=$2 status=$3 reason=$4
   if ((status == PAUSED_EXIT)); then
-    pause_ticket "${ticket}" "${branch}"
+    pause_ticket "${ticket}" "${branch}" ||
+      die "provider failure (${PROVIDER_PAUSE}), and the work could not be parked: see ${branch}"
     return "${PAUSED_EXIT}"
   fi
   reject_slice "${ticket}" "${branch}" "${reason}"

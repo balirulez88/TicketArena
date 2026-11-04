@@ -21,6 +21,7 @@ failures=0
 
 readonly USAGE_LIMIT='Claude AI usage limit reached|1762300800'
 readonly OVERLOADED='API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
+readonly UNAUTHORIZED='API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}'
 
 # Provider failure injection: STUB_FAIL="<phase or axis>:<usage|overload|genuine>:<times>" makes
 # that phase's agent (or that axis's reviewer) fail the given number of times, counted in
@@ -36,6 +37,7 @@ inject() {
   case "\${kind}" in
     usage) echo '${USAGE_LIMIT}' ;;
     overload) echo '${OVERLOADED}' ;;
+    auth) echo '${UNAUTHORIZED}' ;;
     *) echo "Error: the agent crashed" ;;
   esac
   return 0
@@ -170,6 +172,48 @@ resumed_and_merged "${code}"
 check "RED was not rerun: it had passed its gate" "[[ \$(agent_runs red) == 1 ]]"
 check "GREEN ran once more, as the same attempt 1" \
   "[[ \$(agent_runs green) == 2 ]] && grep -q 'green attempt 1/1' '${SCENARIO}.out'"
+check "the resumed run still ran the final VERIFY gate" "[[ -e '$(latest_run)/01-demo.verify.gate.log' ]]"
+end
+
+# A pause in any other agent phase resumes at that phase: earlier phases are never rerun, later
+# ones and every gate (review, VERIFY) always run.
+for phase in red refactor docs; do
+  begin "usage-limit-in-${phase}-resumes-at-${phase}"
+  code="$(run_harness "${SCENARIO}" "STUB_FAIL=${phase}:usage:1")"
+  paused_cleanly "${code}"
+  check "the pause records phase ${phase}" "[[ \$(pause_field phase) == ${phase} ]]"
+  sleep 1 # a new run id
+  code="$(run_harness "${SCENARIO}")"
+  resumed_and_merged "${code}"
+  check "${phase} ran once more" "[[ \$(agent_runs ${phase}) == 2 ]]"
+  for earlier in red green refactor; do
+    [[ "${earlier}" != "${phase}" ]] || break
+    check "${earlier} was not rerun" "[[ \$(agent_runs ${earlier}) == 1 ]]"
+  done
+  check "the resumed run was reviewed and passed VERIFY" \
+    "grep -q '\"verdict\": \"approved\"' '$(latest_run)/01-demo.review-1.decision.json' &&
+     [[ -e '$(latest_run)/01-demo.verify.gate.log' ]]"
+  end
+done
+
+begin pause-that-cannot-park-keeps-the-work
+printf '#!/bin/sh\n! grep -q "^wip(ralph): paused" "$1"\n' >"${SCENARIO}/.git/hooks/commit-msg"
+chmod +x "${SCENARIO}/.git/hooks/commit-msg"
+code="$(run_harness "${SCENARIO}" STUB_FAIL=green:usage:1)"
+check "a failure (exit 1), never reported as paused" "[[ ${code} == 1 ]] && ! grep -q 'is parked' '${SCENARIO}.out'"
+check "nothing merged, nothing rejected" "[[ \$(merged) == 0 ]] && ! quarantined"
+check "no resume state is written for work that was not parked" \
+  "[[ ! -e '${SCENARIO}/.ralph/state/01-demo.pause' ]] && ! has_ref ralph/paused/01-demo"
+check "the work stays on the slice branch, verified RED test included" \
+  "[[ \$(git -C '${SCENARIO}' symbolic-ref --short HEAD) == slice/01-demo && -f '${SCENARIO}/feature.test.txt' ]]"
+check "the failure is reported" "grep -q 'could not park 01-demo' '${SCENARIO}.out'"
+end
+
+begin refused-credentials-pause-without-retrying
+code="$(run_harness "${SCENARIO}" STUB_FAIL=green:auth:9)"
+paused_cleanly "${code}"
+check "no retry: one GREEN session" "[[ \$(agent_runs green) == 1 ]]"
+check "the pause names the refused credentials" "[[ \$(pause_field reason) == auth ]]"
 end
 
 begin transient-overload-is-retried-not-counted

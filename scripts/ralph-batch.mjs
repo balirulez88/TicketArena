@@ -195,6 +195,14 @@ function mergeState(slug) {
   return !done && merge === "" && archived.status !== 0 ? "absent" : "ambiguous";
 }
 
+// A rejection always leaves a new quarantine branch, even when the sandbox could not move the
+// base branch and its blocked status went to a ralph/blocked-* side branch instead.
+function rejectedRefs(slug) {
+  return gitOut("for-each-ref", "--format=%(refname)", `refs/heads/rejected/${slug}-*`)
+    .split("\n")
+    .filter(Boolean);
+}
+
 function ticketStatus(slug) {
   const file = git("show", `${BASE}:issues/${slug}.md`);
   return /^\*\*Status:\*\* (.*)$/m.exec(file.stdout)?.[1]?.trim() ?? "";
@@ -265,6 +273,7 @@ function runTicket(state, entry) {
     );
   }
   log(`ticket ${entry.number}: running ${entry.slug} in a fresh sandbox`);
+  const quarantined = new Set(rejectedRefs(entry.slug));
   const [command, ...args] = words(RUNNER);
   const result = spawnSync(command, [...args, "--ticket", entry.number], {
     cwd: root,
@@ -295,11 +304,16 @@ function runTicket(state, entry) {
       `the runner reported success, but ticket ${entry.number} is not merged on ${BASE}`,
     );
   }
-  if (ticketStatus(entry.slug) === "blocked") {
+  const quarantine = rejectedRefs(entry.slug).find((ref) => !quarantined.has(ref));
+  if (ticketStatus(entry.slug) === "blocked" || quarantine !== undefined) {
     entry.stage = "rejected";
+    const blocked =
+      ticketStatus(entry.slug) === "blocked"
+        ? "is blocked"
+        : `is blocked on a ralph/blocked-* side branch (merge it into ${BASE})`;
     throw new Stop(
       "rejected",
-      `ticket ${entry.number} was rejected and is blocked; see its rejected/* branch and .ralph/logs`,
+      `ticket ${entry.number} was rejected and ${blocked}; see its rejected/* branch and .ralph/logs`,
     );
   }
   throw new Stop(

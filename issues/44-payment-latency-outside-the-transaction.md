@@ -2,6 +2,8 @@
 
 **What to build:** the mock payment provider's simulated latency never runs inside the consumer runner's database transaction, so a slow provider neither holds a pooled connection idle nor times the transaction out into an endless redelivery. Resolves TD-051 in `docs/technical-debt.md`; must merge before ticket 17 and ticket 27, which change payment and saga handling and are blocked by it.
 
+**Type:** fix
+
 **Blocked by:** None (can start immediately)
 
 **Status:** ready-for-agent

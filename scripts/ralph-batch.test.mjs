@@ -60,6 +60,18 @@ switch (action) {
     git("commit", "--quiet", "-am", "chore(issues): block " + path);
     process.exit(1);
   }
+  case "reject-side": {
+    // The host refused the base branch: the quarantine branch arrives, the blocked status does not.
+    git("branch", "rejected/" + slug + "-run1");
+    git("branch", "ralph/blocked-run1");
+    process.exit(1);
+  }
+  case "half-merge": {
+    // Archived without the merge commit: neither done nor absent.
+    git("mv", "issues/" + file, "issues/done/" + file);
+    git("commit", "--quiet", "-m", "chore(issues): archive " + file);
+    process.exit(1);
+  }
   case "merge-crash": merge(); process.exit(3);
   case "merge-kill": merge(); process.kill(process.ppid, "SIGKILL"); process.exit(0);
   default: merge();
@@ -124,11 +136,16 @@ function fixture(
   return { dir, host, github };
 }
 
-function batch(fx, args, { plan = {}, ci = [] } = {}) {
+function batch(
+  fx,
+  args,
+  { plan = {}, ci = [], entry = ["node", join(fx.host, "scripts", "ralph-batch.mjs")] } = {},
+) {
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([name]) => !name.startsWith("RALPH_")),
   );
-  const result = spawnSync("node", [join(fx.host, "scripts", "ralph-batch.mjs"), ...args], {
+  const [command, ...prefix] = entry;
+  const result = spawnSync(command, [...prefix, ...args], {
     cwd: fx.host,
     encoding: "utf8",
     env: {
@@ -143,6 +160,15 @@ function batch(fx, args, { plan = {}, ci = [] } = {}) {
     },
   });
   return { code: result.status, out: `${result.stdout}${result.stderr}` };
+}
+
+// The real scripts/sandbox.sh, committed and pushed like the rest of the fixture.
+function withSandbox(fx) {
+  copyFileSync(join(source, "scripts", "sandbox.sh"), join(fx.host, "scripts", "sandbox.sh"));
+  git(fx.host, "add", "-A");
+  git(fx.host, "commit", "--quiet", "-m", "add sandbox.sh");
+  git(fx.host, "push", "--quiet", "origin", "main");
+  return ["bash", join(fx.host, "scripts", "sandbox.sh")];
 }
 
 const lines = (file) =>
@@ -236,6 +262,29 @@ describe("bounded batch", () => {
     assert.match(out, /STOPPED: rejected: ticket 01 was rejected/);
     assert.deepEqual(runnerCalls(fx), ["01"]);
     assert.equal(state(fx).tickets[0].stage, "rejected");
+  });
+
+  it("a rejection whose blocked status reached only a side branch is still a rejection", () => {
+    const fx = fixture();
+    const { code, out } = batch(fx, ["--max-tickets", "3"], { plan: { "01": ["reject-side"] } });
+    assert.equal(code, 1, out);
+    assert.match(
+      out,
+      /STOPPED: rejected: ticket 01 was rejected and is blocked on a ralph\/blocked-\* side branch/,
+    );
+    assert.deepEqual(runnerCalls(fx), ["01"]);
+    assert.equal(state(fx).tickets[0].stage, "rejected");
+  });
+
+  it("a half-merged ticket blocks the batch, and blocks it again on the rerun", () => {
+    const fx = fixture();
+    const first = batch(fx, ["--max-tickets", "3"], { plan: { "01": ["half-merge"] } });
+    assert.equal(first.code, 1, first.out);
+    assert.match(first.out, /STOPPED \(resumable\): ambiguous-merge: ticket 01 is half-merged/);
+    const rerun = batch(fx, ["--max-tickets", "3"]);
+    assert.equal(rerun.code, 1, rerun.out);
+    assert.match(rerun.out, /STOPPED \(resumable\): ambiguous-merge: ticket 01 is half-merged/);
+    assert.deepEqual(runnerCalls(fx), ["01"]);
   });
 
   it("treats 'success' without a merge as ambiguous, never as done", () => {
@@ -340,5 +389,35 @@ describe("one batch at a time", () => {
     const fx = fixture();
     batch(fx, ["--max-tickets", "1"]);
     assert.equal(existsSync(join(fx.host, ".ralph", "batch", "lock")), false);
+  });
+
+  it("a plain sandbox run refuses while a batch holds the lock (before Docker is needed)", () => {
+    const fx = fixture();
+    const sandbox = { entry: withSandbox(fx) };
+    mkdirSync(join(fx.host, ".ralph", "batch", "lock"), { recursive: true });
+    const { code, out } = batch(fx, ["--once"], sandbox);
+    assert.equal(code, 1, out);
+    assert.match(out, /a Ralph batch holds .*lock/);
+  });
+});
+
+describe("entry points", () => {
+  it("`sandbox.sh --max-tickets N` runs the batch on the host", () => {
+    const fx = fixture();
+    const sandbox = { entry: withSandbox(fx) };
+    const { code, out } = batch(fx, ["--max-tickets", "1"], sandbox);
+    assert.equal(code, 0, out);
+    assert.match(out, /FINISHED: batch-limit: 1 of 1/);
+    assert.deepEqual(runnerCalls(fx), ["01"]);
+  });
+
+  it("`ralph-loop.sh --max-tickets N` points to the batch instead of running", () => {
+    const fx = fixture();
+    const { code, out } = batch(fx, ["--max-tickets", "2"], {
+      entry: ["bash", join(fx.host, "ralph-loop.sh")],
+    });
+    assert.notEqual(code, 0, out);
+    assert.match(out, /use 'pnpm sandbox --max-tickets N'/);
+    assert.deepEqual(runnerCalls(fx), []);
   });
 });

@@ -2,6 +2,8 @@
 
 **What to build:** when the outbox relay or a consumer runner fails (database or broker outage, a broken claim query, a handler that keeps throwing), an operator can see it: every failure is logged with its cause, never swallowed. Resolves TD-031 and TD-032 in `docs/technical-debt.md`; must merge before ticket 24, which changes the same failure path and is blocked by it.
 
+**Type:** fix
+
 **Blocked by:** None (can start immediately)
 
 **Status:** ready-for-agent

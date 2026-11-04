@@ -184,7 +184,11 @@ failure the provider's) would grant free attempts. So:
   progress is committed on `ralph/paused/<NN>-<slug>` directly on top of the last gated
   checkpoint (pushed to the host from the sandbox), and `.ralph/state/<slug>.pause` records the
   phase, attempt and review round, next to the gate feedback and blocking findings that phase was
-  given. An interrupted review round never reaches the gate, so it can never approve.
+  given. An interrupted review round never reaches the gate, so it can never approve. Refused
+  credentials pause too, deliberately: like a usage limit they say nothing about the ticket and
+  cannot clear up within the run, and rejecting good work over an expired token would be wrong.
+  If the work cannot be parked (a git step fails), the run fails (exit 1) without writing resume
+  state and leaves the work on the slice branch for a human; it is never reported as paused.
 - **Resume** (manual: run the same command again). The harness recreates the slice branch at the
   gated checkpoint with the interrupted phase's work uncommitted on top, then continues at that
   phase and attempt. Phases already passed are not rerun; every later gate (review, debt, VERIFY)
@@ -194,9 +198,10 @@ failure the provider's) would grant free attempts. So:
   it refuses and names the state file; deleting that file restarts the ticket from scratch.
 - When the ticket merges or is rejected, its pause state and parked ref are deleted.
 
-Scenarios: `scripts/ralph-resume.test.sh` (usage limit in GREEN, review and review fix; bounded
-transient retries; genuine failures still counted; stale or forged pauses refused; the sandbox
-clone round-trip). Run against the harness from before this change (`RALPH_UNDER_TEST=<path>`),
+Scenarios: `scripts/ralph-resume.test.sh` (usage limit in every agent phase, review and review
+fix, each resumed through review and VERIFY; refused credentials; bounded transient retries;
+genuine failures still counted; a pause that cannot park; stale or forged pauses refused; the
+sandbox clone round-trip). Run against the harness from before this change (`RALPH_UNDER_TEST=<path>`),
 they fail: it rejected and blocked the ticket instead.
 
 ### Bounded batches (`--max-tickets`)
@@ -205,7 +210,9 @@ they fail: it rejected and blocked the ticket instead.
 sandbox has no GitHub credentials. `--once`, `--ticket` and a bare run behave as before.
 
 1. Before each ticket, the base branch must be on GitHub and **CI green on that exact commit**
-   (`scripts/ralph-ci.sh`: only a completed, successful run of `ci.yml` counts).
+   (`scripts/ralph-ci.sh`: only a completed, successful run of `ci.yml` counts). This includes
+   the first ticket, deliberately: a batch never builds on a base that CI has not passed, whoever
+   moved it.
 2. The next eligible ticket is chosen by `ralph-loop.sh`'s own `next_ticket` and runs in its own
    sandbox (`--ticket NN`), so every gate above applies.
 3. `main` is pushed to GitHub and the batch waits for CI on the merge. It stops at N tickets
@@ -215,8 +222,10 @@ State lives in `.ralph/batch/state.json`, written atomically after every step. T
 is the source of truth** for merges: a ticket is merged only if `main` has both its archived file
 and its `Merge slice/<slug>:` commit. A rerun therefore resumes at the right checkpoint (run, push,
 CI) and never runs a merged ticket twice. The limit is stored with the batch; a conflicting
-`--max-tickets` is refused. `.ralph/batch/lock` (an atomic `mkdir`) admits one batch at a time,
-and `pnpm sandbox` refuses to run beside one. A lock left by a killed batch is never taken over
+`--max-tickets` is refused. A run that leaves a new `rejected/<slug>-*` branch is a rejection
+even when its blocked status only reached a `ralph/blocked-*` side branch (the host refused the
+base branch); merge that side branch before `--new`. `.ralph/batch/lock` (an atomic `mkdir`)
+admits one batch at a time, and `pnpm sandbox` refuses (best effort) to run beside one. A lock left by a killed batch is never taken over
 automatically: the message says so, and a human removes it after checking that no batch or
 container is still running.
 
@@ -229,8 +238,9 @@ container is still running.
 | `rejected`, `ci-failed`                                                                 | final; resolve it, then `--new` starts a batch  | 1    |
 
 `node scripts/ralph-batch.mjs --status` prints the current batch. Nothing is ever deployed.
-Scenarios: `scripts/ralph-batch.test.mjs` (limit, CI gating, rejection, pause and resume with
-the stored limit, a batch killed right after a merge, ambiguous runner results, the lock) and
+Scenarios: `scripts/ralph-batch.test.mjs` (limit, CI gating, rejection on the base or a side
+branch, pause and resume with the stored limit, a batch killed right after a merge, half-merged
+and ambiguous runner results, the lock, and the `sandbox.sh` / `ralph-loop.sh` entry points) and
 `scripts/ralph-ci.test.mjs`.
 
 ## Independent review

@@ -15,8 +15,10 @@ for arg in "$@"; do
   [[ "${arg}" != --max-tickets ]] || exec node "${REPO_ROOT}/scripts/ralph-batch.mjs" "$@"
 done
 # A batch pushes into this repo ticket by ticket; a second, unrelated run must not interleave.
-if [[ -d "${REPO_ROOT}/.ralph/batch/lock" && -z "${RALPH_BATCH_ID:-}" ]]; then
-  echo "sandbox: a Ralph batch holds .ralph/batch/lock; wait for it (or remove the lock if no batch runs)" >&2
+# Best effort (a check, not a lock): the batch itself holds the only real lock.
+batch_dir="${REPO_ROOT}/${RALPH_BATCH_DIR:-.ralph/batch}"
+if [[ -d "${batch_dir}/lock" && -z "${RALPH_BATCH_ID:-}" ]]; then
+  echo "sandbox: a Ralph batch holds ${batch_dir}/lock; wait for it (or remove the lock if no batch runs)" >&2
   exit 1
 fi
 

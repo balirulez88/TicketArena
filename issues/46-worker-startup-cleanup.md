@@ -2,6 +2,8 @@
 
 **What to build:** a worker that cannot start, for example because its health port is taken, fails with a clear error and leaves nothing running: no relay or consumer loop keeps working against resources that are being closed. Resolves TD-034 in `docs/technical-debt.md`; must merge before ticket 38 (deployment), which is blocked by it.
 
+**Type:** fix
+
 **Blocked by:** None (can start immediately)
 
 **Status:** ready-for-agent

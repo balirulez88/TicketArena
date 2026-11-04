@@ -38,7 +38,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 | ------------- | -------- | ---- | ------ | --- | ----- |
 | OPEN          | 0        | 0    | 3      | 35  | 38    |
 | PLANNED       | 0        | 0    | 9      | 2   | 11    |
-| IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
+| IN_PROGRESS   | 0        | 1    | 0      | 0   | 1     |
 | RESOLVED      | 0        | 0    | 5      | 2   | 7     |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
@@ -1140,4 +1140,24 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `packages/db/prisma/schema.prisma#ledger-and-payment-schema-carry-columns-and-values-beyond-th`
 - **History:**
   - 2026-11-03: recorded: LOW scope_creep at `packages/db/prisma/schema.prisma:251`, spec axis (ticket 08 review-2 spec, run 20261103-160343)
+
+### TD-057: The sandboxed agent can write the host repository, its Git metadata and the batch state
+
+- **Status:** IN_PROGRESS
+- **Severity:** HIGH
+- **Escalation:** none
+- **Source:** harness preflight before the batch of tickets 09-11 (2026-11-04), not a slice review
+- **Evidence:** `scripts/sandbox.sh:51` mounts the whole host repository read-write at `/host-repo`; the agent runs there with `--dangerously-skip-permissions` as the same user as the entrypoint (`scripts/sandbox-entrypoint.sh:38`)
+- **Components:** `scripts/sandbox.sh:51`, `scripts/sandbox-entrypoint.sh:38`, `scripts/ralph-batch.mjs:204`
+- **Problem:** Only convention keeps the agent in its clone. Through `/host-repo` it can write the host's `.git` (refs, hooks, config), the host working tree (including `scripts/ralph-ci.sh`, `scripts/sandbox.sh` and `ralph-loop.sh`, which the batch runs on the host between tickets) and `.ralph/batch` and `.ralph/state`. The batch accepts a merge on two marks that the agent can write itself: a `Merge slice/<slug>:` commit and an archived `done` ticket on `main`.
+- **Impact:** A misbehaving agent could forge a merge that skips review and have the batch push it to GitHub. It could also run code on the host, where `gh` credentials are available, through a hook or `core.fsmonitor`, fake a CI pass by rewriting `ralph-ci.sh`, or forge batch or resume checkpoints. Autonomous production batches are blocked until this is fixed. An audit on 2026-11-04 found no evidence that any of this happened: the host `.git/config` and hooks are clean, there are no symlinks under `.ralph`, and all 15 container pushes to `main` have Ralph's merge or block shape.
+- **Justification:** Found before the batch started, and no batch ran. Fixed by ticket 47, which must merge before the next production batch (user decision, 2026-11-04).
+- **Remediation:** No host repository mount. Input goes in as a read-only Git bundle and output comes back as a bundle in a per-run directory. A trusted host step validates the bundle and accepts it: merge shape, ticket and dependencies, protected paths, no Git attributes, submodules or symlinks, the gate re-run in an agent-free sandbox, and strict pause validation. Batch and resume state stay host-only. Regression tests cover all four attack paths, including through real Docker.
+- **Target:** ticket 47 (`issues/47-sandbox-trust-boundary.md`); must merge before the next production batch (tickets 09-11)
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/sandbox.sh#the-sandboxed-agent-can-write-the-host-repository-its-git-me`
+- **History:**
+  - 2026-11-04: recorded: HIGH security finding at `scripts/sandbox.sh:51`, harness preflight before the batch of tickets 09-11
+  - 2026-11-04: in progress in ticket 47 (`issues/47-sandbox-trust-boundary.md`); autonomous production batches blocked until it merges (user decision, 2026-11-04)
 <!-- ralph-debt:end -->

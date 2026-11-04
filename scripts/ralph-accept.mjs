@@ -53,7 +53,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual, parseArgs } from "node:util";
-import { cleanup, initRoot, redactRun, secretValues } from "./ralph-artifacts.mjs";
+import { cleanup, initRoot, markRun, redactRun, secretValues } from "./ralph-artifacts.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const env = process.env;
@@ -77,23 +77,36 @@ export const PROTECTED_FILES = [
   "ralph-loop.sh",
   "dockerfile",
   ".dockerignore",
-  "claude.md",
   "tsconfig.base.json",
   "turbo.json",
   "pnpm-workspace.yaml",
   "docker-compose.yml",
   ".nvmrc",
 ];
-export const PROTECTED_DIRS = [
-  "scripts/",
-  ".github/",
-  "skills/",
-  ".claude/",
-  "docs/workflow/",
-  "infra/",
+export const PROTECTED_DIRS = ["scripts/", ".github/", "skills/", "docs/workflow/", "infra/"];
+// Anywhere in the tree: Biome and Turborepo read nested configuration, pnpm nested settings and
+// manifests in any of its formats (only package.json is judged by its content, below), and
+// node-gyp builds any package with a binding.gyp on install.
+const NESTED_GATE_FILES = [
+  "biome.json",
+  "biome.jsonc",
+  "turbo.json",
+  ".npmrc",
+  ".mcp.json",
+  "package.yaml",
+  "package.json5",
+  "binding.gyp",
 ];
-// Anywhere in the tree: Biome and Turborepo read nested configuration, pnpm nested settings.
-const NESTED_GATE_FILES = ["biome.json", "biome.jsonc", "turbo.json", ".npmrc", ".pnpmfile.cjs"];
+// Anywhere in the tree, by name: pnpm hooks in any module format, Docker Compose files (an
+// override is merged in by itself, and `compose.yaml` wins over `docker-compose.yml`), and what
+// Claude Code and editors load by themselves for host sessions and for the next agent and its
+// reviewers (CLAUDE.md, CLAUDE.local.md, .claude/, .mcp.json, .vscode/).
+const NESTED_GATE_NAMES = [
+  /^\.pnpmfile\./,
+  /^(docker-)?compose([.-].*)?\.ya?ml$/,
+  /^claude(\.local)?\.md$/,
+];
+const NESTED_GATE_DIRS = [".claude", ".vscode"];
 // Anywhere in the tree: they bring Git filters, diff drivers or other repositories with them.
 const GIT_METADATA = [".gitattributes", ".gitmodules"];
 const COMMIT_TYPES = ["feat", "fix", "refactor", "perf", "test", "docs", "chore"];
@@ -230,10 +243,17 @@ const fold = (path) =>
     .split("/")
     .map((part) => part.replace(/[. ]+$/, ""))
     .join("/");
-const isProtected = (folded) =>
-  PROTECTED_FILES.includes(folded) ||
-  PROTECTED_DIRS.some((dir) => folded.startsWith(dir)) ||
-  NESTED_GATE_FILES.includes(folded.split("/").at(-1) ?? "");
+function isProtected(folded) {
+  const parts = folded.split("/");
+  const name = parts.at(-1) ?? "";
+  return (
+    PROTECTED_FILES.includes(folded) ||
+    PROTECTED_DIRS.some((dir) => folded.startsWith(dir)) ||
+    NESTED_GATE_FILES.includes(name) ||
+    NESTED_GATE_NAMES.some((pattern) => pattern.test(name)) ||
+    parts.slice(0, -1).some((part) => NESTED_GATE_DIRS.includes(part))
+  );
+}
 // Names Windows resolves to something else: 8.3 short names (`SCRIPT~1` can open `scripts`),
 // stream syntax, device names (`aux.ts` is the AUX device) and characters it cannot store.
 const UNPORTABLE =
@@ -257,39 +277,63 @@ const INSTALL_SCRIPTS = [
   "prepublish",
   "pnpm:devPreinstall",
 ];
-function packageScripts(sha, path) {
+// The root manifest also pins the package manager, the engines and pnpm's own settings: a slice
+// may change only its dependencies there.
+const DEPENDENCY_FIELDS = [
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+  "peerDependencies",
+];
+class Unparseable extends Error {}
+/** The manifest at `path` on `sha`: null if absent, Unparseable if it is not a JSON object. */
+function manifest(sha, path) {
   const text = show(sha, path);
   if (text === null) {
     return null;
   }
   try {
-    return JSON.parse(text).scripts ?? {};
+    const parsed = JSON.parse(text);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
   } catch {
-    return Symbol("unparseable");
+    // Reported below like any other manifest that is not an object.
   }
+  return new Unparseable();
 }
+const pick = (object, names) =>
+  Object.fromEntries(Object.entries(object ?? {}).filter(([name]) => names.includes(name)));
+const omit = (object, names) =>
+  Object.fromEntries(Object.entries(object ?? {}).filter(([name]) => !names.includes(name)));
+
 function scriptsError(from, to, path) {
-  const before = packageScripts(from, path);
-  const after = packageScripts(to, path);
+  const before = manifest(from, path);
+  const after = manifest(to, path);
+  if (after instanceof Unparseable) {
+    return "not a JSON object, so pnpm and this check could read it differently";
+  }
   if (before !== null && after === null) {
     return "removing a package removes its tests from the gate";
   }
-  const only = (scripts, names) =>
-    typeof scripts === "symbol"
-      ? scripts
-      : Object.fromEntries(Object.entries(scripts ?? {}).filter(([name]) => names.includes(name)));
-  if (!isDeepStrictEqual(only(before, INSTALL_SCRIPTS), only(after, INSTALL_SCRIPTS))) {
+  const scripts = (pkg) => (pkg instanceof Unparseable ? {} : (pkg?.scripts ?? {}));
+  if (
+    !isDeepStrictEqual(
+      pick(scripts(before), INSTALL_SCRIPTS),
+      pick(scripts(after), INSTALL_SCRIPTS),
+    )
+  ) {
     return "install scripts cannot change through a run";
   }
-  if (before === null) {
+  if (before === null || before instanceof Unparseable) {
     return null;
   }
-  // The root scripts are the gate and the host's tooling: all of them stay as they are.
+  // The root manifest is the gate and the host's tooling: only its dependencies may change.
   const same =
     path === "package.json"
-      ? isDeepStrictEqual(before, after)
-      : isDeepStrictEqual(only(before, GATE_SCRIPTS), only(after, GATE_SCRIPTS));
-  return same ? null : "the scripts that define the gate cannot change through a run";
+      ? isDeepStrictEqual(omit(before, DEPENDENCY_FIELDS), omit(after, DEPENDENCY_FIELDS))
+      : isDeepStrictEqual(pick(scripts(before), GATE_SCRIPTS), pick(scripts(after), GATE_SCRIPTS));
+  return same ? null : "the scripts and settings that define the gate cannot change through a run";
 }
 
 // What is wrong with one change, or null. `issues` judges a change under issues/ (true = allowed).
@@ -691,27 +735,51 @@ function copyLogs(from, to, copied = new Set()) {
   return copied;
 }
 
+/** Copies the run's logs in and returns the host directories they landed in. */
 function importLogs(outDir) {
+  const imported = [];
   try {
     initRoot(LOG_ROOT);
     const logs = join(outDir, "logs");
     if (!lstatSafe(logs)?.isDirectory()) {
       log("the run left no plain logs/ directory; no logs imported");
-      return;
+      return imported;
     }
     const runs = readdirSync(logs, { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && /^\d{8}-\d{6}$/.test(entry.name))
       .map((entry) => entry.name);
     for (const run of runs) {
-      copyLogs(join(logs, run), join(LOG_ROOT, run));
-      redactRun(join(LOG_ROOT, run), secretValues(env));
+      const target = join(LOG_ROOT, run);
+      // Merging into a run the host already has would mix the container's files into its
+      // evidence, so such a run is not imported at all.
+      if (lstatSafe(target) !== null) {
+        log(`skipped logs/${run}: the host already has logs for that run`);
+      } else {
+        copyLogs(join(logs, run), target);
+        // Retention is decided from run.json, so the host writes its own once it has a verdict.
+        rmSync(join(target, "run.json"), { force: true });
+        redactRun(target, secretValues(env));
+        imported.push(target);
+      }
       // The run directory is kept after a refusal: only the bounded, redacted copy remains.
       rmSync(join(logs, run), { recursive: true, force: true });
     }
-    cleanup({ reviewRoot: join(root, ".ralph/review"), logRoot: LOG_ROOT });
   } catch (error) {
     // Evidence only: a broken log never decides, and never hides, a run's outcome.
     log(`could not import every log: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return imported;
+}
+
+function recordLogs(imported, verdict) {
+  const status = { 0: "succeeded", [PAUSED_EXIT]: "paused" }[verdict.exit] ?? "failed";
+  try {
+    for (const dir of imported) {
+      markRun(dir, status);
+    }
+    cleanup({ reviewRoot: join(root, ".ralph/review"), logRoot: LOG_ROOT });
+  } catch (error) {
+    log(`could not record the logs: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -756,6 +824,21 @@ function fetchBundle(bundle, namespace) {
     .filter(Boolean)) {
     const [sha, ref] = line.split(" ");
     incoming.set(ref.slice(namespace.length + 1), sha);
+  }
+  // fetch.fsckObjects does not check objects read from a bundle (Git 2.45), so every object the
+  // run's branches reach is checked here, strictly, before anything is judged by its content.
+  if (incoming.size > 0) {
+    const checked = git([
+      "fsck",
+      "--strict",
+      "--no-dangling",
+      "--no-progress",
+      ...incoming.values(),
+    ]);
+    if (checked.status !== 0) {
+      const first = `${checked.stderr}${checked.stdout}`.trim().split("\n")[0];
+      refuse(`result.bundle holds malformed objects: ${first}`);
+    }
   }
   return incoming;
 }
@@ -904,7 +987,7 @@ function main() {
     throw new Error("--ticket needs a two-digit number");
   }
   const namespace = `refs/ralph/incoming/${basename(runDir)}`;
-  importLogs(join(runDir, "out"));
+  const imported = importLogs(join(runDir, "out"));
   let verdict;
   try {
     verdict = decide(runDir, { base, status, only: values.ticket, namespace });
@@ -922,6 +1005,7 @@ function main() {
       verdict = { exit: 1, outcome: "apply-failed", reason };
     }
   }
+  recordLogs(imported, verdict);
   writeFileSync(join(runDir, "verdict.json"), `${JSON.stringify(verdict, null, 2)}\n`);
   return verdict.exit;
 }

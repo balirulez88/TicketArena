@@ -379,8 +379,9 @@ private staging bare repository and a workspace, and Ralph pushes to that stagin
 `scripts/ralph-accept.mjs` then decides on the host. It is the only code that changes the host
 repository from a run, and everything in `out/` is data to it:
 
-- The bundle is fetched by the host's own Git, with object checks, into
-  `refs/ralph/incoming/<run>/`. No Git command ever runs inside a repository the container
+- The bundle is fetched by the host's own Git into `refs/ralph/incoming/<run>/`, and every
+  object its branches reach is then checked with `git fsck --strict` (fetching from a bundle does
+  not apply `fetch.fsckObjects`). No Git command ever runs inside a repository the container
   wrote, so no hook or config of the container's can execute on the host.
 - `main` may gain only Ralph's own shapes, checked against the base the run started from:
   - a **slice merge**: one squashed commit on the base, under `Merge slice/<slug>: <title>` with
@@ -388,16 +389,19 @@ repository from a run, and everything in `out/` is data to it:
     blockers `done` (and is the `--ticket` the run was given). The only issue-file change is the
     archive to `issues/done/`: `done`, `Completed`, ticked checkboxes, nothing else.
   - a **blocked-status commit** that changes only that ticket's status line. Its quarantine
-    branch `rejected/<slug>-<run-id>` is imported as a new branch.
+    branch `rejected/<slug>-<run-id>` is imported as a new branch. Its tree is unvalidated:
+    inspect it with `git log -p` or `git show`, never by checking it out.
 - **Protected paths** may not change through a run: `ralph-loop.sh`, `scripts/`, `Dockerfile`,
-  `.dockerignore`, `.github/`, `skills/`, `.claude/`, `infra/`, `CLAUDE.md`, `docs/workflow/`,
-  `tsconfig.base.json`, `turbo.json`, `pnpm-workspace.yaml`, `docker-compose.yml`, `.nvmrc`, and
-  `biome.json(c)`, `.npmrc` and `.pnpmfile.cjs` in any directory. All root `package.json`
-  scripts are fixed. In any other `package.json`, the gate scripts (`lint`, `typecheck`, `test`,
+  `.dockerignore`, `.github/`, `skills/`, `infra/`, `docs/workflow/`, `tsconfig.base.json`,
+  `turbo.json`, `pnpm-workspace.yaml`, `.nvmrc`; and in any directory `biome.json(c)`,
+  `turbo.json`, `.npmrc`, `.pnpmfile.*`, `package.yaml`, `package.json5`, `binding.gyp`, Docker
+  Compose files (`compose*.y(a)ml`, `docker-compose*.y(a)ml`), `CLAUDE.md`, `CLAUDE.local.md`,
+  `.mcp.json`, and anything under `.claude/` or `.vscode/`. In the root `package.json` only the
+  dependency maps may change. In any other `package.json`, the gate scripts (`lint`, `typecheck`, `test`,
   `check`, `check:debt`, `test:harness`, and their `pre`/`post` scripts) are fixed and the
   package may not be deleted; its dependencies and other scripts may change, and new packages
   may be added. No package, new or old, may gain an install script (`preinstall`, `install`,
-  `postinstall`, `prepare` and the like), and nested `turbo.json` files are protected.
+  `postinstall`, `prepare` and the like), and a manifest that is not a JSON object is refused.
 - **Host-only paths** may not be written: `.ralph/`, `node_modules/`, `.pnpm-store/`, `.turbo/`,
   `.env` files (examples aside), and anything the host's own ignore rules match. A fast-forward
   would overwrite such ignored files without a trace, planting state, credentials or

@@ -45,7 +45,7 @@ new_host_repo() {
   # the host's own re-run of the gate (`pnpm run check`). Its one workspace package owns the RED
   # test; stub/vitest.mjs stands in for Vitest there and reports each test it is given as failing
   # until feature.txt exists, as the RED check requires.
-  printf '{"name":"fixture","private":true,"scripts":{"lint":"node -e 0","typecheck":"node -e 0","test":"node gate.mjs","check:debt":"node scripts/ralph-debt.mjs check docs/technical-debt.md","check":"pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run check:debt"}}\n' \
+  printf '{"name":"fixture","private":true,"scripts":{"lint":"node -e 0","typecheck":"node -e 0","test":"node gate.mjs","check:debt":"node stub/register.mjs && node scripts/ralph-debt.mjs check docs/technical-debt.md","check":"pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run check:debt"}}\n' \
     >"${dir}/package.json"
   printf 'packages:\n  - "packages/*"\n' >"${dir}/pnpm-workspace.yaml"
   mkdir -p "${dir}/packages/demo/src"
@@ -56,6 +56,10 @@ new_host_repo() {
   printf 'import { existsSync } from "node:fs";\nprocess.exit(existsSync("feature.txt") ? 0 : 1);\n' \
     >"${dir}/gate.mjs"
   cp "${SOURCE_ROOT}/scripts/ralph-stub-vitest.mjs" "${dir}/stub/vitest.mjs"
+  # Says whether dependencies were installed when the register check ran: the agent-free re-gate
+  # must run it before `pnpm install`.
+  printf 'import { existsSync } from "node:fs";\nconsole.log(`register check: node_modules ${existsSync("node_modules") ? "present" : "absent"}`);\n' \
+    >"${dir}/stub/register.mjs"
   printf '.ralph/\nnode_modules/\n' >"${dir}/.gitignore"
   printf 'unrelated notes\n' >"${dir}/notes.md"
   printf '# 01: Demo ticket\n\n**Blocked by:** None (can start immediately)\n\n**Status:** ready-for-agent\n\n- [ ] works\n' \
@@ -178,6 +182,8 @@ check "slice merged into host main" "git -C '${host}' log --format=%s main | gre
 check "host checkout has the feature" "[[ -f '${host}/feature.txt' ]]"
 check "slice branch on host" "git -C '${host}' rev-parse --verify --quiet slice/01-demo >/dev/null"
 check "host re-ran the gate without an agent" "grep -q 'sandbox: verifying' '${host}.out'"
+check "the re-gate checked the register before installing" \
+  "grep -q 'register check: node_modules absent' '${host}.out' && grep -q 'register check: node_modules present' '${host}.out'"
 check "agent log on host" "ls '${host}'/.ralph/logs/*/01-demo.agent.log >/dev/null 2>&1"
 check "quarantine namespace emptied" "[[ -z \$(git -C '${host}' for-each-ref refs/ralph/) ]]"
 show_output "${host}"

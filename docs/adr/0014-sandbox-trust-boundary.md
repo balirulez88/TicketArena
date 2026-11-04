@@ -24,7 +24,8 @@ a trusted host step has validated it.
   `--cap-drop ALL` and `no-new-privileges`.
 - **Transport:** inside the container, Ralph pushes to a staging bare repository that only the
   container has. At exit, its branches leave as `result.bundle`. The host reads that bundle with
-  its own Git into a quarantine namespace (`refs/ralph/incoming/<run>/`, objects fsck-checked).
+  its own Git into a quarantine namespace (`refs/ralph/incoming/<run>/`), then checks every
+  object the run's branches reach with `git fsck --strict`.
   The host never runs Git inside a repository the container wrote, so no hook or config of the
   container's can execute on the host.
 - **Acceptance** (`scripts/ralph-accept.mjs`, the only code that changes the host from a run):
@@ -33,9 +34,11 @@ a trusted host step has validated it.
     with every blocker done, archived as done and otherwise unchanged. A blocked-status commit
     changes only that ticket's status line.
   - No change may touch a protected path (the harness, `scripts/`, CI, review skills,
-    `CLAUDE.md`, `docs/workflow/`, gate and workspace configuration, `infra/`, the root
-    `package.json` scripts, every package's gate scripts and any install script), Git attributes
-    or submodules, or add a symlink or submodule. Nor may it write a path the host keeps out of
+    `docs/workflow/`, gate and workspace configuration, `infra/` and Compose files, anything
+    pnpm runs on install in any package, the root manifest except its dependencies, every
+    package's gate scripts, and what Claude Code and editors load by themselves: `CLAUDE.md`,
+    `.claude/`, `.mcp.json`, `.vscode/`), Git attributes or submodules, or add a symlink or
+    submodule. Nor may it write a path the host keeps out of
     Git (`.ralph/`, `.env*`, `node_modules/`, anything the host's ignore rules match): a
     fast-forward would overwrite such files silently. Paths are compared as a case-insensitive
     host resolves them, and names that host could resolve elsewhere, or two names for one file,

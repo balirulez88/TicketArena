@@ -83,9 +83,6 @@ export const PROTECTED_FILES = [
   "turbo.json",
   "docker-compose.yml",
   ".nvmrc",
-  // The host-only rule below reads the host's own ignore rules; a slice that could drop one in
-  // an earlier run would open that path for a later one.
-  ".gitignore",
 ];
 export const PROTECTED_DIRS = ["scripts/", ".github/", "skills/", "docs/workflow/", "infra/"];
 // Anywhere in the tree: Biome and Turborepo read nested configuration, pnpm nested settings
@@ -98,6 +95,9 @@ const NESTED_GATE_FILES = [
   "turbo.json",
   "turbo.jsonc",
   ".npmrc",
+  // The host-only rule below reads the host's own ignore rules: a slice that could drop or negate
+  // one in an earlier run would open that path for a later one.
+  ".gitignore",
   "pnpm-workspace.yaml",
   ".mcp.json",
   "package.yaml",
@@ -747,6 +747,10 @@ function importLogs(outDir) {
   const imported = [];
   try {
     initRoot(LOG_ROOT);
+    // Left behind by an import that was killed: container-written and possibly unredacted.
+    for (const name of readdirSync(LOG_ROOT).filter((entry) => entry.endsWith(".importing"))) {
+      rmSync(join(LOG_ROOT, name), { recursive: true, force: true });
+    }
     const logs = join(outDir, "logs");
     if (!lstatSafe(logs)?.isDirectory()) {
       log("the run left no plain logs/ directory; no logs imported");
@@ -821,11 +825,16 @@ function hostReady(base) {
 function assertWellFormed(bundle) {
   const scratch = mkdtempSync(join(tmpdir(), "ralph-accept-objects-"));
   try {
-    const inScratch = (args) => git(args, { cwd: scratch });
-    inScratch(["init", "--quiet", "--bare", "."]);
+    // Named explicitly, never discovered: safe.bareRepository=explicit forbids discovery.
+    const inScratch = (args) => git([`--git-dir=${scratch}`, ...args], { cwd: scratch });
+    const init = git(["init", "--quiet", "--bare", scratch]);
+    if (init.status !== 0) {
+      throw new Error(`could not create a scratch repository: ${init.stderr.trim()}`);
+    }
     const objects = gitOut("rev-parse", "--path-format=absolute", "--git-path", "objects");
     writeFileSync(join(scratch, "objects", "info", "alternates"), `${objects}\n`);
-    // unpackLimit 1 keeps every fetch as a pack, so the check below sees all of it.
+    // Unbundling always keeps a pack today; unpackLimit 1 keeps it so if that ever changes, since
+    // the check below reads packs only.
     const fetched = inScratch([
       "-c",
       "fetch.unpackLimit=1",

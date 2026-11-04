@@ -383,8 +383,9 @@ repository from a run, and everything in `out/` is data to it:
   a bundle does not apply `fetch.fsckObjects`, so every object the bundle adds is first checked
   with `index-pack --strict --fsck-objects` in a scratch repository that borrows the host's
   objects. A malformed object is refused before it reaches the host's object store, where it
-  would outlive the refusal and fail every later check. No Git command ever runs inside a repository the container
-  wrote, so no hook or config of the container's can execute on the host.
+  would outlive the refusal and fail every later check. No Git command ever runs inside a
+  repository the container wrote, so no hook or config of the container's can execute on the
+  host.
 - `main` may gain only Ralph's own shapes, checked against the base the run started from:
   - a **slice merge**: one squashed commit on the base, under `Merge slice/<slug>: <title>` with
     an identical tree, Ralph's commit subject, and a ticket that was `ready-for-agent` with all
@@ -395,15 +396,15 @@ repository from a run, and everything in `out/` is data to it:
     inspect it with `git log -p` or `git show`, never by checking it out.
 - **Protected paths** may not change through a run: `ralph-loop.sh`, `scripts/`, `Dockerfile`,
   `.dockerignore`, `.github/`, `skills/`, `infra/`, `docs/workflow/`, `tsconfig.base.json`,
-  `turbo.json`, `.nvmrc`, `.gitignore` (the host-only rule reads it); and in any directory
+  `turbo.json`, `.nvmrc`; and in any directory `.gitignore` (the host-only rule reads it),
   `biome.json(c)`, `turbo.json(c)`, `.npmrc`, `pnpm-workspace.yaml` (its `scriptShell` changes
-  what a package's scripts run), `.pnpmfile.*`, `package.yaml`, `package.json5`, `binding.gyp`, Docker
-  Compose files (`compose*.y(a)ml`, `docker-compose*.y(a)ml`), `CLAUDE.md`, `CLAUDE.local.md`,
-  `.mcp.json`, and anything under `.claude/`, `.vscode/` or `.idea/`. In the root `package.json` only the
-  dependency maps may change. In any other `package.json`, the gate scripts (`lint`, `typecheck`, `test`,
-  `check`, `check:debt`, `test:harness`, and their `pre`/`post` scripts) are fixed and the
-  package may not be deleted; its dependencies and other scripts may change, and new packages
-  may be added. No package, new or old, may gain an install script (`preinstall`, `install`,
+  what a package's scripts run), `.pnpmfile.*`, `package.yaml`, `package.json5`, `binding.gyp`,
+  Docker Compose files (`compose*.y(a)ml`, `docker-compose*.y(a)ml`), `CLAUDE.md`,
+  `CLAUDE.local.md`, `.mcp.json`, and anything under `.claude/`, `.vscode/` or `.idea/`. In the
+  root `package.json` only the dependency maps may change. In any other `package.json`, the gate
+  scripts (`lint`, `typecheck`, `test`, `check`, `check:debt`, `test:harness`, and their
+  `pre`/`post` scripts) are fixed and the package may not be deleted; its dependencies and other
+  scripts may change, and new packages may be added. No package, new or old, may gain an install script (`preinstall`, `install`,
   `postinstall`, `prepare` and the like), and a manifest that is not a JSON object is refused.
 - **Host-only paths** may not be written: `.ralph/`, `node_modules/`, `.pnpm-store/`, `.turbo/`,
   `.env` files (examples aside), and anything the host's own ignore rules match. A fast-forward

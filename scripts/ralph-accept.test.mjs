@@ -551,6 +551,16 @@ describe("ralph-accept: attack path 2, Git configuration, hooks and links", () =
     );
   });
 
+  it("sweeps a log import that was killed halfway", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws);
+    write(host, ".ralph/logs/20261101-000000.importing/raw.log", "unredacted\n");
+    assert.equal(accept(host, finish(host, ws), { base }).code, 0);
+    assert.equal(existsSync(join(host, ".ralph", "logs", "20261101-000000.importing")), false);
+  });
+
   it("never merges logs into a run the host already has", () => {
     const host = hostRepo();
     const base = git(host, "rev-parse", "main");
@@ -670,6 +680,7 @@ describe("ralph-accept: attack path 3, harness, CI and gate definitions", () => 
     ["a nested Turborepo JSONC configuration", "packages/demo/turbo.jsonc", '{"tasks":{}}\n'],
     ["a nested pnpm workspace file", "packages/demo/pnpm-workspace.yaml", "scriptShell: node\n"],
     ["the host's ignore rules", ".gitignore", "# nothing ignored\n"],
+    ["nested ignore rules", "apps/web/.gitignore", "!.env.local\n"],
     ["IDE settings", ".idea/watcherTasks.xml", "<project/>\n"],
     ["a YAML package manifest", "packages/a/package.yaml", "scripts:\n  postinstall: node x\n"],
     ["a JSON5 package manifest", "packages/a/package.json5", "{scripts:{postinstall:'node x'}}\n"],

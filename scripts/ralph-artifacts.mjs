@@ -10,14 +10,15 @@
 // Retention (decided from the run's run.json in the log root; directory age if it has none):
 //   - an `active` run is never touched, however old: it may be running or resumable;
 //   - temporary review files of a `succeeded` run are deleted once the run is finalized (their
-//     copies are archived in the run's logs); of a `failed` run, 7 days after it finished;
+//     copies are archived in the run's logs); of a `failed` or `paused` run, 7 days after it
+//     finished (a paused ticket's resumable state is in git and .ralph/state, not here);
 //   - logs are deleted 30 days after the run finished.
 //
 // Safety: a root is only cleaned if it carries the `.ralph-managed` marker that `init` writes.
 // Only direct children named like a run id are removed, never symlinks, never anything outside.
 //
 // Usage: node scripts/ralph-artifacts.mjs init --root <dir>
-//        node scripts/ralph-artifacts.mjs mark --run <log dir> --status active|succeeded|failed
+//        node scripts/ralph-artifacts.mjs mark --run <log dir> --status active|succeeded|failed|paused
 //        node scripts/ralph-artifacts.mjs remove --root <review root> --run-id <id>
 //        node scripts/ralph-artifacts.mjs cleanup --review-root <dir> --log-root <dir> [--keep <id>]
 //        node scripts/ralph-artifacts.mjs redact --run <log dir>
@@ -41,7 +42,7 @@ export const MARKER = ".ralph-managed";
 export const RUN_ID = /^\d{8}-\d{6}$/;
 export const FAILED_REVIEW_RETENTION_DAYS = 7;
 export const LOG_RETENTION_DAYS = 30;
-const STATUSES = ["active", "succeeded", "failed"];
+const STATUSES = ["active", "succeeded", "failed", "paused"];
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export function initRoot(root) {

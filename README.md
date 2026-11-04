@@ -59,6 +59,7 @@ automated harness:
 ```bash
 export ANTHROPIC_API_KEY=...
 pnpm sandbox --once           # build the image and run one ticket in the sandbox
+pnpm sandbox --max-tickets 3  # a bounded batch: GitHub CI must pass between tickets
 ./ralph-loop.sh --dry-run     # show which ticket would run next
 ```
 

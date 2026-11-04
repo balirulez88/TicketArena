@@ -27,6 +27,17 @@
 # The agent never touches git. The harness is the only writer, so every commit on a slice branch
 # is guaranteed to have passed the gate.
 #
+# Provider failures are not the ticket's fault (scripts/ralph-provider.mjs classifies them from
+# the CLI's own messages, and only in a session that failed). A rate limit, an overload or an
+# outage is retried in a fresh session, bounded; a usage limit, refused credentials or a provider
+# that stays down PAUSES the run (exit 75): the work in progress is parked on
+# `ralph/paused/<slug>` with a state file in RALPH_STATE_DIR, nothing is rejected or blocked, and
+# no implementation attempt or review round is spent. Running the harness again resumes the
+# ticket at the interrupted phase and attempt; an interrupted review round is redone from scratch
+# and never judged. Anything not confidently a provider failure is judged as before.
+#
+# Batches with CI between tickets: scripts/ralph-batch.mjs (`pnpm sandbox --max-tickets N`).
+#
 # Usage: ./ralph-loop.sh [--once] [--ticket NN] [--dry-run]
 #
 # Environment:
@@ -46,6 +57,10 @@
 #   RALPH_PUSH_REMOTE    if set, push slice + base branch there after each merge, and the
 #                        quarantine branch + blocked status after a rejection
 #   RALPH_LOG_ROOT       where run logs go (default: .ralph/logs); the sandbox mounts the host's
+#   RALPH_STATE_DIR      where a paused ticket's resume state goes (default: .ralph/state); the
+#                        sandbox mounts the host's
+#   RALPH_PROVIDER_RETRIES  fresh-session retries of a transient provider failure (default: 2)
+#   RALPH_PROVIDER_BACKOFF  seconds before the first such retry, doubled each time (default: 60)
 #   RALPH_SANDBOX=1      set by the Docker image; required for permission-skipping agents
 #   RALPH_ALLOW_HOST=1   explicit, conscious override of the sandbox requirement
 
@@ -72,7 +87,13 @@ readonly ARTIFACTS="${REPO_ROOT}/scripts/ralph-artifacts.mjs"
 readonly DEBT="${REPO_ROOT}/scripts/ralph-debt.mjs"
 readonly DEBT_REGISTER="docs/technical-debt.md"
 readonly RED_CHECK="${REPO_ROOT}/scripts/ralph-red.mjs"
+readonly PROVIDER="${REPO_ROOT}/scripts/ralph-provider.mjs"
 readonly TEST_RUNNER="${RALPH_TEST_RUNNER:-pnpm exec vitest}"
+readonly STATE_DIR="${RALPH_STATE_DIR:-${REPO_ROOT}/.ralph/state}"
+readonly PROVIDER_RETRIES="${RALPH_PROVIDER_RETRIES:-2}"
+readonly PROVIDER_BACKOFF="${RALPH_PROVIDER_BACKOFF:-60}"
+# EX_TEMPFAIL: the run stopped for the provider, not for the code; run again to resume.
+readonly PAUSED_EXIT=75
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 readonly RUN_ID
 # Temporary: changesets for the reviewers, inside the workspace they are confined to.
@@ -91,6 +112,18 @@ REVIEW_FEEDBACK=""
 RUN_STATUS=failed
 # Agent sessions of the current ticket that ran out of context (see fresh_session).
 CONTEXT_EXHAUSTIONS=0
+# Why and where the current ticket paused (pause_ticket), and where a resumed one continues
+# (resume_ticket). RESUME_PHASE is consumed by the phase it names.
+PROVIDER_PAUSE=""
+PAUSE_PHASE=""
+PAUSE_ATTEMPT=1
+PAUSE_ROUND=1
+PAUSE_FEEDBACK=""
+RESUME_PHASE=""
+RESUME_ATTEMPT=1
+RESUME_ROUND=1
+RESUME_FEEDBACK=""
+RESUME_BLOCKING=""
 
 # ---------------------------------------------------------------------------------------------
 # Utilities
@@ -127,6 +160,10 @@ parse_args() {
         ONLY_TICKET="$2"
         shift
         ;;
+      --max-tickets)
+        die "--max-tickets runs a batch with GitHub CI between tickets, which the sandbox cannot" \
+          "reach: use 'pnpm sandbox --max-tickets N' (scripts/ralph-batch.mjs) on the host"
+        ;;
       -h | --help) usage 0 ;;
       *) die "Unknown argument: $1 (see --help)" ;;
     esac
@@ -144,12 +181,15 @@ preflight() {
   [[ "${MAX_REVIEW_ROUNDS}" =~ ^[1-9][0-9]*$ ]] ||
     die "RALPH_MAX_REVIEW_ROUNDS must be a positive integer"
   [[ "${REVIEW_TIMEOUT}" =~ ^[1-9][0-9]*$ ]] || die "RALPH_REVIEW_TIMEOUT must be a positive integer"
+  [[ "${PROVIDER_RETRIES}" =~ ^[0-9]+$ ]] || die "RALPH_PROVIDER_RETRIES must be a whole number"
+  [[ "${PROVIDER_BACKOFF}" =~ ^[0-9]+$ ]] || die "RALPH_PROVIDER_BACKOFF must be a whole number"
   command -v git >/dev/null || die "git is not installed"
   command -v pnpm >/dev/null || die "pnpm is not installed"
   command -v node >/dev/null || die "node is not installed"
   command -v timeout >/dev/null || die "timeout (coreutils) is not installed"
   [[ -f "${REVIEW_SCHEMA}" && -f "${REVIEW_GATE}" && -f "${ARTIFACTS}" && -f "${DEBT}" &&
-    -f "${RED_CHECK}" ]] || die "review skill, review gate, artifact, debt or RED script missing"
+    -f "${RED_CHECK}" && -f "${PROVIDER}" ]] ||
+    die "review skill, review gate, artifact, debt, RED or provider script missing"
   [[ -f "${DEBT_REGISTER}" ]] || die "technical debt register ${DEBT_REGISTER} is missing"
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git repository"
 
@@ -276,6 +316,16 @@ next_ticket() {
     return 0
   done
   return 1
+}
+
+# Ready tickets that cannot start because a blocker is not done (scripts/ralph-batch.mjs reports
+# them when nothing is eligible).
+waiting_tickets() {
+  local file
+  for file in "${ISSUES_DIR}"/[0-9][0-9]-*.md; do
+    [[ -f "${file}" && "$(ticket_field "${file}" "Status")" == "ready-for-agent" ]] || continue
+    blockers_done "${file}" || printf '%s\n' "${file}"
+  done
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -495,19 +545,58 @@ combine_sessions() {
 # What Claude Code prints when a session runs out of context (compaction is disabled).
 readonly CONTEXT_EXHAUSTED='Prompt is too long|context window|context length'
 
+# The provider-failure class of a finished session: usage-limit, auth, transient or none.
+# Anything the classifier cannot answer is `none`: a genuine failure, judged as before.
+# Usage: provider_failure <exit code> <output file>...
+provider_failure() {
+  local class
+  class="$(node "${PROVIDER}" classify --exit "$@" 2>/dev/null)" || class=none
+  case "${class}" in
+    usage-limit | auth | transient) printf '%s\n' "${class}" ;;
+    *) echo none ;;
+  esac
+}
+
+# What a provider failure costs: nothing. A transient one is retried in a new fresh session after
+# a doubling backoff, at most RALPH_PROVIDER_RETRIES times. A usage limit or refused credentials
+# cannot clear up within the run, and neither can a provider that stays down, so those pause it
+# (returns 1, PROVIDER_PAUSE set). Usage: provider_retry <class> <retries so far>
+provider_retry() {
+  local class=$1 retry=$2 wait
+  if [[ "${class}" == transient ]] && ((retry < PROVIDER_RETRIES)); then
+    wait=$((PROVIDER_BACKOFF * (1 << retry)))
+    log "  provider failure (${class}), not counted: retrying in a fresh session in ${wait}s" \
+      "($((retry + 1))/${PROVIDER_RETRIES})"
+    sleep "${wait}"
+    return 0
+  fi
+  PROVIDER_PAUSE="${class}"
+  log "  provider failure (${class}): pausing the run; nothing is counted against the ticket"
+  return 1
+}
+
+# Returns 0 whatever the agent did (the gate decides), or PAUSED_EXIT after a provider failure.
 run_agent() {
-  local phase=$1 ticket=$2 feedback_file=$3 attempt=$4 slug output
+  local phase=$1 ticket=$2 feedback_file=$3 attempt=$4 slug output status class retry=0
   slug="$(ticket_slug "${ticket}")"
   output="${LOG_DIR}/${slug}.${phase}-${attempt}.agent.out"
   local -a agent_argv
   IFS=' ' read -r -a agent_argv <<<"${AGENT_CMD}"
-  log "  ${phase} attempt ${attempt}/${MAX_ATTEMPTS}: running agent in a fresh session"
+  while :; do
+    log "  ${phase} attempt ${attempt}/${MAX_ATTEMPTS}: running agent in a fresh session"
+    status=0
+    RALPH_TICKET="$(ticket_number "${ticket}")" RALPH_PHASE="${phase}" \
+      fresh_session "$(ticket_number "${ticket}") ${phase}#${attempt}" 0 "${agent_argv[@]}" \
+      "$(build_prompt "${phase}" "${ticket}" "${feedback_file}")" >"${output}" 2>&1 || status=$?
+    cat "${output}" >>"${LOG_DIR}/${slug}.agent.log"
+    class="$(provider_failure "${status}" "${output}")"
+    [[ "${class}" == none ]] && break
+    rm -f "${output}"
+    provider_retry "${class}" "${retry}" || return "${PAUSED_EXIT}"
+    retry=$((retry + 1))
+  done
   # A non-zero agent exit is not fatal: the gate, not the agent's self-report, decides.
-  RALPH_TICKET="$(ticket_number "${ticket}")" RALPH_PHASE="${phase}" \
-    fresh_session "$(ticket_number "${ticket}") ${phase}#${attempt}" 0 "${agent_argv[@]}" \
-    "$(build_prompt "${phase}" "${ticket}" "${feedback_file}")" >"${output}" 2>&1 ||
-    log "  agent exited non-zero; deferring to the gate"
-  cat "${output}" >>"${LOG_DIR}/${slug}.agent.log"
+  ((status == 0)) || log "  agent exited non-zero; deferring to the gate"
   if grep -qiE "${CONTEXT_EXHAUSTED}" "${output}"; then
     CONTEXT_EXHAUSTIONS=$((CONTEXT_EXHAUSTIONS + 1))
     log "  agent ran out of context; its work stays in the tree, the next attempt starts fresh"
@@ -516,14 +605,28 @@ run_agent() {
 }
 
 # Runs `phase` until `check` succeeds, feeding each failed gate log into the next attempt.
+# Returns 0 once it does, 1 when the attempts run out, PAUSED_EXIT on a provider pause (the
+# interrupted attempt is recorded in PAUSE_*, to be run again, not counted).
 run_phase_until() {
-  local phase=$1 ticket=$2 check=$3 slug attempt
+  local phase=$1 ticket=$2 check=$3 slug attempt=1 status
   slug="$(ticket_slug "${ticket}")"
   local gate_log="${LOG_DIR}/${slug}.${phase}.gate.log"
   local feedback="${LOG_DIR}/${slug}.${phase}.feedback.log"
   : >"${feedback}"
-  for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
-    run_agent "${phase}" "${ticket}" "${feedback}" "${attempt}"
+  # A resumed phase continues at the attempt the pause interrupted, with the gate output that
+  # attempt was given: a pause never grants extra attempts.
+  if [[ "${RESUME_PHASE}" == "${phase}" ]]; then
+    attempt="${RESUME_ATTEMPT}"
+    [[ -z "${RESUME_FEEDBACK}" ]] || cp "${RESUME_FEEDBACK}" "${feedback}"
+    RESUME_PHASE=""
+  fi
+  for (( ; attempt <= MAX_ATTEMPTS; attempt++)); do
+    status=0
+    run_agent "${phase}" "${ticket}" "${feedback}" "${attempt}" || status=$?
+    if ((status != 0)); then
+      PAUSE_PHASE="${phase}" PAUSE_ATTEMPT="${attempt}" PAUSE_FEEDBACK="${feedback}"
+      return "${status}"
+    fi
     if "${check}" "${gate_log}"; then
       log "  ${phase}: gate satisfied"
       return 0
@@ -600,16 +703,43 @@ EOF
 
 # Never fails: whatever the process printed (or nothing) goes to the review gate, which judges
 # anything but a valid report as invalid. A reviewer can therefore not approve by crashing.
+# The one exception is a session the provider cut off: what it printed is incomplete evidence,
+# so it is set aside as `<axis>.provider-<n>.json` and never judged. A transient failure is
+# retried in a fresh session; otherwise the `<axis>.provider` marker makes run_review abandon
+# the round unjudged (it runs in the background, so it cannot set PROVIDER_PAUSE itself).
 run_reviewer() {
   local axis=$1 ticket=$2 diff_file=$3 base=$4 head=$5 out=$6 rejected=${7:-}
+  local status class retry=0
   local -a review_argv
   IFS=' ' read -r -a review_argv <<<"${REVIEW_CMD}"
-  # Each reviewer is its own fresh session, isolated from the agent and from the other axis.
-  fresh_session "$(ticket_number "${ticket}") review-${axis}" "${REVIEW_TIMEOUT}" \
-    "${review_argv[@]}" --json-schema "$(cat "${REVIEW_SCHEMA}")" \
-    "$(build_review_prompt "${axis}" "${ticket}" "${diff_file}" "${base}" "${head}"
-      [[ -z "${rejected}" ]] || rejected_report_note "${rejected}")" \
-    >"${out}" 2>"${out%.json}.stderr.log" || true
+  while :; do
+    status=0
+    # Each reviewer is its own fresh session, isolated from the agent and from the other axis.
+    fresh_session "$(ticket_number "${ticket}") review-${axis}" "${REVIEW_TIMEOUT}" \
+      "${review_argv[@]}" --json-schema "$(cat "${REVIEW_SCHEMA}")" \
+      "$(build_review_prompt "${axis}" "${ticket}" "${diff_file}" "${base}" "${head}"
+        [[ -z "${rejected}" ]] || rejected_report_note "${rejected}")" \
+      >"${out}" 2>"${out%.json}.stderr.log" || status=$?
+    class="$(provider_failure "${status}" "${out}" "${out%.json}.stderr.log")"
+    [[ "${class}" == none ]] && return 0
+    mv "${out}" "${out%.json}.provider-$((retry + 1)).json"
+    if ! provider_retry "${class}" "${retry}"; then
+      printf '%s\n' "${class}" >"${out%.json}.provider"
+      return 0
+    fi
+    retry=$((retry + 1))
+  done
+}
+
+# True if a reviewer of this round was cut off by the provider (run_reviewer); sets PROVIDER_PAUSE.
+review_paused() {
+  local marker
+  for marker in "$1".*.provider; do
+    [[ -f "${marker}" ]] || continue
+    PROVIDER_PAUSE="$(cat "${marker}")"
+    return 0
+  done
+  return 1
 }
 
 rejected_report_note() {
@@ -654,7 +784,9 @@ reviewers_tampered() {
 }
 
 # One review round over the committed changeset. Returns the review gate's verdict:
-# 0 approved, 1 blocked (findings in REVIEW_FEEDBACK), 2 invalid.
+# 0 approved, 1 blocked (findings in REVIEW_FEEDBACK), 2 invalid; or 3 when the provider cut a
+# reviewer off: the round is abandoned before the gate sees it, so it can neither approve nor
+# count, and a resumed run redoes it from scratch (new changeset token, both axes).
 run_review() {
   local ticket=$1 round=$2 slug prefix base head diff_file token verdict=0
   slug="$(ticket_slug "${ticket}")"
@@ -693,6 +825,7 @@ run_review() {
   local spec_pid=$!
   wait "${standards_pid}" "${spec_pid}"
   reviewers_tampered "${head}" "${prefix}" && return 2
+  review_paused "${prefix}" && return 3
 
   # The gate checks the reports' evidence against the real changeset (token, commit range, file
   # and hunk references, file coverage) and the ticket's acceptance criteria.
@@ -719,6 +852,7 @@ run_review() {
   ((${#retried[@]} > 0)) || return 2
   wait "${retried[@]}"
   reviewers_tampered "${head}" "${prefix}" && return 2
+  review_paused "${prefix}" && return 3
   verdict=0
   run_gate_on_round "${ticket}" "${prefix}" "${diff_file}" "${base}" "${head}" || verdict=$?
   return "${verdict}"
@@ -726,26 +860,43 @@ run_review() {
 
 # Review rounds until approval. Blocking findings go to a fix phase (gated like GREEN) and the
 # fixed tree gets a fresh review. A failed or invalid review is never an approval; it uses up a
-# round without a fix, because the code is not known to be at fault.
+# round without a fix, because the code is not known to be at fault. A provider pause uses up
+# nothing: it returns PAUSED_EXIT with the round to resume at in PAUSE_ROUND, and a resumed run
+# re-enters at that round's review, or at its fix with the same blocking findings.
 review_slice() {
-  local ticket=$1 round verdict
-  for ((round = 1; round <= MAX_REVIEW_ROUNDS; round++)); do
-    verdict=0
-    run_review "${ticket}" "${round}" || verdict=$?
-    case "${verdict}" in
-      0)
-        log "  review: approved (no ${REVIEW_BLOCKING} findings)"
-        record_debt "${ticket}" "${round}" || return 1
-        return 0
-        ;;
-      1) log "  review: blocking findings, see ${REVIEW_FEEDBACK%.blocking.md}.md" ;;
-      *)
-        log "  review: a reviewer failed or returned an invalid report; NOT an approval"
-        continue
-        ;;
-    esac
-    ((round < MAX_REVIEW_ROUNDS)) || break
-    run_phase_until review-fix "${ticket}" run_gate || return 1
+  local ticket=$1 round=1 verdict status=0
+  [[ "${RESUME_PHASE}" != review* ]] || round="${RESUME_ROUND}"
+  [[ "${RESUME_PHASE}" != review ]] || RESUME_PHASE=""
+  for (( ; round <= MAX_REVIEW_ROUNDS; round++)); do
+    if [[ "${RESUME_PHASE}" == review-fix ]]; then
+      REVIEW_FEEDBACK="${RESUME_BLOCKING}"
+    else
+      verdict=0
+      run_review "${ticket}" "${round}" || verdict=$?
+      case "${verdict}" in
+        0)
+          log "  review: approved (no ${REVIEW_BLOCKING} findings)"
+          record_debt "${ticket}" "${round}" || return 1
+          return 0
+          ;;
+        1) log "  review: blocking findings, see ${REVIEW_FEEDBACK%.blocking.md}.md" ;;
+        3)
+          log "  review: a reviewer was cut off by the provider; round ${round} is NOT judged"
+          PAUSE_PHASE=review PAUSE_ROUND="${round}"
+          return "${PAUSED_EXIT}"
+          ;;
+        *)
+          log "  review: a reviewer failed or returned an invalid report; NOT an approval"
+          continue
+          ;;
+      esac
+      ((round < MAX_REVIEW_ROUNDS)) || break
+    fi
+    run_phase_until review-fix "${ticket}" run_gate || status=$?
+    if ((status != 0)); then
+      PAUSE_ROUND="${round}"
+      return "${status}"
+    fi
     checkpoint "review-fix ${round}"
   done
   return 1
@@ -880,56 +1031,209 @@ push_rejection() {
 }
 
 # ---------------------------------------------------------------------------------------------
+# Pause and resume (provider failures; see the header)
+# ---------------------------------------------------------------------------------------------
+
+state_field() { sed -n "s/^$2=//p" "$1" | head -n 1; }
+
+# Nothing is wrong with the ticket, so it is neither rejected nor blocked: `main` is untouched and
+# still shows it `ready-for-agent`. The work in progress is committed on ralph/paused/<slug>,
+# directly on top of the last gated checkpoint (so the resume can tell the two apart), and pushed
+# with the slice branch's other evidence so it survives the sandbox. The state file is written
+# last: without it a rerun starts the ticket from scratch, which is always safe.
+pause_ticket() {
+  local ticket=$1 branch=$2 slug ref state gated
+  slug="$(ticket_slug "${ticket}")"
+  ref="ralph/paused/${slug}"
+  state="${STATE_DIR}/${slug}.pause"
+  gated="$(git rev-parse HEAD)"
+  git add -A
+  git commit --quiet --allow-empty -m "wip(ralph): paused in ${PAUSE_PHASE} (${PROVIDER_PAUSE})"
+  git branch --quiet --force "${ref}" HEAD
+  mkdir -p "${STATE_DIR}"
+  rm -f "${state}" "${STATE_DIR}/${slug}.feedback.log" "${STATE_DIR}/${slug}.blocking.md"
+  [[ ! -s "${PAUSE_FEEDBACK}" ]] || cp "${PAUSE_FEEDBACK}" "${STATE_DIR}/${slug}.feedback.log"
+  [[ "${PAUSE_PHASE}" != review-fix ]] || cp "${REVIEW_FEEDBACK}" "${STATE_DIR}/${slug}.blocking.md"
+  git switch --quiet "${BASE_BRANCH}"
+  git branch --quiet -D "${branch}"
+  CURRENT_BRANCH=""
+  if [[ -n "${PUSH_REMOTE}" ]] && ! git push --quiet --force "${PUSH_REMOTE}" "${ref}"; then
+    log "  ERROR: could not push ${ref} to ${PUSH_REMOTE}; the ticket will restart from scratch"
+    return 0
+  fi
+  printf '%s\n' "ticket=$(ticket_number "${ticket}")" "ref=${ref}" \
+    "base=$(git rev-parse "${BASE_BRANCH}")" "gated=${gated}" "paused=$(git rev-parse "${ref}")" \
+    "phase=${PAUSE_PHASE}" "attempt=${PAUSE_ATTEMPT}" "round=${PAUSE_ROUND}" \
+    "reason=${PROVIDER_PAUSE}" "run=${RUN_ID}" >"${state}.tmp"
+  mv "${state}.tmp" "${state}"
+  log "PAUSED ${slug} in ${PAUSE_PHASE} (${PROVIDER_PAUSE}): work parked on ${ref}, state in ${state}"
+}
+
+# Re-creates the slice branch exactly as the pause left it: the gated checkpoint committed, the
+# interrupted phase's work uncommitted on top (as it was mid-phase), so that phase and every later
+# one run through their gates as if never interrupted. Fails closed: the parked work is used only
+# if it is precisely what the pause recorded and `main` has not moved since; otherwise a human
+# decides (deleting the state file restarts the ticket from scratch).
+resume_ticket() {
+  local ticket=$1 branch=$2 state=$3 slug ref tip base gated paused phase attempt round
+  slug="$(ticket_slug "${ticket}")"
+  ref="$(state_field "${state}" ref)"
+  base="$(state_field "${state}" base)"
+  gated="$(state_field "${state}" gated)"
+  paused="$(state_field "${state}" paused)"
+  phase="$(state_field "${state}" phase)"
+  attempt="$(state_field "${state}" attempt)"
+  round="$(state_field "${state}" round)"
+  [[ "$(state_field "${state}" ticket)" == "$(ticket_number "${ticket}")" &&
+    "${ref}" == "ralph/paused/${slug}" ]] || die "${state} does not belong to ${ticket}"
+  [[ "${phase}" =~ ^(red|green|refactor|docs|review|review-fix)$ &&
+    "${attempt}" =~ ^[1-9][0-9]*$ && "${round}" =~ ^[1-9][0-9]*$ &&
+    "${base}${gated}${paused}" =~ ^[0-9a-f]{120}$ ]] || die "${state} is malformed"
+  ((attempt <= MAX_ATTEMPTS && round <= MAX_REVIEW_ROUNDS)) ||
+    die "${state}: attempt ${attempt} or round ${round} exceeds the configured limits"
+  tip="$(git rev-parse --verify --quiet "refs/heads/${ref}")" ||
+    { [[ -n "${PUSH_REMOTE}" ]] && tip="$(git rev-parse --verify --quiet "refs/remotes/${PUSH_REMOTE}/${ref}")"; } ||
+    die "${ticket} is paused, but its work ${ref} is missing; see ${state}"
+  [[ "${tip}" == "${paused}" ]] || die "${ref} is at ${tip}, but the pause recorded ${paused}"
+  [[ "$(git rev-parse "${paused}^")" == "${gated}" ]] ||
+    die "${ref}: the parked work does not sit on the recorded checkpoint ${gated}"
+  [[ "$(git rev-parse "${BASE_BRANCH}")" == "${base}" ]] ||
+    die "${BASE_BRANCH} moved since ${slug} was paused on ${base}; its parked work on ${ref} is" \
+      "stale. Delete ${state} to restart the ticket from scratch"
+  git merge-base --is-ancestor "${base}" "${gated}" || die "${ref} does not build on ${base}"
+
+  git switch --quiet -c "${branch}" "${paused}"
+  git reset --quiet --mixed "${gated}"
+  CURRENT_BRANCH="${branch}"
+  RESUME_PHASE="${phase}" RESUME_ATTEMPT="${attempt}" RESUME_ROUND="${round}"
+  [[ ! -f "${STATE_DIR}/${slug}.feedback.log" ]] || RESUME_FEEDBACK="${STATE_DIR}/${slug}.feedback.log"
+  if [[ "${phase}" == review-fix ]]; then
+    RESUME_BLOCKING="${LOG_DIR}/${slug}.resumed.blocking.md"
+    cp "${STATE_DIR}/${slug}.blocking.md" "${RESUME_BLOCKING}" ||
+      die "${state}: the blocking findings to fix are missing"
+  fi
+  log "  resuming at ${phase} (attempt ${attempt}, review round ${round}); paused by run" \
+    "$(state_field "${state}" run): $(state_field "${state}" reason)"
+}
+
+# The parked work of a resumed ticket is history once it merges or is rejected.
+clear_pause() {
+  local slug ref
+  slug="$(ticket_slug "$1")"
+  ref="ralph/paused/${slug}"
+  [[ -f "${STATE_DIR}/${slug}.pause" ]] || return 0
+  rm -f "${STATE_DIR}/${slug}.pause" "${STATE_DIR}/${slug}.feedback.log" \
+    "${STATE_DIR}/${slug}.blocking.md"
+  git branch --quiet -D "${ref}" 2>/dev/null || true
+  if [[ -n "${PUSH_REMOTE}" ]]; then
+    git push --quiet "${PUSH_REMOTE}" --delete "${ref}" ||
+      log "  could not delete ${ref} on ${PUSH_REMOTE}; it is obsolete, delete it by hand"
+  fi
+}
+
+# ---------------------------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------------------------
 
+phase_rank() {
+  case "$1" in
+    red) echo 1 ;;
+    green) echo 2 ;;
+    refactor) echo 3 ;;
+    docs) echo 4 ;;
+    *) echo 5 ;; # review, review-fix
+  esac
+}
+# True if the ticket still has to pass `phase`: a resumed ticket skips the phases it passed.
+phase_due() { (($(phase_rank "$1") >= $(phase_rank "${2:-red}"))); }
+
+# Ends a ticket that did not get through a phase: a provider pause parks it, anything else
+# rejects it. Always returns non-zero (PAUSED_EXIT or 1).
+stop_ticket() {
+  local ticket=$1 branch=$2 status=$3 reason=$4
+  if ((status == PAUSED_EXIT)); then
+    pause_ticket "${ticket}" "${branch}"
+    return "${PAUSED_EXIT}"
+  fi
+  reject_slice "${ticket}" "${branch}" "${reason}"
+  clear_pause "${ticket}"
+  return 1
+}
+
+# Runs a phase command the ticket must pass; stops the ticket if it does not.
+# Usage: must_pass <ticket> <branch> <rejection reason> <command...>
+must_pass() {
+  local ticket=$1 branch=$2 reason=$3 status=0
+  shift 3
+  "$@" || status=$?
+  ((status != 0)) || return 0
+  stop_ticket "${ticket}" "${branch}" "${status}" "${reason}"
+}
+
+# Returns 0 when merged, 1 when rejected, PAUSED_EXIT when parked for a provider failure.
 process_ticket() {
-  local ticket=$1 slug branch
+  local ticket=$1 slug branch from status=0
   slug="$(ticket_slug "${ticket}")"
   branch="slice/${slug}"
   log "Ticket ${ticket}: $(ticket_title "${ticket}")"
 
+  # A ticket merges once: an archived copy means it already did.
+  [[ ! -e "${DONE_DIR}/$(basename "${ticket}")" ]] ||
+    die "${ticket} is already archived in ${DONE_DIR}/; refusing to process it again"
   git show-ref --quiet "refs/heads/${branch}" && die "branch ${branch} already exists"
-  git switch --quiet -c "${branch}" "${BASE_BRANCH}"
-  CURRENT_BRANCH="${branch}"
-  set_status "${ticket}" "in-progress"
+  PROVIDER_PAUSE="" PAUSE_PHASE="" PAUSE_ATTEMPT=1 PAUSE_ROUND=1 PAUSE_FEEDBACK=""
+  RESUME_PHASE="" RESUME_ATTEMPT=1 RESUME_ROUND=1 RESUME_FEEDBACK="" RESUME_BLOCKING=""
   CONTEXT_EXHAUSTIONS=0
+  if [[ -f "${STATE_DIR}/${slug}.pause" ]]; then
+    resume_ticket "${ticket}" "${branch}" "${STATE_DIR}/${slug}.pause"
+  else
+    git switch --quiet -c "${branch}" "${BASE_BRANCH}"
+    CURRENT_BRANCH="${branch}"
+    set_status "${ticket}" "in-progress"
+  fi
+  from="${RESUME_PHASE:-red}"
 
-  if ! run_phase_until red "${ticket}" verify_red; then
-    reject_slice "${ticket}" "${branch}" "could not produce a valid failing test"
-    return 1
+  if phase_due red "${from}"; then
+    must_pass "${ticket}" "${branch}" "could not produce a valid failing test" \
+      run_phase_until red "${ticket}" verify_red || return $?
   fi
-  if ! run_phase_until green "${ticket}" run_gate; then
-    reject_slice "${ticket}" "${branch}" "gate still failing after ${MAX_ATTEMPTS} attempts"
-    return 1
+  if phase_due green "${from}"; then
+    must_pass "${ticket}" "${branch}" "gate still failing after ${MAX_ATTEMPTS} attempts" \
+      run_phase_until green "${ticket}" run_gate || return $?
+    checkpoint "green"
   fi
-  checkpoint "green"
 
   # Refactoring is optional polish: if it cannot stay green it is dropped, not the slice.
-  if run_phase_until refactor "${ticket}" run_gate; then
-    checkpoint "refactor"
-  else
-    log "  refactor could not stay green; discarding it and keeping the green state"
-    discard_uncommitted
+  if phase_due refactor "${from}"; then
+    run_phase_until refactor "${ticket}" run_gate || status=$?
+    if ((status == 0)); then
+      checkpoint "refactor"
+    elif ((status == PAUSED_EXIT)); then
+      stop_ticket "${ticket}" "${branch}" "${status}" "" || return $?
+    else
+      log "  refactor could not stay green; discarding it and keeping the green state"
+      discard_uncommitted
+    fi
   fi
 
-  if ! run_phase_until docs "${ticket}" run_gate; then
-    reject_slice "${ticket}" "${branch}" "docs update broke the gate"
-    return 1
+  if phase_due docs "${from}"; then
+    must_pass "${ticket}" "${branch}" "docs update broke the gate" \
+      run_phase_until docs "${ticket}" run_gate || return $?
+    # Committed so the reviewers see the complete changeset, including new files, as one diff.
+    checkpoint "docs"
   fi
-  # Committed so the reviewers see the complete changeset, including new files, as one diff.
-  checkpoint "docs"
 
-  if ! review_slice "${ticket}"; then
-    reject_slice "${ticket}" "${branch}" "independent review did not approve the slice"
-    return 1
-  fi
+  must_pass "${ticket}" "${branch}" "independent review did not approve the slice" \
+    review_slice "${ticket}" || return $?
+  # VERIFY never runs a Claude session, so it can only pass or reject.
   if ! run_gate "${LOG_DIR}/${slug}.verify.gate.log"; then
     reject_slice "${ticket}" "${branch}" "the approved tree failed the final gate"
+    clear_pause "${ticket}"
     return 1
   fi
 
   finalize_slice "${ticket}" "${branch}"
+  clear_pause "${ticket}"
   CURRENT_BRANCH=""
 }
 
@@ -948,9 +1252,18 @@ main() {
   fi
   start_run
 
-  local ticket processed=0
+  local ticket processed=0 status
   while ticket="$(next_ticket)"; do
-    process_ticket "${ticket}" || die "stopping: a rejected ticket needs human attention"
+    status=0
+    process_ticket "${ticket}" || status=$?
+    if ((status == PAUSED_EXIT)); then
+      RUN_STATUS=paused
+      log "Paused: ${processed} slice(s) merged; $(ticket_slug "${ticket}") is parked" \
+        "(${PROVIDER_PAUSE}). Fix the cause or wait for the limit to reset, then run the same" \
+        "command again to resume it."
+      exit "${PAUSED_EXIT}"
+    fi
+    ((status == 0)) || die "stopping: a rejected ticket needs human attention"
     processed=$((processed + 1))
     [[ "${ONCE}" == true || -n "${ONLY_TICKET}" ]] && break
   done

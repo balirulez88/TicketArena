@@ -28,7 +28,9 @@ review and the final gate, the harness marks its ticket `done`, adds
 `**Completed:** <date> by slice/<NN>-<slug> (run <run-id>)` and moves it to `issues/done/`, all
 in the slice's own commit. Archived tickets are never picked again. They still satisfy
 `**Blocked by:**` references and remain the audit record, so never delete them. Rejected and
-interrupted tickets stay here.
+interrupted tickets stay here. A ticket paused by a provider failure (usage limit, outage) also
+stays here as `ready-for-agent`: its work is parked on `ralph/paused/<NN>-<slug>` and the next
+run resumes it.
 
 Size a ticket for one fresh agent session per phase: the harness never compacts or carries
 conversation between sessions. A ticket whose agents keep running out of context is rejected

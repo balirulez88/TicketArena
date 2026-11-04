@@ -25,7 +25,7 @@ new_host_repo() {
   cp "${SOURCE_ROOT}/Dockerfile" "${SOURCE_ROOT}/.dockerignore" "${SOURCE_ROOT}/ralph-loop.sh" \
     "${dir}/"
   cp "${SOURCE_ROOT}/infra/nats/nats.conf" "${dir}/infra/nats/"
-  cp "${SOURCE_ROOT}"/scripts/{sandbox.sh,sandbox-entrypoint.sh,sandbox-services.sh,ralph-review.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs} \
+  cp "${SOURCE_ROOT}"/scripts/{sandbox.sh,sandbox-entrypoint.sh,sandbox-services.sh,ralph-review.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs} \
     "${dir}/scripts/"
   cp "${SOURCE_ROOT}/skills/code-review/report.schema.json" "${dir}/skills/code-review/"
   # An empty, canonical technical debt register (preflight requires one).
@@ -70,7 +70,7 @@ EOF
   # As in the real repo; `cp` on Windows does not carry the executable bit.
   git -C "${dir}" update-index --chmod=+x ralph-loop.sh scripts/sandbox.sh
   git -C "${dir}" commit --quiet -m init
-  mkdir -p "${dir}/.ralph/logs"
+  mkdir -p "${dir}/.ralph/logs" "${dir}/.ralph/state"
   # On Linux the container user (uid 1000) must be able to write the mounted repo and logs.
   chmod -R a+rwX "${dir}"
   printf '%s\n' "${dir}"

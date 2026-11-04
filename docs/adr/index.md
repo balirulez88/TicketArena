@@ -20,3 +20,4 @@ number sequentially, and never rewrite an accepted decision; supersede it with a
 | [0011](0011-delivery-retry-dlq-recovery.md)   | Delivery guarantees, retries, DLQ and consumer recovery       | Accepted |
 | [0012](0012-identity-service-seam.md)         | Anonymous sessions behind an `IdentityService` seam           | Accepted |
 | [0013](0013-deployment-topology.md)           | Deployment topology and CI                                    | Accepted |
+| [0014](0014-sandbox-trust-boundary.md)        | Sandbox trust boundary: bundles in, validated bundles out     | Accepted |

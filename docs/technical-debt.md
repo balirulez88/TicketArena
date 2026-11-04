@@ -36,10 +36,10 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 3      | 35  | 38    |
+| OPEN          | 0        | 1    | 3      | 36  | 40    |
 | PLANNED       | 0        | 0    | 9      | 2   | 11    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
-| RESOLVED      | 0        | 0    | 5      | 2   | 7     |
+| RESOLVED      | 0        | 1    | 5      | 2   | 8     |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 ## Entries
@@ -1140,4 +1140,63 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `packages/db/prisma/schema.prisma#ledger-and-payment-schema-carry-columns-and-values-beyond-th`
 - **History:**
   - 2026-11-03: recorded: LOW scope_creep at `packages/db/prisma/schema.prisma:251`, spec axis (ticket 08 review-2 spec, run 20261103-160343)
+
+### TD-057: The sandboxed agent can write the host repository, its Git metadata and the batch state
+
+- **Status:** RESOLVED
+- **Severity:** HIGH
+- **Escalation:** none
+- **Source:** harness preflight before the batch of tickets 09-11 (2026-11-04), not a slice review
+- **Evidence:** `scripts/sandbox.sh:51` mounts the whole host repository read-write at `/host-repo`; the agent runs there with `--dangerously-skip-permissions` as the same user as the entrypoint (`scripts/sandbox-entrypoint.sh:38`)
+- **Components:** `scripts/sandbox.sh:51`, `scripts/sandbox-entrypoint.sh:38`, `scripts/ralph-batch.mjs:204`
+- **Problem:** Only convention keeps the agent in its clone. Through `/host-repo` it can write the host's `.git` (refs, hooks, config), the host working tree (including `scripts/ralph-ci.sh`, `scripts/sandbox.sh` and `ralph-loop.sh`, which the batch runs on the host between tickets) and `.ralph/batch` and `.ralph/state`. The batch accepts a merge on two marks that the agent can write itself: a `Merge slice/<slug>:` commit and an archived `done` ticket on `main`.
+- **Impact:** A misbehaving agent could forge a merge that skips review and have the batch push it to GitHub. It could also run code on the host, where `gh` credentials are available, through a hook or `core.fsmonitor`, fake a CI pass by rewriting `ralph-ci.sh`, or forge batch or resume checkpoints. Autonomous production batches are blocked until this is fixed. An audit on 2026-11-04 found no evidence that any of this happened: the host `.git/config` and hooks are clean, there are no symlinks under `.ralph`, and all 15 container pushes to `main` have Ralph's merge or block shape.
+- **Justification:** Found before the batch started, and no batch ran. Fixed by ticket 47, which must merge before the next production batch (user decision, 2026-11-04).
+- **Remediation:** No host repository mount. Input goes in as a read-only Git bundle and output comes back as a bundle in a per-run directory. A trusted host step validates the bundle and accepts it: merge shape, ticket and dependencies, protected paths, no Git attributes, submodules or symlinks, the gate re-run in an agent-free sandbox, and strict pause validation. Batch and resume state stay host-only. Regression tests cover all four attack paths, including through real Docker.
+- **Target:** ticket 47 (`issues/done/47-sandbox-trust-boundary.md`); must merge before the next production batch (tickets 09-11)
+- **Resolution:** The container mounts no part of the host repository: a read-only `/ralph-in` (Git bundle plus a copy of the resume state) and a per-run `/ralph-out`, with `--cap-drop ALL` and `no-new-privileges` (ADR 0014). `scripts/ralph-accept.mjs` imports the result bundle with the host's own Git into a quarantine namespace and moves `main` only for Ralph-shaped merges and blocked-status commits of an eligible ticket. It refuses protected harness, CI and gate paths under any spelling a case-insensitive host resolves, install scripts, host-only paths (`.ralph/`, `.env*`, `node_modules/`, anything the host ignores), Git attributes, submodules and symlinks, re-runs the gate in an agent-free sandbox, adopts only canonical pauses, and copies logs as redacted plain files. The batch keeps `.ralph/batch` host-only and stops finally on a refused result (`untrusted-result`).
+- **Verification:** `scripts/ralph-accept.test.mjs` (attack paths 1-4, rejected and interrupted runs, run output types), `scripts/ralph-batch.test.mjs` (untrusted-result and checkout-changed stops), `scripts/sandbox.test.sh` (real Docker: boundary probe, merge, rejection, pause/resume, forged merge and forged pause refused)
+- **Fingerprints:** `scripts/sandbox.sh#the-sandboxed-agent-can-write-the-host-repository-its-git-me`
+- **History:**
+  - 2026-11-04: recorded: HIGH security finding at `scripts/sandbox.sh:51`, harness preflight before the batch of tickets 09-11
+  - 2026-11-04: in progress in ticket 47 (`issues/47-sandbox-trust-boundary.md`); autonomous production batches blocked until it merges (user decision, 2026-11-04)
+  - 2026-11-04: resolved in ticket 47: no host repository mount; the host validates and accepts every run result itself; all four attack paths refused in unit tests and through real Docker
+
+### TD-058: In-container review verdicts share a user with the agent
+
+- **Status:** OPEN
+- **Severity:** HIGH
+- **Escalation:** none
+- **Source:** ticket 47 (`47-sandbox-trust-boundary`), remaining limitation of the trust boundary (2026-11-04)
+- **Evidence:** `docs/adr/0014-sandbox-trust-boundary.md` (Consequences, remaining limitations)
+- **Components:** `ralph-loop.sh:579`, `scripts/sandbox-entrypoint.sh:66`
+- **Problem:** Inside the container, the agent runs as the same Unix user as Ralph's own gates and its two LLM reviewers. A deliberately malicious agent can leave a background process behind its session that rewrites a review report or decision file before the in-container review gate reads it. The host independently re-checks everything deterministic: the merge shape, protected paths, the full gate in an agent-free sandbox, and GitHub CI after the push. The approval of the Standards and Spec reviews, however, is not re-derived on the host.
+- **Impact:** An adversarial agent could merge code that passes the tests and CI but was never approved by the reviewers. That includes code written to subvert the gate it runs in: narrowing what a package's own `vitest.config` or `tsconfig.json` covers (slices may change both), or tampering with tooling and later gate steps from its tests or its dependencies, which the agent-free re-gate and CI both execute. Merged code then runs on developer machines (the tests, `infra:up`), in GitHub CI and in the re-gate, which has network access. An accidental, non-malicious agent cannot cause this. The host repository, its Git metadata, the harness and the batch state stay out of reach during the run either way (TD-057).
+- **Justification:** Recorded so it is not silently accepted. Whether it blocks autonomous production batches is the user's decision (raised 2026-11-04). Closing it means running the agent and everything that executes the slice's code under a separate user, or re-running the reviews on the host. Either is a design change beyond ticket 47.
+- **Remediation:** Run the agent, and every command that executes the slice's code, as a separate unprivileged user, with no write access to the harness's review and decision files and with its processes killed after each session. Alternatively, have the host run a final, independent review round in an agent-free sandbox before it accepts a merge.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `ralph-loop.sh#in-container-review-verdicts-share-a-user-with-the-agent`
+- **History:**
+  - 2026-11-04: recorded: HIGH security limitation remaining after ticket 47 (trust boundary), raised for a user decision
+
+### TD-059: Rejected work is imported as ordinary branches
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 47 (`47-sandbox-trust-boundary`), Spec review round 4 (2026-11-04)
+- **Evidence:** `scripts/ralph-accept.mjs` (`createBranch` for `rejected/<slug>-<run-id>`), `docs/workflow/index.md` (trust boundary, blocked-status commit)
+- **Components:** `scripts/ralph-accept.mjs:926`, `scripts/ralph-batch.mjs:222`
+- **Problem:** A rejected run's work is imported as `refs/heads/rejected/<slug>-<run-id>`. Its tree passed no path rule. Only a documentation note says to inspect it with `git log -p` or `git show` rather than check it out, and a broad push (`git push --all`) would publish it, so its own `.github/workflows` would run on GitHub.
+- **Impact:** None while operators follow the note and push only `main`, as the batch does. A careless checkout writes untrusted files into the host working tree; a broad push runs untrusted workflows with the repository's secrets.
+- **Justification:** Deferred from ticket 47: the batch (`rejectedRefs`) and `ralph-loop.sh` outside the sandbox both find rejections under `refs/heads/rejected/`, so moving them changes the batch's rejection detection and the non-sandbox loop together. The batch itself never checks out or pushes these branches.
+- **Remediation:** Import rejected work under `refs/ralph/rejected/<slug>-<run-id>` (outside `refs/heads`) and have the batch detect rejections there; keep `refs/heads/rejected/` only for runs outside the sandbox.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-accept.mjs#rejected-work-is-imported-as-ordinary-branches`
+- **History:**
+  - 2026-11-04: recorded: LOW finding deferred from ticket 47's Spec review (round 4)
 <!-- ralph-debt:end -->

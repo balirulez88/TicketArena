@@ -182,7 +182,8 @@ failure the provider's) would grant free attempts. So:
 - **Usage limit, refused credentials, or a provider still down after the retries**: the run
   **pauses** (exit 75, run status `paused`). Nothing is rejected, blocked or counted. The work in
   progress is committed on `ralph/paused/<NN>-<slug>` directly on top of the last gated
-  checkpoint (pushed to the host from the sandbox), and `.ralph/state/<slug>.pause` records the
+  checkpoint (in the sandbox it leaves in the run's bundle, and the host adopts it only after
+  validating it: [trust boundary](#trust-boundary-adr-0014)), and `.ralph/state/<slug>.pause` records the
   phase, attempt and review round, next to the gate feedback and blocking findings that phase was
   given. An interrupted review round never reaches the gate, so it can never approve. Refused
   credentials pause too, deliberately: like a usage limit they say nothing about the ticket and
@@ -218,24 +219,28 @@ sandbox has no GitHub credentials. `--once`, `--ticket` and a bare run behave as
 3. `main` is pushed to GitHub and the batch waits for CI on the merge. It stops at N tickets
    merged and verified.
 
-State lives in `.ralph/batch/state.json`, written atomically after every step. The **repository
+State lives in `.ralph/batch/state.json`, written atomically after every step. It is host-only:
+the container never sees it ([trust boundary](#trust-boundary-adr-0014)). The **repository
 is the source of truth** for merges: a ticket is merged only if `main` has both its archived file
-and its `Merge slice/<slug>:` commit. A rerun therefore resumes at the right checkpoint (run, push,
+and its `Merge slice/<slug>:` commit, and only `scripts/ralph-accept.mjs` puts those there after
+validating the run. A rerun therefore resumes at the right checkpoint (run, push,
 CI) and never runs a merged ticket twice. The limit is stored with the batch; a conflicting
-`--max-tickets` is refused. A run that leaves a new `rejected/<slug>-*` branch is a rejection
-even when its blocked status only reached a `ralph/blocked-*` side branch (the host refused the
-base branch); merge that side branch before `--new`. `.ralph/batch/lock` (an atomic `mkdir`)
+`--max-tickets` is refused. Every step first rechecks that `main` is checked out and clean
+(`checkout-changed` otherwise), so what is pushed is exactly what was accepted. A run that leaves
+a new `rejected/<slug>-*` branch is a rejection. A run whose output the host refused (sandbox
+exit 3) ends the batch with `untrusted-result`; it is never retried automatically.
+`.ralph/batch/lock` (an atomic `mkdir`)
 admits one batch at a time, and `pnpm sandbox` refuses (best effort) to run beside one. A lock left by a killed batch is never taken over
 automatically: the message says so, and a human removes it after checking that no batch or
 container is still running.
 
-| Stop                                                                                    | Meaning                                         | Exit |
-| --------------------------------------------------------------------------------------- | ----------------------------------------------- | ---- |
-| `batch-limit`, `no-eligible-ticket`                                                     | finished                                        | 0    |
-| `unresolved-dependency`                                                                 | finished; ready tickets wait on unfinished ones | 2    |
-| `paused`                                                                                | provider failure; rerun to resume               | 75   |
-| `ambiguous-merge`, `runner-failed`, `push-failed`, `ci-unverified`, `base-not-verified` | blocking until a rerun can verify it            | 1    |
-| `rejected`, `ci-failed`                                                                 | final; resolve it, then `--new` starts a batch  | 1    |
+| Stop                                                                                                        | Meaning                                         | Exit |
+| ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ---- |
+| `batch-limit`, `no-eligible-ticket`                                                                         | finished                                        | 0    |
+| `unresolved-dependency`                                                                                     | finished; ready tickets wait on unfinished ones | 2    |
+| `paused`                                                                                                    | provider failure; rerun to resume               | 75   |
+| `ambiguous-merge`, `runner-failed`, `push-failed`, `ci-unverified`, `base-not-verified`, `checkout-changed` | blocking until a rerun can verify it            | 1    |
+| `rejected`, `ci-failed`, `untrusted-result`                                                                 | final; resolve it, then `--new` starts a batch  | 1    |
 
 `node scripts/ralph-batch.mjs --status` prints the current batch. Nothing is ever deployed.
 Scenarios: `scripts/ralph-batch.test.mjs` (limit, CI gating, rejection on the base or a side
@@ -349,21 +354,107 @@ and on exit.
 
 ## Sandbox
 
-`Dockerfile` defines a Node 24 + pnpm + git + Claude Code image. `scripts/sandbox.sh` builds it
-and runs the loop against a **clone** of the repo inside the container. The agent therefore
-never touches the host working tree, and host-native `node_modules` (e.g. Windows binaries)
-never mix with Linux ones. Green results are pushed back to the host repo's branches.
-The image also contains Postgres 17, Redis 7 and nats-server (checksum-verified), started by the
-entrypoint before the loop, so every slice is judged on real infrastructure.
-**Failed runs keep their evidence on the host.** The host's `.ralph/logs/` is mounted into the
-container, so logs land there as they are written, even if the run crashes. A rejection pushes the
-quarantine branch `rejected/<NN>-<slug>-<run-id>` and the base branch with the ticket marked
-`blocked`. The base branch only fast-forwards and the host repo refuses the push while it has
-local changes (`receive.denyCurrentBranch=updateInstead`); the blocked status then lands on
-`ralph/blocked-<run-id>` instead, to merge by hand. `pnpm test:sandbox` (Docker; also a CI job)
-proves both cases through the real sandbox. On Linux hosts the container user (uid 1000) must be
-able to write the repository and `.ralph/logs`.
-`pnpm sandbox --verify` runs just the gate inside the sandbox (no agent, no API key): use it after
-changing the image. Set `RALPH_BASE_BRANCH` to verify a branch other than `main`.
-The agent runs with permission prompts disabled **only** inside the container
-(`RALPH_SANDBOX=1`); the script refuses to do so elsewhere unless explicitly overridden.
+`Dockerfile` defines a Node 24 + pnpm + git + Claude Code image. It also contains Postgres 17,
+Redis 7 and nats-server (checksum-verified), which the entrypoint starts before the loop, so every
+slice is judged on real infrastructure. Host-native `node_modules` (e.g. Windows binaries) never
+mix with Linux ones.
+
+### Trust boundary ([ADR 0014](../adr/0014-sandbox-trust-boundary.md))
+
+The agent runs with permission prompts disabled, so the container is treated as hostile.
+`scripts/sandbox.sh` requires a clean `main` checkout and builds the image. Each run gets
+`.ralph/sandbox/<run>/` with:
+
+- `in/` (mounted **read-only** at `/ralph-in`): `repo.bundle` (`main` plus every
+  `ralph/paused/*` branch) and `state/`, a copy of the host's resume state;
+- `out/` (`/ralph-out`): logs as they are written, then `state/` and `result.bundle` at exit.
+
+Nothing else is mounted. That excludes the host repository, its `.git`, `.ralph/batch` and
+`.ralph/state`, the Docker socket, and GitHub credentials. The container runs with
+`--cap-drop ALL` and `no-new-privileges`. Inside it, the entrypoint clones the bundle into a
+private staging bare repository and a workspace, and Ralph pushes to that staging repository
+(`RALPH_PUSH_REMOTE=origin`). At exit, the staging repository's branches are bundled into
+`result.bundle`, whatever the outcome.
+
+`scripts/ralph-accept.mjs` then decides on the host. It is the only code that changes the host
+repository from a run, and everything in `out/` is data to it:
+
+- The bundle is fetched by the host's own Git into `refs/ralph/incoming/<run>/`. Fetching from
+  a bundle does not apply `fetch.fsckObjects`, so every object the bundle adds is first checked
+  with `index-pack --strict --fsck-objects` in a scratch repository that borrows the host's
+  objects. A malformed object is refused before it reaches the host's object store, where it
+  would outlive the refusal and fail every later check. No Git command ever runs inside a
+  repository the container wrote, so no hook or config of the container's can execute on the
+  host.
+- `main` may gain only Ralph's own shapes, checked against the base the run started from:
+  - a **slice merge**: one squashed commit on the base, under `Merge slice/<slug>: <title>` with
+    an identical tree, Ralph's commit subject, and a ticket that was `ready-for-agent` with all
+    blockers `done` (and is the `--ticket` the run was given). The only issue-file change is the
+    archive to `issues/done/`: `done`, `Completed`, ticked checkboxes, nothing else.
+  - a **blocked-status commit** that changes only that ticket's status line. Its quarantine
+    branch `rejected/<slug>-<run-id>` is imported as a new branch. Its tree is unvalidated:
+    inspect it with `git log -p` or `git show`, never by checking it out.
+- **Protected paths** may not change through a run: `ralph-loop.sh`, `scripts/`, `Dockerfile`,
+  `.dockerignore`, `.github/`, `skills/`, `infra/`, `docs/workflow/`, `tsconfig.base.json`,
+  `turbo.json`, `.nvmrc`; and in any directory `.gitignore` (the host-only rule reads it),
+  `biome.json(c)`, `turbo.json(c)`, `.npmrc`, `pnpm-workspace.yaml` (its `scriptShell` changes
+  what a package's scripts run), `.pnpmfile.*`, `package.yaml`, `package.json5`, `binding.gyp`,
+  Docker Compose files (`compose*.y(a)ml`, `docker-compose*.y(a)ml`), `CLAUDE.md`,
+  `CLAUDE.local.md`, `.mcp.json`, and anything under `.claude/`, `.vscode/` or `.idea/`. In the
+  root `package.json` only the dependency maps may change. In any other `package.json`, the gate
+  scripts (`lint`, `typecheck`, `test`, `check`, `check:debt`, `test:harness`, and their
+  `pre`/`post` scripts) are fixed and the package may not be deleted; its dependencies and other
+  scripts may change, and new packages may be added. No package, new or old, may gain an install script (`preinstall`, `install`,
+  `postinstall`, `prepare` and the like), and a manifest that is not a JSON object is refused.
+- **Host-only paths** may not be written: `.ralph/`, `node_modules/`, `.pnpm-store/`, `.turbo/`,
+  `.env` files (examples aside), and anything the host's own ignore rules match. A fast-forward
+  would overwrite such ignored files without a trace, planting state, credentials or
+  executables the host then trusts. Neither may
+  `.gitattributes` and `.gitmodules` change anywhere, and no symlinks or submodules may appear.
+  The scripts the batch runs on the host, and the gate that judges the next slice, therefore
+  change only through a human-reviewed commit.
+- Every rule compares **folded** path names: Unicode NFC, lower case, trailing dots and spaces
+  dropped per component. That is how Windows and macOS resolve them, so `Scripts/x.sh` or
+  `scripts./x.sh` is `scripts/x.sh`; ignorable code points are dropped and case is fully folded
+  (`ſ` is `s`), as HFS+ and APFS do. Names Windows would resolve elsewhere (8.3 short names such
+  as `SCRIPT~1`, stream syntax, device names such as `aux.ts`, reserved characters) and names with
+  control characters are refused, as is a tree in which two paths fold to the same name.
+- The **full gate runs again** on the merged tree before `main` moves, in a fresh sandbox with no
+  agent and no key (`sandbox.sh --verify <sha>`). The register check runs first, before
+  `pnpm install` or any of the slice's code could rewrite it in that checkout.
+- A **pause** is adopted only if it is exactly what `pause_ticket` writes. It must belong to the
+  run's ticket and to parked work that is in the bundle on the base, with `paused^ = gated` and
+  attempt and round within limits, and the parked work must obey the path rules. The host
+  rewrites it in canonical form into `.ralph/state/`. Resume state the host handed in must come
+  back unchanged.
+- Logs are copied into `.ralph/logs/<run-id>/` as plain files (links and special files dropped,
+  files over 64 MiB and existing files kept), redacted with the host's secrets, and expired by
+  the host's retention. The container's raw copy in the run directory is then deleted.
+
+The host moves `main` by fast-forward only, after rechecking that the checkout is still clean
+and on the same base. Exit codes: `0` accepted, `75` paused, `1` rejected or failed, `3`
+**refused as untrusted**. On a refusal, the host is unchanged, and the result stays in
+`refs/ralph/incoming/<run>/` and `.ralph/sandbox/<run>/` (with `verdict.json`) for a human.
+Delete both once inspected.
+
+Scenarios: `scripts/ralph-accept.test.mjs` covers the four attack paths (forged merges and
+archives; Git config, hooks and links; harness, CI and gate definitions; forged pause state) as
+well as genuine merges, rejections, pause and resume, and interrupted runs.
+`pnpm test:sandbox` (Docker; also a CI job) proves the boundary through the real sandbox. Inside
+the container, it checks that the host repository is absent, the input is read-only, there is no
+Docker socket, and only the two run directories are mounted. It also runs a merge (re-gated by
+the host), a rejection, a usage-limit pause and its resume, a malicious agent's forged merge and
+forged resume state (refused, with the host's refs, Git config, hooks and scripts byte-for-byte
+unchanged), and a dirty host checkout (refused before any container starts).
+
+**Remaining limitation** (TD-058): inside the container, the agent runs as the same user as
+Ralph's own gates and reviewers. A deliberately malicious agent could therefore tamper with an
+in-container verdict, for example by rewriting a review report before the review gate reads it.
+The host independently re-checks everything deterministic: shape, paths, the gate, and GitHub CI
+after the push. The approval of the two LLM reviews, however, is still produced inside the
+container.
+
+`pnpm sandbox --verify [commit]` runs just the gate inside the sandbox (no agent, no API key):
+use it after changing the image. The agent runs with permission prompts disabled **only** inside
+the container (`RALPH_SANDBOX=1`); the script refuses to do so elsewhere unless explicitly
+overridden.

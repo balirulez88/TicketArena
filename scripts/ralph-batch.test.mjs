@@ -12,6 +12,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -73,6 +74,10 @@ switch (action) {
     process.exit(1);
   }
   case "merge-crash": merge(); process.exit(3);
+  // The host refused the run's output (ralph-accept.mjs): nothing changed on the host.
+  case "untrusted": process.exit(3);
+  // Merged, then someone edits the host checkout before the batch pushes it.
+  case "merge-dirty": merge(); writeFileSync("stray.txt", "x\\n"); process.exit(0);
   case "merge-kill": merge(); process.kill(process.ppid, "SIGKILL"); process.exit(0);
   default: merge();
 }
@@ -262,6 +267,39 @@ describe("bounded batch", () => {
     assert.match(out, /STOPPED: rejected: ticket 01 was rejected/);
     assert.deepEqual(runnerCalls(fx), ["01"]);
     assert.equal(state(fx).tickets[0].stage, "rejected");
+  });
+
+  it("stops finally when the host refuses a run's output as untrusted, and pushes nothing", () => {
+    const fx = fixture();
+    const before = onGithub(fx);
+    const { code, out } = batch(fx, ["--max-tickets", "3"], { plan: { "01": ["untrusted"] } });
+    assert.equal(code, 1, out);
+    assert.match(out, /STOPPED: untrusted-result: the host refused ticket 01's sandbox output/);
+    assert.deepEqual(runnerCalls(fx), ["01"]);
+    assert.equal(state(fx).tickets[0].stage, "untrusted");
+    assert.equal(onGithub(fx), before);
+    // Never retried silently: a human looks at the refused output first.
+    const again = batch(fx, ["--max-tickets", "3"]);
+    assert.equal(again.code, 1);
+    assert.match(again.out, /stopped on untrusted-result; resolve that/);
+    assert.deepEqual(runnerCalls(fx), ["01"]);
+  });
+
+  it("pushes nothing when the checkout changed after a merge, and resumes once restored", () => {
+    const fx = fixture();
+    const before = onGithub(fx);
+    const first = batch(fx, ["--max-tickets", "1"], { plan: { "01": ["merge-dirty"] } });
+    assert.equal(first.code, 1, first.out);
+    assert.match(
+      first.out,
+      /STOPPED \(resumable\): checkout-changed: the working tree is not clean/,
+    );
+    assert.equal(onGithub(fx), before);
+    rmSync(join(fx.host, "stray.txt"));
+    const again = batch(fx, ["--max-tickets", "1"]);
+    assert.equal(again.code, 0, again.out);
+    assert.equal(onGithub(fx), git(fx.host, "rev-parse", "main"));
+    assert.deepEqual(runnerCalls(fx), ["01"]);
   });
 
   it("a rejection whose blocked status reached only a side branch is still a rejection", () => {

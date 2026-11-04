@@ -36,8 +36,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 7      | 35  | 42    |
-| PLANNED       | 0        | 0    | 5      | 2   | 7     |
+| OPEN          | 0        | 0    | 3      | 35  | 38    |
+| PLANNED       | 0        | 0    | 9      | 2   | 11    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 0    | 5      | 2   | 7     |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
@@ -640,7 +640,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-031: Relay loop swallows every tick error without any signal
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** MEDIUM
 - **Escalation:** none
 - **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
@@ -648,18 +648,19 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `packages/messaging/src/outbox-relay.ts:103`
 - **Problem:** `catch {}` in the background loop drops database and broker outage errors with no log or counter. `lastError` is recorded only for publish failures inside a claimed row, not when claim, update or commit fails.
 - **Impact:** If the database or NATS is down, or the claim query is broken, the worker keeps looping every 250 ms while `/health` reports ok. Pending events pile up and nobody can see why.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Planned for ticket 45; nothing is deployed, so no outage has gone unseen yet.
 - **Remediation:** Inject a logger or onError callback and report each failed tick (rate-limited). Consider a health signal for consecutive failures.
-- **Target:** none
+- **Target:** ticket 45 (`issues/45-worker-loop-error-reporting.md`); must merge before ticket 24, which is blocked by it
 - **Resolution:** none
 - **Verification:** none
 - **Fingerprints:** `packages/messaging/src/outbox-relay.ts#relay-loop-swallows-every-tick-error-without-any-signal`
 - **History:**
   - 2026-11-03: recorded: MEDIUM defect at `packages/messaging/src/outbox-relay.ts:103`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
+  - 2026-11-04: planned for ticket 45 (`issues/45-worker-loop-error-reporting.md`), before ticket 24 (remediation planning, 2026-11-04)
 
 ### TD-032: Handler errors are nak'd with no trace, and the poll loop swallows all errors
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** MEDIUM
 - **Escalation:** none
 - **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
@@ -667,15 +668,16 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `packages/messaging/src/consumer-runner.ts:74`
 - **Problem:** When the handler or transaction throws, the runner calls `nak` and discards the error. The loop's `catch {}` at line 95 also drops fetch errors. MaxDeliver is -1, so a deterministic handler failure is redelivered forever, every 2 minutes after the 4th attempt, with the cause never recorded.
 - **Impact:** A poison message loops indefinitely and is invisible. The docs admit the DLQ gate is not built, but there is not even a log of the failure.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Planned for ticket 45 (and ticket 25 for the DLQ part). Handler failures are logged with the error and delivery count since ticket 07, but no test proves it yet and the poll loop still swallows fetch errors, so the entry stays open until ticket 45 verifies it.
 - **Remediation:** Pass the error and delivery count to an injected error reporter before nak. Track the open DLQ gate as technical debt if it is deferred.
-- **Target:** none
+- **Target:** ticket 45 (`issues/45-worker-loop-error-reporting.md`) for the swallowed poll errors and the failure logging; the endless redelivery of a poison message is ticket 25's DLQ gate. Ticket 45 must merge before ticket 24, which is blocked by it
 - **Resolution:** none
 - **Verification:** none
 - **Fingerprints:** `packages/messaging/src/consumer-runner.ts#handler-errors-are-nak-d-with-no-trace-and-the-poll-loop-swa`; `packages/booking/src/payment-saga.ts#unhandled-saga-cases-throw-into-an-invisible-unbounded-redel`
 - **History:**
   - 2026-11-03: recorded: MEDIUM defect at `packages/messaging/src/consumer-runner.ts:74`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
   - 2026-11-03: seen again: MEDIUM regression_risk at `packages/booking/src/payment-saga.ts:88`, standards axis (ticket 08 review-2 standards, run 20261103-160343)
+  - 2026-11-04: planned for ticket 45 (`issues/45-worker-loop-error-reporting.md`), before ticket 24; poison-message loop left to ticket 25; handler-failure logging observed in code since ticket 07 but not yet verified by a test (remediation planning, 2026-11-04)
 
 ### TD-033: Retention is documented but no job exists
 
@@ -698,7 +700,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-034: Startup leaks the running relay and consumers if the HTTP server fails to listen
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** MEDIUM
 - **Escalation:** none
 - **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
@@ -706,14 +708,15 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `apps/worker/src/worker.ts:53`
 - **Problem:** The runners and relay are started (lines 40-43) before `server.listen`. A listen error (port in use) is emitted as an unhandled 'error' event and rejects nothing, so there is no cleanup path. `startWorker` also never stops the relay or runners if it throws after they start.
 - **Impact:** In embedded or test use the loops keep running against closed resources after a failed start. In main.ts it is an uncaught exception with no graceful drain of in-flight claims.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Planned for ticket 46 before deployment; the worker is not deployed, so no failed start has leaked loops in production.
 - **Remediation:** Bind the server first and reject on its 'error' event. Start the relay and runners last, or stop them in a catch.
-- **Target:** none
+- **Target:** ticket 46 (`issues/46-worker-startup-cleanup.md`); must merge before ticket 38 (deployment), which is blocked by it
 - **Resolution:** none
 - **Verification:** none
 - **Fingerprints:** `apps/worker/src/worker.ts#startup-leaks-the-running-relay-and-consumers-if-the-http-se`
 - **History:**
   - 2026-11-03: recorded: MEDIUM defect at `apps/worker/src/worker.ts:53`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
+  - 2026-11-04: planned for ticket 46 (`issues/46-worker-startup-cleanup.md`), before ticket 38 (remediation planning, 2026-11-04)
 
 ### TD-035: Shutdown has no error handling or timeout
 
@@ -1025,7 +1028,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-051: Provider latency is awaited inside the runner's DB transaction
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** MEDIUM
 - **Escalation:** none
 - **Source:** ticket 08 (`08-mock-payment-confirms-order`)
@@ -1033,14 +1036,15 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `apps/worker/src/payment/payment-handler.ts:53`
 - **Problem:** The handler runs inside the runner's interactive Prisma transaction, which already holds the processed_messages insert, and awaits clock.sleep(waitMs) there. Prisma's default interactive-transaction timeout is 5 s, and the runner sets no timeout.
 - **Impact:** A configured latencyMs above a few seconds makes the transaction time out, so the message is retried forever. Even short waits hold a pooled connection while idle, which limits throughput. The default (no latency) and the test sleep stub hide this.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Planned for ticket 44, ahead of further payment work; the default latency is zero, so nothing affected runs yet.
 - **Remediation:** Do the latency wait before the transaction (for example a handler pre-step), or document and enforce a latency bound below the transaction timeout. Add a test with a real sleep close to the timeout.
-- **Target:** none
+- **Target:** ticket 44 (`issues/44-payment-latency-outside-the-transaction.md`); must merge before tickets 17 and 27, which are blocked by it, so no further payment or saga work builds on the transaction behaviour
 - **Resolution:** none
 - **Verification:** none
 - **Fingerprints:** `apps/worker/src/payment/payment-handler.ts#provider-latency-is-awaited-inside-the-runner-s-db-transacti`
 - **History:**
   - 2026-11-03: recorded: MEDIUM defect at `apps/worker/src/payment/payment-handler.ts:53`, standards axis (ticket 08 review-2 standards, run 20261103-160343)
+  - 2026-11-04: planned for ticket 44 (`issues/44-payment-latency-outside-the-transaction.md`), before tickets 17 and 27 (remediation planning, 2026-11-04)
 
 ### TD-052: bookingStore and paymentStore are line-for-line copies; service names are listed in two places
 

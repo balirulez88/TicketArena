@@ -2,7 +2,7 @@
 
 **What to build:** every payment event is handled by one explicit, pure decision over (order state, ledger, event), so duplicates, invalid events and not-yet-applicable events are told apart, and zero-row updates are never mistaken for success. Spec: Payment saga (matrix); ADR 0006, ADR 0007.
 
-**Blocked by:** 08
+**Blocked by:** 08, 44 (payment latency outside the runner transaction)
 
 **Status:** ready-for-agent
 

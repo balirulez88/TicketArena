@@ -2,7 +2,7 @@
 
 **What to build:** a consumer that hits a transient error retries the message later with increasing delays, never immediately and never not at all. Spec: Messaging (consumer runner); ADR 0011.
 
-**Blocked by:** 06
+**Blocked by:** 06, 45 (worker loop error reporting)
 
 **Status:** ready-for-agent
 

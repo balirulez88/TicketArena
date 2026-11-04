@@ -9,7 +9,13 @@
 #     pause/resume reach the host as Ralph left them;
 #   - a malicious agent's forged merge and forged resume state are refused, and the host
 #     repository, its Git metadata and its scripts stay exactly as they were;
-#   - a dirty host checkout is refused before any container starts.
+#   - a dirty host checkout is refused before any container starts;
+#   - (TD-058) a slice cannot link a package whose bin shadows a command the gate trusts;
+#   - (TD-058) a malicious agent's tests cannot tamper with the host's hardened re-gate: from inside
+#     its offline, read-only test container they cannot rewrite another test or the runner, reach
+#     the network or reach the host; and a slice the agent's own reviewers approved but the host's
+#     isolated reviewers do not is not merged, while the reviewer containers see exactly the
+#     candidate, read-only, with no output mount.
 # Needs Docker. Not part of `pnpm run check`, which also runs inside the sandbox (no Docker).
 set -Eeuo pipefail
 
@@ -30,7 +36,7 @@ new_host_repo() {
   cp "${SOURCE_ROOT}/Dockerfile" "${SOURCE_ROOT}/.dockerignore" "${SOURCE_ROOT}/ralph-loop.sh" \
     "${dir}/"
   cp "${SOURCE_ROOT}/infra/nats/nats.conf" "${dir}/infra/nats/"
-  cp "${SOURCE_ROOT}"/scripts/{sandbox.sh,sandbox-entrypoint.sh,sandbox-services.sh,ralph-review.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs,ralph-accept.mjs} \
+  cp "${SOURCE_ROOT}"/scripts/{sandbox.sh,sandbox-entrypoint.sh,sandbox-services.sh,ralph-review.mjs,ralph-review-prompt.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs,ralph-accept.mjs,ralph-verify.mjs,ralph-host-review.mjs,ralph-bins.mjs,ralph-toolchain.mjs} \
     "${dir}/scripts/"
   # Stands in for the CI check the batch runs on the host: a forgery target.
   printf '#!/usr/bin/env bash\nexit 2\n' >"${dir}/scripts/ralph-ci.sh"
@@ -49,8 +55,28 @@ new_host_repo() {
     >"${dir}/package.json"
   printf 'packages:\n  - "packages/*"\n' >"${dir}/pnpm-workspace.yaml"
   mkdir -p "${dir}/packages/demo/src"
-  printf '{"name":"demo","private":true,"scripts":{"test":"node ../../stub/vitest.mjs run"}}\n' \
+  # The package's own tests: every src/*.test.mjs, in name order, each its own process. The runner
+  # stands in for Vitest's main process, so it lives in the protected scripts/.
+  printf '{"name":"demo","private":true,"scripts":{"test":"node ../../scripts/fixture-tests.mjs"}}\n' \
     >"${dir}/packages/demo/package.json"
+  cat >"${dir}/scripts/fixture-tests.mjs" <<'EOF'
+import { spawnSync } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
+const files = existsSync("src") ? readdirSync("src").filter((f) => f.endsWith(".test.mjs")).sort() : [];
+let failed = 0;
+for (const file of files) {
+  const status = spawnSync(process.execPath, [`src/${file}`], { stdio: "inherit" }).status;
+  console.log(`fixture-tests: ${file} ${status === 0 ? "passed" : "FAILED"}`);
+  failed += status === 0 ? 0 : 1;
+}
+process.exit(failed === 0 ? 0 : 1);
+EOF
+  # A test the base already has: it fails once the slice breaks src/value.txt.
+  cat >"${dir}/packages/demo/src/guard.test.mjs" <<'EOF'
+import { existsSync, readFileSync } from "node:fs";
+const value = existsSync("src/value.txt") ? readFileSync("src/value.txt", "utf8").trim() : "ok";
+process.exit(value === "ok" ? 0 : 1);
+EOF
   printf "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\nimporters:\n\n  .: {}\n\n  packages/demo: {}\n" \
     >"${dir}/pnpm-lock.yaml"
   printf 'import { existsSync } from "node:fs";\nprocess.exit(existsSync("feature.txt") ? 0 : 1);\n' \
@@ -114,6 +140,60 @@ case "${RALPH_PHASE}" in
       forge-pause)
         printf 'ticket=02\nphase=verify\n' >"${RALPH_STATE_DIR}/02-other.pause"
         ;;
+      evil-bin)
+        # Breaks what the base's guard test checks and adds a workspace package whose bin
+        # directory holds, nested, files named `node` and `prisma`. pnpm links both into
+        # packages/demo's .bin, where its shims and scripts would run them in place of node and
+        # of a toolchain command no toolchain package links there, and they pass everything.
+        # The host's verifier must refuse them before they run.
+        echo broken >packages/demo/src/value.txt
+        mkdir -p packages/evil/bin/x packages/evil/bin/y
+        printf '{"name":"evil","version":"0.0.0","directories":{"bin":"bin"}}\n' >packages/evil/package.json
+        printf '#!/bin/sh\necho evil-bin ran\nexit 0\n' >packages/evil/bin/x/node
+        cp packages/evil/bin/x/node packages/evil/bin/y/prisma
+        chmod +x packages/evil/bin/x/node packages/evil/bin/y/prisma
+        node -e '
+          const fs = require("node:fs");
+          const path = "packages/demo/package.json";
+          const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+          pkg.dependencies = { evil: "workspace:*" };
+          fs.writeFileSync(path, JSON.stringify(pkg) + "\n");
+          const lock = fs.readFileSync("pnpm-lock.yaml", "utf8").replace(
+            "  packages/demo: {}\n",
+            "  packages/demo:\n    dependencies:\n      evil:\n        specifier: workspace:*\n        version: link:../evil\n\n  packages/evil: {}\n",
+          );
+          fs.writeFileSync("pnpm-lock.yaml", lock);'
+        ;;
+      evil-test)
+        # Breaks what the base's guard test checks, and adds a test that runs first and tries to
+        # neutralise the guard and the runner, probe the network and the host. Inside this
+        # container it would succeed; the host's re-gate must not let it.
+        echo broken >packages/demo/src/value.txt
+        cat >packages/demo/src/aaa.test.mjs <<'PROBE'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+const out = [];
+const attempt = (name, action) => {
+  try {
+    action();
+    out.push(`${name}: written`);
+  } catch (error) {
+    out.push(`${name}: denied (${error.code})`);
+  }
+};
+attempt("guard test", () => writeFileSync("src/guard.test.mjs", "process.exit(0);\n"));
+attempt("test runner", () => writeFileSync("../../scripts/fixture-tests.mjs", "process.exit(0);\n"));
+attempt("dependencies", () => writeFileSync("../../node_modules/.planted", "x\n"));
+try {
+  await fetch("http://example.com", { signal: AbortSignal.timeout(5000) });
+  out.push("network: reachable");
+} catch {
+  out.push("network: unreachable");
+}
+out.push(`output mount: ${existsSync("/ralph-out") ? "present" : "absent"}`);
+out.push(`ptrace scope: ${readFileSync("/proc/sys/kernel/yama/ptrace_scope", "utf8").trim()}`);
+console.log(out.map((line) => `evil-probe ${line}`).join("\n"));
+PROBE
+        ;;
     esac
     echo feature >feature.txt
     ;;
@@ -121,6 +201,17 @@ esac
 EOF
   # The shared stub reviewer returns valid evidence, plus one HIGH finding when STUB_REVIEW=high.
   cp "${SOURCE_ROOT}/scripts/ralph-stub-reviewer.mjs" "${dir}/stub/"
+  # The host's reviewers run it through this probe, which reports to stderr (the host's log).
+  cat >"${dir}/stub/probe-reviewer.sh" <<'EOF'
+{
+  if touch probe.txt 2>/dev/null; then echo "review workspace: writable"; else echo "review workspace: read-only"; fi
+  if [[ -e /ralph-out ]]; then echo "output mount: present"; else echo "output mount: absent"; fi
+  if touch /ralph-in/x 2>/dev/null; then echo "input: writable"; else echo "input: read-only"; fi
+  if [[ -e /var/run/docker.sock ]]; then echo "docker.sock: present"; else echo "docker.sock: absent"; fi
+  echo "review head: $(git rev-parse HEAD)"
+} >&2
+exec node stub/ralph-stub-reviewer.mjs "$@"
+EOF
 
   git -C "${dir}" init --quiet --initial-branch=main
   git -C "${dir}" config core.autocrlf false
@@ -133,9 +224,11 @@ EOF
   printf '%s\n' "${dir}"
 }
 
-# Usage: run_sandbox <host> <agent mode> <review mode>; prints the exit code.
+# Usage: run_sandbox <host> <agent mode> <review mode> [host review mode]; prints the exit code.
+# The host's own reviewers (scripts/ralph-host-review.mjs) run the same stub in their containers,
+# through stub/probe-reviewer.sh, which also records what a reviewer container can reach.
 run_sandbox() {
-  local dir=$1 mode=$2 review=$3
+  local dir=$1 mode=$2 review=$3 host_review=${4:-clean}
   # Stub agents need no credentials; a placeholder satisfies the scripts' key check.
   ANTHROPIC_API_KEY=placeholder-unused-by-stub-agents CLAUDE_CODE_OAUTH_TOKEN="" \
     RALPH_TEST_RUNNER="node ../../stub/vitest.mjs" \
@@ -143,6 +236,7 @@ run_sandbox() {
     RALPH_REVIEW_CMD="env STUB_REVIEW=${review} node stub/ralph-stub-reviewer.mjs" \
     RALPH_MAX_ATTEMPTS=1 RALPH_MAX_REVIEW_ROUNDS=1 RALPH_BASE_BRANCH="" \
     RALPH_PROVIDER_RETRIES=0 \
+    RALPH_HOST_REVIEW_CMD="env STUB_REVIEW=${host_review} bash stub/probe-reviewer.sh" \
     bash "${dir}/scripts/sandbox.sh" --once >>"${dir}.out" 2>&1 && echo 0 || echo $?
 }
 
@@ -155,7 +249,8 @@ check() {
     failures=$((failures + 1))
   fi
 }
-# SANDBOX_TEST_ONLY=<scenario> runs one scenario: merge, reject, pause, forge-merge, forge-pause, dirty.
+# SANDBOX_TEST_ONLY=<scenario> runs one scenario: merge, reject, pause, forge-merge, forge-pause,
+# evil-test, evil-bin, host-review, dirty.
 wanted() { [[ -z "${SANDBOX_TEST_ONLY:-}" || "${SANDBOX_TEST_ONLY}" == "$1" ]]; }
 show_output() { ((failures == 0)) || sed 's/^/      | /' "$1.out" | tail -n 40; }
 
@@ -182,6 +277,9 @@ check "slice merged into host main" "git -C '${host}' log --format=%s main | gre
 check "host checkout has the feature" "[[ -f '${host}/feature.txt' ]]"
 check "slice branch on host" "git -C '${host}' rev-parse --verify --quiet slice/01-demo >/dev/null"
 check "host re-ran the gate without an agent" "grep -q 'sandbox: verifying' '${host}.out'"
+check "the host's gate ran the package tests offline" "grep -q 'fixture-tests: guard.test.mjs passed' '${host}.out'"
+check "the host's own reviewers approved the exact slice" \
+  "grep -q \"host review of \$(git -C '${host}' rev-parse --short=12 slice/01-demo): approved\" '${host}.out'"
 check "the re-gate checked the register before installing" \
   "grep -q 'register check: node_modules absent' '${host}.out' && grep -q 'register check: node_modules present' '${host}.out'"
 check "agent log on host" "ls '${host}'/.ralph/logs/*/01-demo.agent.log >/dev/null 2>&1"
@@ -255,6 +353,64 @@ check "sandbox exits 3 (refused)" "[[ ${code} == 3 ]]"
 check "the forged state is named" "grep -q '02-other' '${host}.out'"
 check "host repository and state unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
 check "no resume state adopted" "[[ ! -e '${host}/.ralph/state/02-other.pause' ]]"
+show_output "${host}"
+fi
+
+if wanted evil-test; then
+echo "malicious agent's tests attack the host's re-gate:"
+host="$(new_host_repo evil-test)"
+before="$(fingerprint "${host}")"
+code="$(run_sandbox "${host}" evil-test clean)"
+check "sandbox exits 3 (refused)" "[[ ${code} == 3 ]]"
+check "refused because the host's gate failed" "grep -q 'quality gate failed' '${host}.out'"
+check "the guard test still failed in the host's gate" "grep -q 'fixture-tests: guard.test.mjs FAILED' '${host}.out'"
+check "the slice's test ran there" "grep -q 'evil-probe' '${host}.out'"
+check "it could not rewrite another test" "grep -q 'evil-probe guard test: denied (EROFS)' '${host}.out'"
+check "it could not rewrite the test runner" "grep -q 'evil-probe test runner: denied (EROFS)' '${host}.out'"
+check "it could not plant dependencies" "grep -q 'evil-probe dependencies: denied (EROFS)' '${host}.out'"
+check "it had no network" "grep -q 'evil-probe network: unreachable' '${host}.out'"
+check "it had no output mount" "grep -q 'evil-probe output mount: absent' '${host}.out'"
+check "Yama restricts ptrace" "grep -qE 'evil-probe ptrace scope: [1-3]' '${host}.out'"
+check "host repository unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
+check "the slice is not on main" "! git -C '${host}' cat-file -e main:packages/demo/src/aaa.test.mjs 2>/dev/null"
+check "no verify volume left behind" "! docker volume ls --format '{{.Name}}' | grep -q '^ralph-verify-'"
+show_output "${host}"
+fi
+
+if wanted evil-bin; then
+echo "malicious agent links a package whose nested bins shadow node and prisma:"
+host="$(new_host_repo evil-bin)"
+before="$(fingerprint "${host}")"
+code="$(run_sandbox "${host}" evil-bin clean)"
+check "sandbox exits 3 (refused)" "[[ ${code} == 3 ]]"
+check "refused because the host's gate failed" "grep -q 'quality gate failed' '${host}.out'"
+check "pnpm linked the slice's node, and the check refused it" "grep -q 'pnpm linked the bin \"node\"' '${host}.out'"
+check "the check refused a toolchain command no toolchain package links" "grep -q 'evil declares the bin \"prisma\"' '${host}.out'"
+check "the slice's bin never ran" "! grep -q 'evil-bin ran' '${host}.out'"
+check "host repository unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
+check "the slice is not on main" "! git -C '${host}' cat-file -e main:packages/evil/package.json 2>/dev/null"
+check "no verify volume left behind" "! docker volume ls --format '{{.Name}}' | grep -q '^ralph-verify-'"
+show_output "${host}"
+fi
+
+if wanted host-review; then
+echo "the agent's reviewers approve, the host's isolated reviewers do not:"
+host="$(new_host_repo host-review)"
+code="$(run_sandbox "${host}" "" clean high)"
+check "sandbox exits 1" "[[ ${code} == 1 ]]"
+check "the agent's own review approved" "grep -q 'review: approved' '${host}.out'"
+check "the host's review blocked it" "grep -q 'host review of .*: blocked' '${host}.out'"
+check "work not merged into main" "! git -C '${host}' cat-file -e main:feature.txt 2>/dev/null"
+check "ticket blocked by the host" "[[ \$(status_on '${host}' main) == blocked ]]"
+check "the host blocked it in its own commit" "git -C '${host}' log -1 --format=%s main | grep -q 'after the host review'"
+rejected="$(first_branch "${host}" 'rejected/*')"
+check "candidate kept on a quarantine branch" "git -C '${host}' cat-file -e '${rejected}:feature.txt' 2>/dev/null"
+probe="$(cat "${host}"/.ralph/host-review/*/01-demo/standards.stderr.log 2>/dev/null || true)"
+check "the reviewer saw exactly the candidate" "grep -q \"^review head: \$(git -C '${host}' rev-parse '${rejected}')\$\" <<<'${probe}'"
+check "the reviewer's workspace is read-only" "grep -q '^review workspace: read-only$' <<<'${probe}'"
+check "the reviewer has no output mount" "grep -q '^output mount: absent$' <<<'${probe}'"
+check "the reviewer's input is read-only" "grep -q '^input: read-only$' <<<'${probe}'"
+check "no Docker socket in the reviewer" "grep -q '^docker.sock: absent$' <<<'${probe}'"
 show_output "${host}"
 fi
 

@@ -3,7 +3,8 @@
 # Builds the sandbox image and runs ralph-loop.sh inside it. Arguments are forwarded to the
 # loop, e.g. `./scripts/sandbox.sh --once` or `./scripts/sandbox.sh --ticket 03`.
 # `./scripts/sandbox.sh --verify [commit]` only runs the quality gate on real services on that
-# commit (default: the base branch), with no agent and no key.
+# commit (default: the base branch), with no agent and no key, in the hardened staged containers
+# of scripts/ralph-verify.mjs.
 # `./scripts/sandbox.sh --max-tickets N` runs a bounded batch: one sandbox run per ticket, with
 # GitHub CI verified in between (scripts/ralph-batch.mjs, which calls this script per ticket).
 #
@@ -79,15 +80,8 @@ sandbox_run() {
 }
 
 if [[ "${verify}" == true ]]; then
-  commit="$(git rev-parse --verify "${2:-${BASE}}^{commit}")"
-  # A bundle carries refs, not bare commits: name the commit under a private ref only for that.
-  git update-ref "refs/ralph/verify/${run_id}" "${commit}"
-  git bundle create --quiet "${run_dir}/in/repo.bundle" "refs/ralph/verify/${run_id}"
-  git update-ref -d "refs/ralph/verify/${run_id}"
-  status=0
-  sandbox_run --env RALPH_VERIFY_COMMIT="${commit}" "${IMAGE}" --verify || status=$?
-  rm -rf "${run_dir}" 2>/dev/null || true
-  exit "${status}"
+  # The host's own gate, in hardened, staged containers of this image (ADR 0015).
+  RALPH_IMAGE="${IMAGE}" exec node "${REPO_ROOT}/scripts/ralph-verify.mjs" "${2:-${BASE}}"
 fi
 
 base_sha="$(git rev-parse "refs/heads/${BASE}")"

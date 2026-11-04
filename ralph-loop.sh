@@ -83,6 +83,7 @@ readonly REVIEW_BLOCKING="${RALPH_REVIEW_BLOCKING:-CRITICAL,HIGH}"
 readonly REVIEW_TIMEOUT="${RALPH_REVIEW_TIMEOUT:-1800}"
 readonly REVIEW_SCHEMA="${REPO_ROOT}/skills/code-review/report.schema.json"
 readonly REVIEW_GATE="${REPO_ROOT}/scripts/ralph-review.mjs"
+readonly REVIEW_PROMPT="${REPO_ROOT}/scripts/ralph-review-prompt.mjs"
 readonly ARTIFACTS="${REPO_ROOT}/scripts/ralph-artifacts.mjs"
 readonly DEBT="${REPO_ROOT}/scripts/ralph-debt.mjs"
 readonly DEBT_REGISTER="docs/technical-debt.md"
@@ -640,65 +641,15 @@ run_phase_until() {
 # Independent review (skills/code-review, run in its non-interactive mode)
 # ---------------------------------------------------------------------------------------------
 
-# The acceptance criteria as the review gate numbers them (scripts/ralph-review.mjs).
-numbered_criteria() {
-  grep -E '^- \[[ xX]\] ' "$1" | awk '{ print "  AC" NR ": " substr($0, 7) }' || true
-}
-
-axis_brief() {
-  case "$1" in
-    standards)
-      cat <<'EOF'
-- Standards brief: judge architecture (ADRs, module boundaries, dependency direction),
-  correctness (concurrency, transactions, idempotency), security (validation, authz, secrets),
-  error handling, maintainability and test quality, and name integration problems with the
-  existing code. `criteria` stays empty.
-EOF
-      ;;
-    spec)
-      cat <<'EOF'
-- Spec brief: give every acceptance criterion above exactly one outcome in `criteria`, with the
-  implementation evidence and the tests that verify it. A criterion with no test proving it is
-  `unverifiable`, not `met`. Report missing or insufficient coverage and scope creep as findings.
-EOF
-      ;;
-  esac
-}
-
+# The reviewer's prompt, from the one source the host's own review uses as well
+# (scripts/ralph-review-prompt.mjs), so both ask exactly the same question.
 build_review_prompt() {
-  local axis=$1 ticket=$2 diff_file=$3 base=$4 head=$5
-  cat <<EOF
-You are the ${axis^} sub-agent of the two-axis code review in skills/code-review/SKILL.md, in
-its non-interactive mode, reviewing ticket ${ticket}. Read that skill file first and follow the
-brief for the ${axis^} axis. You run in a fresh context, independent of the other axis.
-
-- Commit range: base ${base}, head ${head} (copy both into \`changeset\`). The complete
-  candidate changeset, \`git diff ${BASE_BRANCH}...HEAD\` annotated with source line numbers,
-  is saved in full in the changeset file below. Read all of it, then whatever surrounding code
-  you need.
-- Changeset file: ${diff_file#"${REPO_ROOT}/"}
-  Its last line is \`review-token: <value>\`; put that value in \`changeset.token\`. If you
-  cannot open the file, review nothing else: say so in the summary and leave the token empty.
-- Changed files (account for every one in \`files\`):
-$(git diff --name-only "${BASE_BRANCH}...HEAD" | sed 's/^/  /')
-- Every finding names one of those files and a line inside one of its hunks (0: whole file).
-  Each hunk line of the changeset is prefixed with its OLD and NEW source line numbers: cite
-  those (NEW for added or unchanged lines), never a line's position within the changeset file.
-- Commits: $(git log --oneline "${BASE_BRANCH}..HEAD" | tr '\n' ';')
-- Spec: the ticket ${ticket} and the spec and ADRs it references. Acceptance criteria:
-$(numbered_criteria "${ticket}")
-$(axis_brief "${axis}")
-- Standards: discover the sources as the skill describes, starting from CLAUDE.md.
-- Technical debt: ${DEBT_REGISTER} is the register of findings deferred by earlier reviews.
-  Read the entries whose Components overlap the changed files. If a finding of yours is the same
-  problem as an entry, set \`debt\` to its id (else ""); do not lower its severity because it
-  is known. If this change makes a deferred problem worse or newly reachable, rate it by its real
-  impact now, which may be HIGH or CRITICAL. If the changeset marks an entry RESOLVED, check the
-  fix and its test: a resolution its Verification test does not prove is a HIGH finding.
-  Cite a RESOLVED entry with an Escalation only at a blocking severity (its problem is back or
-  unproven); a different, remaining concern about its fix is a new finding with \`debt\` "".
-- You are read-only: do not modify any file. Return only the report matching the JSON schema.
-EOF
+  local axis=$1 ticket=$2 diff_file=$3 base=$4 head=$5 rejected=${6:-}
+  local -a extra=()
+  [[ -z "${rejected}" ]] || extra=(--rejected "${rejected}")
+  node "${REVIEW_PROMPT}" --axis "${axis}" --ticket "${ticket}" \
+    --changeset "${diff_file#"${REPO_ROOT}/"}" --base "${base}" --head "${head}" \
+    --from "${BASE_BRANCH}" --register "${DEBT_REGISTER}" "${extra[@]}"
 }
 
 # Never fails: whatever the process printed (or nothing) goes to the review gate, which judges
@@ -717,8 +668,7 @@ run_reviewer() {
     # Each reviewer is its own fresh session, isolated from the agent and from the other axis.
     fresh_session "$(ticket_number "${ticket}") review-${axis}" "${REVIEW_TIMEOUT}" \
       "${review_argv[@]}" --json-schema "$(cat "${REVIEW_SCHEMA}")" \
-      "$(build_review_prompt "${axis}" "${ticket}" "${diff_file}" "${base}" "${head}"
-        [[ -z "${rejected}" ]] || rejected_report_note "${rejected}")" \
+      "$(build_review_prompt "${axis}" "${ticket}" "${diff_file}" "${base}" "${head}" "${rejected}")" \
       >"${out}" 2>"${out%.json}.stderr.log" || status=$?
     class="$(provider_failure "${status}" "${out}" "${out%.json}.stderr.log")"
     [[ "${class}" == none ]] && return 0
@@ -740,15 +690,6 @@ review_paused() {
     return 0
   done
   return 1
-}
-
-rejected_report_note() {
-  cat <<EOF
-- Your previous report on this exact changeset was rejected by the review gate as invalid, for
-  these reasons. Review again from scratch and return a report that follows the schema and the
-  rules above; the gate's rules have not changed.
-$(sed 's/^/  /' "$1")
-EOF
 }
 
 # The axes whose report the gate found invalid, one per line, from the decision file.

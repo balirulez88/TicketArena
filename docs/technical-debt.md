@@ -36,10 +36,10 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 1    | 3      | 36  | 40    |
+| OPEN          | 0        | 0    | 3      | 38  | 41    |
 | PLANNED       | 0        | 0    | 9      | 2   | 11    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
-| RESOLVED      | 0        | 1    | 5      | 2   | 8     |
+| RESOLVED      | 0        | 2    | 5      | 2   | 9     |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 ## Entries
@@ -1164,22 +1164,24 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-058: In-container review verdicts share a user with the agent
 
-- **Status:** OPEN
+- **Status:** RESOLVED
 - **Severity:** HIGH
 - **Escalation:** none
 - **Source:** ticket 47 (`47-sandbox-trust-boundary`), remaining limitation of the trust boundary (2026-11-04)
 - **Evidence:** `docs/adr/0014-sandbox-trust-boundary.md` (Consequences, remaining limitations)
-- **Components:** `ralph-loop.sh:579`, `scripts/sandbox-entrypoint.sh:66`
+- **Components:** `ralph-loop.sh:579`, `scripts/sandbox-entrypoint.sh:77`
 - **Problem:** Inside the container, the agent runs as the same Unix user as Ralph's own gates and its two LLM reviewers. A deliberately malicious agent can leave a background process behind its session that rewrites a review report or decision file before the in-container review gate reads it. The host independently re-checks everything deterministic: the merge shape, protected paths, the full gate in an agent-free sandbox, and GitHub CI after the push. The approval of the Standards and Spec reviews, however, is not re-derived on the host.
 - **Impact:** An adversarial agent could merge code that passes the tests and CI but was never approved by the reviewers. That includes code written to subvert the gate it runs in: narrowing what a package's own `vitest.config` or `tsconfig.json` covers (slices may change both), or tampering with tooling and later gate steps from its tests or its dependencies, which the agent-free re-gate and CI both execute. Merged code then runs on developer machines (the tests, `infra:up`), in GitHub CI and in the re-gate, which has network access. An accidental, non-malicious agent cannot cause this. The host repository, its Git metadata, the harness and the batch state stay out of reach during the run either way (TD-057).
 - **Justification:** Recorded so it is not silently accepted. Whether it blocks autonomous production batches is the user's decision (raised 2026-11-04). Closing it means running the agent and everything that executes the slice's code under a separate user, or re-running the reviews on the host. Either is a design change beyond ticket 47.
 - **Remediation:** Run the agent, and every command that executes the slice's code, as a separate unprivileged user, with no write access to the harness's review and decision files and with its processes killed after each session. Alternatively, have the host run a final, independent review round in an agent-free sandbox before it accepts a merge.
-- **Target:** none
-- **Resolution:** none
-- **Verification:** none
+- **Target:** ticket 48 (`issues/done/48-review-and-verify-isolation.md`); must merge before the next production batch (tickets 09-11)
+- **Resolution:** The host decides both the reviews and the gate, taking nothing from the agent's container (ADR 0015). `scripts/ralph-host-review.mjs` runs its own Standards and Spec reviews of every merged slice: the host builds the changeset, a fresh token, the prompts (`scripts/ralph-review-prompt.mjs`, shared with the loop) and the schema; each reviewer is a fresh session in its own container (`sandbox-entrypoint.sh --review`) with a read-only root file system and input, tools that only read, a workspace with its write permissions removed, a single-ref bundle of exactly the candidate commit, no output mount, no host path, no Docker socket and no capabilities; the host reads the report from stdout and judges it with the review gate against the candidate's own range, files, token, criteria, register and tree. Not approved: the host blocks the ticket in its own commit and keeps the slice on `rejected/<slug>-<run>`; a provider cut-off changes nothing. `scripts/ralph-verify.mjs` replaces the single re-gate container with staged, disposable, resource-limited containers on one volume: install with network, then lint, typecheck and harness tests offline, then each package's tests offline in its own container with a read-only root file system and workspace and Yama enforced; the verdict is the exit status Docker reports. The importer fixes by the base everything that runs in a trusted role while the gate judges the slice: Vitest, Vite, PostCSS, Tailwind and Prisma configuration, `tsconfig*.json`, `.editorconfig`, `packages/test-infra/`, Prisma generators, `db:generate`, the toolchain's locked dependency closure in `pnpm-lock.yaml` (`link:` resolutions included), and a new package's gate scripts other than `test`. After the install and before any script, the image's bin check (`scripts/ralph-bins.mjs`) judges what pnpm linked: no linked bin may be named like a command on the image's PATH, no package outside the toolchain may declare a toolchain command (a fixed list in `scripts/ralph-toolchain.mjs`, so dropping a toolchain package does not free its name), nested bin directories count, every linked toolchain command must point into a toolchain package in pnpm's store (judged by the target pnpm's shim names, so whatever bin discovery the check does not model is judged by what it runs), and an unreadable dependency manifest fails (pnpm's shims would run a linked `node`).
+- **Verification:** `scripts/ralph-accept.test.mjs` (host review of the exact candidate: forged in-container approvals and decisions ignored, nine forged or invalid report kinds refused, a critical finding blocks, provider cut-off changes nothing, deferred findings recorded by the host, a lost register entry refused; trusted-role files; a new package's `typecheck`, `db:generate`, `lint` and `pretypecheck` scripts; fifteen lockfile attacks, including `link:` resolutions of the test runner and tooling and a re-pointed test infrastructure), `scripts/ralph-host-review.test.mjs` (only host inputs, single-ref bundle of the candidate, fresh token per review, candidate range and files, retry and unavailable), `scripts/ralph-bins.test.mjs` (bins shadowing node, the shell, tsc, vitest and a dropped toolchain's `prisma`, by name, string and nested bin directory, from a dependency or a linked workspace package; unattributed linked bins; unreadable and byte-order-marked manifests), `scripts/sandbox.test.sh` (real Docker: `evil-bin`, a slice linking a workspace package whose nested bin directory holds `node` and `prisma`, refused before either runs; the real repository through `sandbox.sh --verify`; `evil-test`, a malicious slice whose tests try to rewrite another test, the runner and the dependencies, reach the network and the host, and fail the gate; `host-review`, a slice the agent's reviewers approve but the host's isolated reviewers block, with the reviewer container seeing exactly the candidate read-only, no output mount and no Docker socket; plus merge, rejection, pause/resume and forged merge and pause)
 - **Fingerprints:** `ralph-loop.sh#in-container-review-verdicts-share-a-user-with-the-agent`
 - **History:**
   - 2026-11-04: recorded: HIGH security limitation remaining after ticket 47 (trust boundary), raised for a user decision
+  - 2026-11-04: independent Standards and Spec reviews of ticket 48 (host subagents, not the in-container reviewers) found two HIGH bypasses: a new package's `db:generate`/`typecheck` scripts and `link:` resolutions of toolchain packages; both fixed with tests, and the bin-shadowing vector they pointed to closed by the image's bin check; their confirmation round found two bypasses of that check (nested bin directories, a dropped toolchain package freeing `prisma`), closed by judging the linked bins and a fixed toolchain command list
+  - 2026-11-04: resolved in ticket 48: the host runs its own isolated Standards and Spec reviews of the exact candidate and a hardened, staged, offline gate whose verdict is the containers' exit status; remaining limitations in ADR 0015
 
 ### TD-059: Rejected work is imported as ordinary branches
 
@@ -1199,4 +1201,42 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `scripts/ralph-accept.mjs#rejected-work-is-imported-as-ordinary-branches`
 - **History:**
   - 2026-11-04: recorded: LOW finding deferred from ticket 47's Spec review (round 4)
+
+### TD-060: The verifier's Yama refusal has no regression test
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 48 (`48-review-and-verify-isolation`), independent Spec review (2026-11-04)
+- **Evidence:** `scripts/sandbox-entrypoint.sh` (`--test`: refuses to run unless `/proc/sys/kernel/yama/ptrace_scope` is 1-3); `scripts/sandbox.test.sh` (`evil-test` only records the host's scope)
+- **Components:** `scripts/sandbox-entrypoint.sh:92`
+- **Problem:** The test stage refuses to run when the kernel does not restrict `ptrace`, so a slice's test cannot trace the Vitest main process and rewrite its verdict. No test runs the stage on a kernel with scope 0, so deleting the refusal would leave every test green.
+- **Impact:** None on Docker Desktop (WSL2) and GitHub's Ubuntu runners, which both run with scope 1, as `evil-test` asserts. A future host with scope 0 relies on the untested refusal.
+- **Justification:** A container cannot lower the host kernel's Yama scope, and an environment override to fake it would itself be a bypass of the check.
+- **Remediation:** Read the scope from a path the entrypoint takes from its image build (a test image overrides it with a file holding 0), and add a Docker scenario that expects the refusal.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/sandbox-entrypoint.sh#the-verifiers-yama-refusal-has-no-regression-test`
+- **History:**
+  - 2026-11-04: recorded: LOW finding deferred from ticket 48's independent Spec review
+
+### TD-061: The verifier's prepare stage hard-codes the workspace groups
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 48 (`48-review-and-verify-isolation`), independent Standards review (2026-11-04)
+- **Evidence:** `scripts/sandbox-entrypoint.sh` (`--prepare` creates `.vite-temp` and `.vitest-cache` under `apps/*` and `packages/*`); `scripts/ralph-verify.mjs` (`testTargets` reads the groups from `pnpm-workspace.yaml`)
+- **Components:** `scripts/sandbox-entrypoint.sh:77`
+- **Problem:** The workspace groups are known in two places. A group added to `pnpm-workspace.yaml` (a protected file) gets test containers but no cache directories.
+- **Impact:** Fails closed: that group's test containers cannot mount their tmpfs on the read-only volume and the gate fails, with a confusing message.
+- **Justification:** Only a human-reviewed commit can add a workspace group, and it would see the failure at once.
+- **Remediation:** Pass the test targets from `ralph-verify.mjs` to the prepare stage, or derive both from one reader of `pnpm-workspace.yaml`.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/sandbox-entrypoint.sh#the-verifiers-prepare-stage-hard-codes-the-workspace-groups`
+- **History:**
+  - 2026-11-04: recorded: LOW finding deferred from ticket 48's independent Standards review
 <!-- ralph-debt:end -->

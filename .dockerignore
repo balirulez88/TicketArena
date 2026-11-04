@@ -3,4 +3,6 @@
 *
 !scripts/sandbox-entrypoint.sh
 !scripts/sandbox-services.sh
+!scripts/ralph-bins.mjs
+!scripts/ralph-toolchain.mjs
 !infra/nats/nats.conf

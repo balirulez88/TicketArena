@@ -64,9 +64,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Builds the sandbox image and runs stub-agent tickets through scripts/sandbox.sh (ADR 0014).
-      # It checks that nothing of the host is reachable from inside, that merges, rejections and
-      # pause/resume reach the host only through validation, and that a malicious agent's forged
-      # merge and resume state are refused with the host unchanged.
+      # The host scripts (ralph-accept.mjs parses the lockfile) need the root devDependencies.
+      - name: Set up pnpm (version from packageManager)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Builds the sandbox image and runs stub-agent tickets through scripts/sandbox.sh (ADR 0014,
+      # ADR 0015). It checks that nothing of the host is reachable from inside, that merges,
+      # rejections and pause/resume reach the host only through validation, that a malicious
+      # agent's forged merge and resume state are refused with the host unchanged, that a
+      # malicious slice's tests cannot tamper with the host's hardened gate, and that only the
+      # host's own isolated reviewers decide.
       - name: Sandbox boundary, acceptance and forgery refusal
         run: bash scripts/sandbox.test.sh

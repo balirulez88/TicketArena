@@ -74,6 +74,15 @@ describe("review artifact retention", () => {
     assert.equal(existsSync(join(logRoot, "20261022-120000")), true);
   });
 
+  it("treats a paused run like a failed one: review files kept for 7 days", () => {
+    makeRun("20261024-130000", { status: "paused", finishedDaysAgo: 6 });
+    makeRun("20261022-130000", { status: "paused", finishedDaysAgo: 8 });
+    sweep();
+    assert.equal(existsSync(join(reviewRoot, "20261024-130000")), true);
+    assert.equal(existsSync(join(reviewRoot, "20261022-130000")), false);
+    assert.equal(existsSync(join(logRoot, "20261022-130000")), true);
+  });
+
   it("never touches an active run, however old", () => {
     makeRun("20260101-000000", { status: "active", finishedDaysAgo: 300 });
     sweep();

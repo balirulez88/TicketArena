@@ -29,11 +29,16 @@ warnings:
 - **TypeScript** strict, plus `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`,
   `noPropertyAccessFromIndexSignature`.
 - **Vitest** behaviour tests at agreed seams: unit **and** integration tests in one gate
-  ([ADR 0010](../adr/0010-real-infrastructure-tests.md)).
+  ([ADR 0010](../adr/0010-real-infrastructure-tests.md)). Each package keeps its own Vitest
+  `fsModuleCache` (`<package>/node_modules/.vitest-cache`). Vitest 5's default is one cache at the
+  workspace root, which every one of Turbo's parallel Vitest processes wiped at startup after a
+  lockfile change; on Windows that failed intermittently with
+  `ENOTEMPTY: directory not empty, rmdir '...\node_modules\.vitest-cache'`.
+  `scripts/vitest-cache.test.mjs` resolves every package's config and keeps it that way.
 - **Harness tests** (`test:harness`): `node:test` for the review gate and the artifact
   lifecycle, and bash scenarios that run `ralph-loop.sh` with stub agents and a stub reviewer
-  (`scripts/ralph-stub-reviewer.mjs`), proving the merge policy, the evidence gate and the
-  retention rules below.
+  (`scripts/ralph-stub-reviewer.mjs`), proving the merge policy, the evidence gate, the
+  retention rules, provider-failure pause and resume, and bounded batches (all below).
 
 ## Integration test infrastructure
 
@@ -149,9 +154,94 @@ is history and that `.ralph/` is not instructions.
 - Rejected tickets stay in `issues/` as `blocked`. A harness that dies mid-ticket leaves the
   ticket `ready-for-agent` on `main`, and its run stays `active` in `.ralph/logs`, so cleanup keeps
   the evidence. To recover, check out `main`, delete the dead run's `slice/<NN>-<slug>` branch and
-  run again.
+  run again. (In the sandbox the clone dies with the container, so a rerun simply starts over.)
+- A ticket **paused** by a provider failure is neither rejected nor blocked: it stays
+  `ready-for-agent` and the next run resumes it (see
+  [Provider failures](#provider-failures-pause-and-resume)).
+- A ticket is processed once: `process_ticket` refuses a ticket whose file is in `issues/done/`.
 - `next_ticket` scans only `issues/`, so an archived ticket is never selected again. Blockers
   resolve across both directories by number, and a number must name exactly one file.
+
+### Provider failures: pause and resume
+
+A Claude session can fail because the provider refused or dropped it, not because the work is
+wrong. Charging that to the ticket would reject good work; the reverse mistake (calling a real
+failure the provider's) would grant free attempts. So:
+
+- **Classification** (`scripts/ralph-provider.mjs`, unit-tested) looks only at a session that
+  failed (non-zero exit or a JSON `is_error` result, never a timeout) and only at the CLI's own
+  error formats in the last lines of its output: `usage-limit` (`Claude AI usage limit reached`,
+  `… limit reached ∙ resets …`, credit exhausted), `auth` (401/403, invalid key, expired OAuth
+  token) or `transient` (`API Error: 429/5xx`, `overloaded_error`, connection errors). Anything
+  else, including an agent quoting those phrases, is `none`: a genuine failure, judged exactly as
+  before (fails closed).
+- **Transient**: retried in a **new fresh session** after a doubling backoff
+  (`RALPH_PROVIDER_RETRIES`, default 2; `RALPH_PROVIDER_BACKOFF`, default 60 s). The retry does
+  not consume the implementation attempt. A reviewer's cut-off output is kept as
+  `<slug>.review-<round>.<axis>.provider-<n>.json` and never shown to the gate.
+- **Usage limit, refused credentials, or a provider still down after the retries**: the run
+  **pauses** (exit 75, run status `paused`). Nothing is rejected, blocked or counted. The work in
+  progress is committed on `ralph/paused/<NN>-<slug>` directly on top of the last gated
+  checkpoint (pushed to the host from the sandbox), and `.ralph/state/<slug>.pause` records the
+  phase, attempt and review round, next to the gate feedback and blocking findings that phase was
+  given. An interrupted review round never reaches the gate, so it can never approve. Refused
+  credentials pause too, deliberately: like a usage limit they say nothing about the ticket and
+  cannot clear up within the run, and rejecting good work over an expired token would be wrong.
+  If the work cannot be parked (a git step fails), the run fails (exit 1) without writing resume
+  state and leaves the work on the slice branch for a human; it is never reported as paused.
+- **Resume** (manual: run the same command again). The harness recreates the slice branch at the
+  gated checkpoint with the interrupted phase's work uncommitted on top, then continues at that
+  phase and attempt. Phases already passed are not rerun; every later gate (review, debt, VERIFY)
+  runs as normal. An interrupted review round is redone from scratch: new changeset token, both
+  axes, no earlier report reused. It **fails closed**: if the parked ref is not exactly what the
+  pause recorded, does not sit on the recorded checkpoint, or `main` has moved since the pause,
+  it refuses and names the state file; deleting that file restarts the ticket from scratch.
+- When the ticket merges or is rejected, its pause state and parked ref are deleted.
+
+Scenarios: `scripts/ralph-resume.test.sh` (usage limit in every agent phase, review and review
+fix, each resumed through review and VERIFY; refused credentials; bounded transient retries;
+genuine failures still counted; a pause that cannot park; stale or forged pauses refused; the
+sandbox clone round-trip). Run against the harness from before this change (`RALPH_UNDER_TEST=<path>`),
+they fail: it rejected and blocked the ticket instead.
+
+### Bounded batches (`--max-tickets`)
+
+`pnpm sandbox --max-tickets N` (`scripts/ralph-batch.mjs`) runs on the **host**, because the
+sandbox has no GitHub credentials. `--once`, `--ticket` and a bare run behave as before.
+
+1. Before each ticket, the base branch must be on GitHub and **CI green on that exact commit**
+   (`scripts/ralph-ci.sh`: only a completed, successful run of `ci.yml` counts). This includes
+   the first ticket, deliberately: a batch never builds on a base that CI has not passed, whoever
+   moved it.
+2. The next eligible ticket is chosen by `ralph-loop.sh`'s own `next_ticket` and runs in its own
+   sandbox (`--ticket NN`), so every gate above applies.
+3. `main` is pushed to GitHub and the batch waits for CI on the merge. It stops at N tickets
+   merged and verified.
+
+State lives in `.ralph/batch/state.json`, written atomically after every step. The **repository
+is the source of truth** for merges: a ticket is merged only if `main` has both its archived file
+and its `Merge slice/<slug>:` commit. A rerun therefore resumes at the right checkpoint (run, push,
+CI) and never runs a merged ticket twice. The limit is stored with the batch; a conflicting
+`--max-tickets` is refused. A run that leaves a new `rejected/<slug>-*` branch is a rejection
+even when its blocked status only reached a `ralph/blocked-*` side branch (the host refused the
+base branch); merge that side branch before `--new`. `.ralph/batch/lock` (an atomic `mkdir`)
+admits one batch at a time, and `pnpm sandbox` refuses (best effort) to run beside one. A lock left by a killed batch is never taken over
+automatically: the message says so, and a human removes it after checking that no batch or
+container is still running.
+
+| Stop                                                                                    | Meaning                                         | Exit |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------- | ---- |
+| `batch-limit`, `no-eligible-ticket`                                                     | finished                                        | 0    |
+| `unresolved-dependency`                                                                 | finished; ready tickets wait on unfinished ones | 2    |
+| `paused`                                                                                | provider failure; rerun to resume               | 75   |
+| `ambiguous-merge`, `runner-failed`, `push-failed`, `ci-unverified`, `base-not-verified` | blocking until a rerun can verify it            | 1    |
+| `rejected`, `ci-failed`                                                                 | final; resolve it, then `--new` starts a batch  | 1    |
+
+`node scripts/ralph-batch.mjs --status` prints the current batch. Nothing is ever deployed.
+Scenarios: `scripts/ralph-batch.test.mjs` (limit, CI gating, rejection on the base or a side
+branch, pause and resume with the stored limit, a batch killed right after a merge, half-merged
+and ambiguous runner results, the lock, and the `sandbox.sh` / `ralph-loop.sh` entry points) and
+`scripts/ralph-ci.test.mjs`.
 
 ## Independent review
 
@@ -239,11 +329,11 @@ Guarantees, each covered by `scripts/ralph-debt.test.mjs` or `scripts/ralph-loop
 `scripts/ralph-artifacts.mjs` owns their lifecycle; `ralph-loop.sh` calls it when a run starts
 and on exit.
 
-| Where                     | What                                                                                           | Kept                                                                         |
-| ------------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `.ralph/review/<run-id>/` | Changesets the reviewers read (inside the workspace)                                           | While the run is active; deleted when it succeeds; 7 days after a failed run |
-| `.ralph/logs/<run-id>/`   | Agent and gate logs, review reports, decisions, a copy of every reviewed changeset, `run.json` | 30 days after the run finished                                               |
-- `run.json` records the run's status (`active`, `succeeded`, `failed`) and times. A run is
+| Where                     | What                                                                                           | Kept                                                                                   |
+| ------------------------- | ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `.ralph/review/<run-id>/` | Changesets the reviewers read (inside the workspace)                                           | While the run is active; deleted when it succeeds; 7 days after a failed or paused run |
+| `.ralph/logs/<run-id>/`   | Agent and gate logs, review reports, decisions, a copy of every reviewed changeset, `run.json` | 30 days after the run finished                                                         |
+- `run.json` records the run's status (`active`, `succeeded`, `failed`, `paused`) and times. A run is
   `active` until its exit trap marks it; an interrupted run that never finished stays `active` and
   is **never** cleaned automatically (remove it by hand once you are sure it is dead).
 - Each run cleans expired artifacts of earlier runs when it starts, never its own. Review retries

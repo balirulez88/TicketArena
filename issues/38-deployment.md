@@ -2,7 +2,7 @@
 
 **What to build:** a reviewer can use the live demo: the web app on Vercel, the worker and NATS on Fly.io, and Neon and Upstash in production, with CI applying migrations before each web deploy. Spec: Deployment and CI; ADR 0013.
 
-**Blocked by:** 34, 36, 29, 14, 43
+**Blocked by:** 34, 36, 29, 14, 43, 46 (worker startup cleanup)
 
 **Status:** ready-for-agent
 

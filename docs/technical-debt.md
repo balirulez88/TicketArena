@@ -36,7 +36,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 3      | 35  | 38    |
+| OPEN          | 0        | 1    | 3      | 35  | 39    |
 | PLANNED       | 0        | 0    | 9      | 2   | 11    |
 | IN_PROGRESS   | 0        | 1    | 0      | 0   | 1     |
 | RESOLVED      | 0        | 0    | 5      | 2   | 7     |
@@ -1160,4 +1160,23 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-04: recorded: HIGH security finding at `scripts/sandbox.sh:51`, harness preflight before the batch of tickets 09-11
   - 2026-11-04: in progress in ticket 47 (`issues/47-sandbox-trust-boundary.md`); autonomous production batches blocked until it merges (user decision, 2026-11-04)
+
+### TD-058: In-container review verdicts share a user with the agent
+
+- **Status:** OPEN
+- **Severity:** HIGH
+- **Escalation:** none
+- **Source:** ticket 47 (`47-sandbox-trust-boundary`), remaining limitation of the trust boundary (2026-11-04)
+- **Evidence:** `docs/adr/0014-sandbox-trust-boundary.md` (Consequences, remaining limitations)
+- **Components:** `ralph-loop.sh:579`, `scripts/sandbox-entrypoint.sh:66`
+- **Problem:** Inside the container, the agent runs as the same Unix user as Ralph's own gates and its two LLM reviewers. A deliberately malicious agent can leave a background process behind its session that rewrites a review report or decision file before the in-container review gate reads it. The host independently re-checks everything deterministic: the merge shape, protected paths, the full gate in an agent-free sandbox, and GitHub CI after the push. The approval of the Standards and Spec reviews, however, is not re-derived on the host.
+- **Impact:** An adversarial agent could merge code that passes the tests and CI but was never approved by the reviewers. An accidental, non-malicious agent cannot cause this. The host, its Git metadata and the batch state stay out of reach either way (TD-057).
+- **Justification:** Recorded so it is not silently accepted. Whether it blocks autonomous production batches is the user's decision (raised 2026-11-04). Closing it means running the agent and everything that executes the slice's code under a separate user, or re-running the reviews on the host. Either is a design change beyond ticket 47.
+- **Remediation:** Run the agent, and every command that executes the slice's code, as a separate unprivileged user, with no write access to the harness's review and decision files and with its processes killed after each session. Alternatively, have the host run a final, independent review round in an agent-free sandbox before it accepts a merge.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `ralph-loop.sh#in-container-review-verdicts-share-a-user-with-the-agent`
+- **History:**
+  - 2026-11-04: recorded: HIGH security limitation remaining after ticket 47 (trust boundary), raised for a user decision
 <!-- ralph-debt:end -->

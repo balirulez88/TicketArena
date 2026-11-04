@@ -57,14 +57,16 @@ jobs:
         run: docker compose down --volumes
 
   sandbox:
-    name: Sandbox rejection recovery
+    name: Sandbox trust boundary
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Builds the sandbox image and runs a rejected ticket through scripts/sandbox.sh; checks
-      # that logs, the quarantine branch and the blocked status survive on the host.
-      - name: Rejected run leaves its evidence on the host
+      # Builds the sandbox image and runs stub-agent tickets through scripts/sandbox.sh (ADR 0014).
+      # It checks that nothing of the host is reachable from inside, that merges, rejections and
+      # pause/resume reach the host only through validation, and that a malicious agent's forged
+      # merge and resume state are refused with the host unchanged.
+      - name: Sandbox boundary, acceptance and forgery refusal
         run: bash scripts/sandbox.test.sh

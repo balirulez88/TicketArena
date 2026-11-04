@@ -10,9 +10,11 @@
 // commit, and only then pick the next eligible ticket. The container never sees GitHub
 // credentials; that is why the batch lives out here and not in ralph-loop.sh.
 //
-// Every step is recorded in .ralph/batch/state.json before and after it runs, and the repository
+// Every step is recorded in .ralph/batch/state.json before and after it runs. Only host processes
+// can write that file: the container mounts no part of this repository (ADR 0014). The repository
 // is the source of truth for merges: a ticket counts as merged only when the base branch has both
-// its archived file (done) and its `Merge slice/<slug>:` commit. A rerun therefore resumes at the
+// its archived file (done) and its `Merge slice/<slug>:` commit. Only scripts/ralph-accept.mjs
+// puts those on the host, once it has validated the run's output. A rerun therefore resumes at the
 // right checkpoint after any interruption (usage limit, kill, CI timeout) and never runs a merged
 // ticket again. Anything ambiguous stops the batch until a rerun can verify it.
 //
@@ -20,9 +22,11 @@
 //   batch-limit, no-eligible-ticket          finished                  exit 0
 //   unresolved-dependency                    finished; tickets wait     exit 2
 //   paused (ralph-loop exit 75)              resumable: rerun           exit 75
-//   ambiguous-merge, runner-failed, push-failed, ci-unverified, base-not-verified
-//                                            resumable: fix, rerun      exit 1
+//   ambiguous-merge, runner-failed, push-failed, ci-unverified, base-not-verified,
+//   checkout-changed                         resumable: fix, rerun      exit 1
 //   rejected, ci-failed                      final; `--new` starts over exit 1
+//   untrusted-result (runner exit 3: the host refused the run's output)
+//                                            final; `--new` starts over exit 1
 //
 // Environment (defaults are the real thing; tests inject stubs):
 //   RALPH_BATCH_RUNNER  runs one ticket, `--ticket NN` appended (default: bash scripts/sandbox.sh)
@@ -49,6 +53,7 @@ const DIR = resolve(root, env.RALPH_BATCH_DIR ?? ".ralph/batch");
 const STATE = join(DIR, "state.json");
 const LOCK = join(DIR, "lock");
 const PAUSED_EXIT = 75;
+const UNTRUSTED_EXIT = 3;
 
 // Stops a rerun can resume from; the others end the batch.
 const RESUMABLE = new Set([
@@ -58,6 +63,7 @@ const RESUMABLE = new Set([
   "push-failed",
   "ci-unverified",
   "base-not-verified",
+  "checkout-changed",
 ]);
 const EXIT = { "batch-limit": 0, "no-eligible-ticket": 0, "unresolved-dependency": 2, paused: 75 };
 
@@ -168,12 +174,27 @@ function remoteSha() {
   return result.status === 0 ? (result.stdout.split(/\s/)[0] ?? "") : "";
 }
 
-function preflight() {
+function checkoutProblem() {
   if (gitOut("symbolic-ref", "--short", "HEAD") !== BASE) {
-    throw new Error(`the batch must start on '${BASE}'`);
+    return `the batch needs '${BASE}' checked out`;
   }
   if (gitOut("status", "--porcelain") !== "") {
-    throw new Error("the working tree is not clean; the sandbox pushes into it");
+    return "the working tree is not clean; accepted runs are fast-forwarded into it";
+  }
+  return null;
+}
+
+function preflight() {
+  const problem = checkoutProblem();
+  if (problem) {
+    throw new Error(problem);
+  }
+}
+
+function checkoutClean() {
+  const problem = checkoutProblem();
+  if (problem) {
+    throw new Stop("checkout-changed", `${problem}; restore it, then rerun`);
   }
 }
 
@@ -292,6 +313,15 @@ function runTicket(state, entry) {
   if (after === "ambiguous") {
     throw new Stop("ambiguous-merge", `ticket ${entry.number} is half-merged on ${BASE}`);
   }
+  // The host left the repository untouched. The forged or invalid result waits for a human in
+  // refs/ralph/incoming/ and .ralph/sandbox/; retrying it would only invite another forgery.
+  if (status === UNTRUSTED_EXIT) {
+    entry.stage = "untrusted";
+    throw new Stop(
+      "untrusted-result",
+      `the host refused ticket ${entry.number}'s sandbox output as untrusted; see the REFUSED reason above, refs/ralph/incoming/ and .ralph/sandbox/`,
+    );
+  }
   if (status === PAUSED_EXIT) {
     throw new Stop(
       "paused",
@@ -360,6 +390,9 @@ function checkCi(state, entry) {
 function advance(state, entry) {
   const steps = { running: runTicket, merged: (_s, e) => pushBase(e), pushed: checkCi };
   while (steps[entry.stage]) {
+    // Every step starts from the checkout the batch vouches for. A run is accepted into it by
+    // fast-forward, and what gets pushed is exactly what is checked out here.
+    checkoutClean();
     try {
       steps[entry.stage](state, entry);
     } finally {

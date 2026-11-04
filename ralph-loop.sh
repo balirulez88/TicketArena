@@ -1015,10 +1015,11 @@ reject_slice() {
   [[ -z "${PUSH_REMOTE}" ]] || push_rejection "${quarantine}"
 }
 
-# In the sandbox the clone dies with the container, so the evidence must reach the host. The
-# quarantine branch is new and cannot clobber anything. The base branch only moves by fast-forward,
-# and a non-bare host repo (receive.denyCurrentBranch=updateInstead) refuses it while the host has
-# local changes; the blocked status then goes to a side branch instead of being lost.
+# The clone may die with its machine, so the evidence must reach the remote. (In the sandbox, that
+# remote is the container's staging repository, whose branches the host validates and adopts:
+# ADR 0014.) The quarantine branch is new and cannot clobber anything. The base branch only moves
+# by fast-forward, and a non-bare remote (receive.denyCurrentBranch=updateInstead) refuses it while
+# it has local changes; the blocked status then goes to a side branch instead of being lost.
 push_rejection() {
   local quarantine=$1 side="ralph/blocked-${RUN_ID}"
   git push --quiet "${PUSH_REMOTE}" "${quarantine}" ||

@@ -96,7 +96,11 @@ case "${RALPH_PHASE}" in
           echo feature >feature.txt
           printf '#!/usr/bin/env bash\nexit 0\n' >scripts/ralph-ci.sh
           cp scripts/ralph-ci.sh Scripts/ralph-ci.sh
+          # And the host's batch state, which the host ignores and a fast-forward would overwrite.
+          mkdir -p .ralph/batch
+          echo '{"forged":true}' >.ralph/batch/state.json
           git add -A
+          git add --force .ralph/batch/state.json
           git commit --quiet -m "feat(slice-01): Demo ticket"
           git switch --quiet main
           git merge --quiet --no-ff slice/01-demo -m "Merge slice/01-demo: Demo ticket"
@@ -228,6 +232,8 @@ check "sandbox exits 3 (refused)" "[[ ${code} == 3 ]]"
 check "the host refused the forgery" "grep -q 'REFUSED' '${host}.out'"
 check "refused by the path rules, for both spellings" \
   "grep -q 'scripts/ralph-ci.sh: protected' '${host}.out' && grep -q 'Scripts/ralph-ci.sh: protected' '${host}.out'"
+check "refused the host-only batch state" "grep -q '.ralph/batch/state.json: the host keeps' '${host}.out'"
+check "no forged batch state on the host" "[[ ! -e '${host}/.ralph/batch/state.json' ]]"
 check "host repository, Git metadata and scripts unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
 check "forged CI check not on the host" "grep -q 'exit 2' '${host}/scripts/ralph-ci.sh'"
 check "forgery kept for inspection" "[[ -n \$(git -C '${host}' for-each-ref refs/ralph/incoming/) ]]"

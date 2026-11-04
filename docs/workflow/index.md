@@ -394,25 +394,34 @@ repository from a run, and everything in `out/` is data to it:
   `tsconfig.base.json`, `turbo.json`, `pnpm-workspace.yaml`, `docker-compose.yml`, `.nvmrc`, and
   `biome.json(c)`, `.npmrc` and `.pnpmfile.cjs` in any directory. All root `package.json`
   scripts are fixed. In any other `package.json`, the gate scripts (`lint`, `typecheck`, `test`,
-  `check`, `check:debt`, `test:harness`) are fixed and the package may not be deleted; its
-  dependencies and other scripts may change, and new packages may be added. Neither may
+  `check`, `check:debt`, `test:harness`, and their `pre`/`post` scripts) are fixed and the
+  package may not be deleted; its dependencies and other scripts may change, and new packages
+  may be added. No package, new or old, may gain an install script (`preinstall`, `install`,
+  `postinstall`, `prepare` and the like), and nested `turbo.json` files are protected.
+- **Host-only paths** may not be written: `.ralph/`, `node_modules/`, `.pnpm-store/`, `.turbo/`,
+  `.env` files (examples aside), and anything the host's own ignore rules match. A fast-forward
+  would overwrite such ignored files without a trace, planting state, credentials or
+  executables the host then trusts. Neither may
   `.gitattributes` and `.gitmodules` change anywhere, and no symlinks or submodules may appear.
   The scripts the batch runs on the host, and the gate that judges the next slice, therefore
   change only through a human-reviewed commit.
 - Every rule compares **folded** path names: Unicode NFC, lower case, trailing dots and spaces
   dropped per component. That is how Windows and macOS resolve them, so `Scripts/x.sh` or
-  `scripts./x.sh` is `scripts/x.sh`. Names Windows would resolve elsewhere (8.3 short names such
-  as `SCRIPT~1`, stream syntax, reserved characters) and names with control characters are
-  refused, as is a tree in which two paths fold to the same name.
+  `scripts./x.sh` is `scripts/x.sh`; ignorable code points are dropped and case is fully folded
+  (`ſ` is `s`), as HFS+ and APFS do. Names Windows would resolve elsewhere (8.3 short names such
+  as `SCRIPT~1`, stream syntax, device names such as `aux.ts`, reserved characters) and names with
+  control characters are refused, as is a tree in which two paths fold to the same name.
 - The **full gate runs again** on the merged tree before `main` moves, in a fresh sandbox with no
-  agent and no key (`sandbox.sh --verify <sha>`).
+  agent and no key (`sandbox.sh --verify <sha>`). The register check runs first, before
+  `pnpm install` or any of the slice's code could rewrite it in that checkout.
 - A **pause** is adopted only if it is exactly what `pause_ticket` writes. It must belong to the
   run's ticket and to parked work that is in the bundle on the base, with `paused^ = gated` and
   attempt and round within limits, and the parked work must obey the path rules. The host
   rewrites it in canonical form into `.ralph/state/`. Resume state the host handed in must come
   back unchanged.
 - Logs are copied into `.ralph/logs/<run-id>/` as plain files (links and special files dropped,
-  existing files kept), redacted with the host's secrets, and expired by the host's retention.
+  files over 64 MiB and existing files kept), redacted with the host's secrets, and expired by
+  the host's retention. The container's raw copy in the run directory is then deleted.
 
 The host moves `main` by fast-forward only, after rechecking that the checkout is still clean
 and on the same base. Exit codes: `0` accepted, `75` paused, `1` rejected or failed, `3`

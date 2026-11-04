@@ -18,9 +18,9 @@
 //     issues/ changed. Or it is a blocked-status commit that changes only that ticket's status
 //     line. The first-parent chain must hold nothing else.
 //   - No change may touch a protected path (the harness, the gate configuration, CI, review
-//     skills, the root package.json scripts), Git attributes or submodules, or add a symlink or
-//     submodule. So the host scripts the batch runs, and the gate the agent is judged by, cannot
-//     change through a run.
+//     skills, the root package.json scripts, every package's gate and install scripts), Git
+//     attributes or submodules, or add a symlink or submodule. So the host scripts the batch
+//     runs, and the definition of the gate the agent is judged by, cannot change through a run.
 //   - The full quality gate passes again on the merged tree, in a fresh sandbox with no agent
 //     (RALPH_ACCEPT_VERIFY).
 //   - A pause is adopted only if it is exactly what Ralph writes for the ticket's parked ref. It
@@ -92,8 +92,8 @@ export const PROTECTED_DIRS = [
   "docs/workflow/",
   "infra/",
 ];
-// Anywhere in the tree: Biome reads nested configuration files, and pnpm reads nested settings.
-const NESTED_GATE_FILES = ["biome.json", "biome.jsonc", ".npmrc", ".pnpmfile.cjs"];
+// Anywhere in the tree: Biome and Turborepo read nested configuration, pnpm nested settings.
+const NESTED_GATE_FILES = ["biome.json", "biome.jsonc", "turbo.json", ".npmrc", ".pnpmfile.cjs"];
 // Anywhere in the tree: they bring Git filters, diff drivers or other repositories with them.
 const GIT_METADATA = [".gitattributes", ".gitmodules"];
 const COMMIT_TYPES = ["feat", "fix", "refactor", "perf", "test", "docs", "chore"];
@@ -221,7 +221,11 @@ const short = (sha) => sha.slice(0, 12);
 // `scripts./x.sh` and `scripts/x.sh` are one file there. Every rule compares folded names.
 const fold = (path) =>
   path
+    // HFS+ ignores these when it looks a name up, so `scripts\u200c/x` is `scripts/x` there.
+    .replace(/\p{Default_Ignorable_Code_Point}/gu, "")
     .normalize("NFC")
+    // Upper then lower approximates full case folding: `ſ` and `K` (Kelvin) become `s` and `k`.
+    .toUpperCase()
     .toLowerCase()
     .split("/")
     .map((part) => part.replace(/[. ]+$/, ""))
@@ -231,13 +235,28 @@ const isProtected = (folded) =>
   PROTECTED_DIRS.some((dir) => folded.startsWith(dir)) ||
   NESTED_GATE_FILES.includes(folded.split("/").at(-1) ?? "");
 // Names Windows resolves to something else: 8.3 short names (`SCRIPT~1` can open `scripts`),
-// stream and device syntax, and characters it cannot store at all.
-const UNPORTABLE = /~\d|[\\:*?"<>|]/;
+// stream syntax, device names (`aux.ts` is the AUX device) and characters it cannot store.
+const UNPORTABLE =
+  /~\d|[\\:*?"<>|]|^(con|prn|aux|nul|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3])(\.|$)/;
 const hasControl = (text) => printable(text) !== text;
 
 // The scripts that make up the gate, in any package. A slice may add a package or change its
 // dependencies, but not redefine what `lint`, `typecheck` or `test` run for an existing one.
-const GATE_SCRIPTS = ["lint", "typecheck", "test", "check", "check:debt", "test:harness"];
+const GATE_SCRIPTS = ["lint", "typecheck", "test", "check", "check:debt", "test:harness"].flatMap(
+  (name) => [name, `pre${name}`, `post${name}`],
+);
+// What pnpm runs by itself on `pnpm install` for every workspace package, before any gate and on
+// every developer machine: no package may gain one, new packages included.
+const INSTALL_SCRIPTS = [
+  "preinstall",
+  "install",
+  "postinstall",
+  "preprepare",
+  "prepare",
+  "postprepare",
+  "prepublish",
+  "pnpm:devPreinstall",
+];
 function packageScripts(sha, path) {
   const text = show(sha, path);
   if (text === null) {
@@ -252,21 +271,24 @@ function packageScripts(sha, path) {
 function scriptsError(from, to, path) {
   const before = packageScripts(from, path);
   const after = packageScripts(to, path);
+  if (before !== null && after === null) {
+    return "removing a package removes its tests from the gate";
+  }
+  const only = (scripts, names) =>
+    typeof scripts === "symbol"
+      ? scripts
+      : Object.fromEntries(Object.entries(scripts ?? {}).filter(([name]) => names.includes(name)));
+  if (!isDeepStrictEqual(only(before, INSTALL_SCRIPTS), only(after, INSTALL_SCRIPTS))) {
+    return "install scripts cannot change through a run";
+  }
   if (before === null) {
     return null;
   }
-  if (after === null) {
-    return "removing a package removes its tests from the gate";
-  }
-  const gate = (scripts) =>
-    typeof scripts === "symbol"
-      ? scripts
-      : Object.fromEntries(Object.entries(scripts).filter(([name]) => GATE_SCRIPTS.includes(name)));
   // The root scripts are the gate and the host's tooling: all of them stay as they are.
   const same =
     path === "package.json"
       ? isDeepStrictEqual(before, after)
-      : isDeepStrictEqual(gate(before), gate(after));
+      : isDeepStrictEqual(only(before, GATE_SCRIPTS), only(after, GATE_SCRIPTS));
   return same ? null : "the scripts that define the gate cannot change through a run";
 }
 
@@ -298,9 +320,14 @@ function changeError({ path, newMode, status }, issues) {
 /** Problems with the changes between two commits, whoever made them. */
 function pathErrors(from, to, issues) {
   const errors = [];
-  for (const change of changes(from, to)) {
+  const list = changes(from, to);
+  const hostOnly = hostOnlyPaths(list.filter((change) => change.status !== "D"));
+  for (const change of list) {
     const error =
       changeError(change, issues) ??
+      (hostOnly.has(change.path)
+        ? "the host keeps this path out of Git (state, credentials, dependencies)"
+        : null) ??
       (fold(change.path).split("/").at(-1) === "package.json"
         ? scriptsError(from, to, change.path)
         : null);
@@ -309,6 +336,42 @@ function pathErrors(from, to, issues) {
     }
   }
   return errors;
+}
+
+// Paths the host itself never tracks, whatever a slice does to .gitignore first.
+const HOST_ONLY_DIRS = [".ralph", "node_modules", ".pnpm-store", ".turbo"];
+const isEnvFile = (name) => /^\.env(\..*)?$/.test(name) && !name.endsWith(".example");
+
+/**
+ * The changed paths that would land on files the host keeps out of Git: its batch and resume
+ * state, credentials, installed dependencies. A fast-forward overwrites ignored files without a
+ * trace in `git status`, so such a path could plant state or executables the host then trusts.
+ * Judged by the host's own ignore rules (the base's .gitignore files, info/exclude, the user's
+ * excludes), on both the path and its folded spelling, plus a fixed list.
+ */
+function hostOnlyPaths(list) {
+  const found = new Set();
+  const byCandidate = new Map();
+  for (const { path } of list) {
+    const parts = fold(path).split("/");
+    if (parts.some((part) => HOST_ONLY_DIRS.includes(part)) || isEnvFile(parts.at(-1) ?? "")) {
+      found.add(path);
+    }
+    byCandidate.set(path, path);
+    byCandidate.set(fold(path), path);
+  }
+  if (byCandidate.size > 0) {
+    const result = git(["check-ignore", "--no-index", "--stdin", "-z"], {
+      input: `${[...byCandidate.keys()].join("\0")}\0`,
+    });
+    if (result.status > 1) {
+      throw new Error(`git check-ignore failed: ${result.stderr.trim()}`);
+    }
+    for (const candidate of result.stdout.split("\0").filter(Boolean)) {
+      found.add(byCandidate.get(candidate) ?? candidate);
+    }
+  }
+  return found;
 }
 
 /**
@@ -640,10 +703,10 @@ function importLogs(outDir) {
       .filter((entry) => entry.isDirectory() && /^\d{8}-\d{6}$/.test(entry.name))
       .map((entry) => entry.name);
     for (const run of runs) {
-      // The run directory is kept after a refusal, so its copy is redacted as well.
-      redactRun(join(logs, run), secretValues(env));
       copyLogs(join(logs, run), join(LOG_ROOT, run));
       redactRun(join(LOG_ROOT, run), secretValues(env));
+      // The run directory is kept after a refusal: only the bounded, redacted copy remains.
+      rmSync(join(logs, run), { recursive: true, force: true });
     }
     cleanup({ reviewRoot: join(root, ".ralph/review"), logRoot: LOG_ROOT });
   } catch (error) {
@@ -762,7 +825,7 @@ function validate(outDir, { base, status, only, namespace }) {
 
 function apply({ tip, outcomes, pause, quarantines }, { base, namespace }) {
   if (tip !== base) {
-    gitOut("merge", "--ff-only", "--quiet", tip);
+    gitOut("merge", "--ff-only", "--no-overwrite-ignore", "--quiet", tip);
     // A checkout that does not match the accepted tree means the file system merged paths that
     // Git keeps apart. The validation above refuses every such tree it knows of; if one slips
     // through anyway, the host goes back to the base it vouched for.

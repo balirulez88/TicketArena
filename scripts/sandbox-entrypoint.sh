@@ -48,6 +48,12 @@ if [[ "${verify_only}" == true ]]; then
   git reset --quiet --hard "${commit}"
   log="$(git log -1 --format='%h %s')"
   echo "sandbox: verifying ${log}" >&2
+  # The register check is protected and needs no dependencies, so it runs first, before
+  # `pnpm install` or any test executes code the slice wrote and could rewrite it in this
+  # checkout. Not through `pnpm run`, which installs first; the command comes from the root
+  # package.json, which no run can change. `check` below runs it again.
+  command="$(node -e 'process.stdout.write(require("./package.json").scripts?.["check:debt"] ?? "")')"
+  [[ -z "${command}" ]] || bash -c "${command}"
   pnpm install --frozen-lockfile
   # shellcheck source=sandbox-services.sh
   source /usr/local/lib/sandbox-services.sh

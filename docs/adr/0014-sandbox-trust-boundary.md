@@ -34,16 +34,22 @@ a trusted host step has validated it.
     changes only that ticket's status line.
   - No change may touch a protected path (the harness, `scripts/`, CI, review skills,
     `CLAUDE.md`, `docs/workflow/`, gate and workspace configuration, `infra/`, the root
-    `package.json` scripts and every package's gate scripts), Git attributes or submodules, or
-    add a symlink or submodule. Paths are compared as a case-insensitive host resolves them, and
-    names that host could resolve elsewhere, or two names for one file, are refused.
-  - The full gate runs again on the merged tree, in a fresh sandbox with no agent.
+    `package.json` scripts, every package's gate scripts and any install script), Git attributes
+    or submodules, or add a symlink or submodule. Nor may it write a path the host keeps out of
+    Git (`.ralph/`, `.env*`, `node_modules/`, anything the host's ignore rules match): a
+    fast-forward would overwrite such files silently. Paths are compared as a case-insensitive
+    host resolves them, and names that host could resolve elsewhere, or two names for one file,
+    are refused.
+  - The full gate runs again on the merged tree, in a fresh sandbox with no agent. The register
+    check runs first, before `pnpm install` or any code of the slice.
   - A pause is adopted only if it is exactly what Ralph writes, for parked work that is in the
     bundle and sits on the base. The host rewrites it in canonical form.
   - Anything else is refused (exit 3). The host is unchanged and the result is kept for
     inspection. The batch stops finally on a refusal (`untrusted-result`).
-- **Host-only state:** `.ralph/batch` and `.ralph/state` are never mounted. Logs are copied in as
-  plain files, without links, redacted, and never consulted for a decision.
+- **Host-only state:** `.ralph/batch` and `.ralph/state` are never mounted, and no accepted
+  result can write them (see the host-only path rule). Logs are copied in as plain files, without
+  links, size-capped and redacted; the container's raw copy is then deleted. Logs are never
+  consulted for a decision.
 
 ## Alternatives considered
 
@@ -54,7 +60,8 @@ a trusted host step has validated it.
   repository whose config the container wrote. A bundle is just a file.
 - **Trusting Ralph's in-container gates and checking only the merge shape.** The agent runs as
   the same user as the gates, so their verdicts can be forged inside the container. Re-running
-  the deterministic gate on the host closes that for lint, typecheck, tests and the register.
+  the deterministic gate without the agent closes that for a forged verdict. It does not close a
+  slice whose own code is written to subvert the gate it runs in (see Consequences).
 - **Re-running the LLM reviews on the host.** That would cost another full review round per
   ticket and change the review loop (no FIX round after it). Deferred: see Consequences.
 
@@ -72,13 +79,16 @@ a trusted host step has validated it.
     before the in-container review gate reads it. The host re-runs the deterministic gate, checks
     the merge shape and protected paths, and GitHub CI runs after the push. The approval of the
     two LLM reviews, however, is still produced inside the container (TD-058).
-  - The re-run gate and CI execute the slice's own tests, so they are only as strong as those
-    tests. A slice may still change a package's `vitest.config` or `tsconfig.json` (real slices
-    need to), so a malicious agent could narrow what the gate covers for that package. Only the
-    reviews judge that, and their verdicts are the in-container weakness above (TD-058).
+  - The re-run gate and CI execute the slice's own code: its tests, its `vitest.config` and
+    `tsconfig.json` (real slices need to change them), and the dependencies its lockfile
+    resolves. Code written to subvert the gate can therefore narrow what the gate covers, or
+    tamper with the tooling and the later gate steps in its own checkout, so a lint, typecheck
+    or test result is only as trustworthy as the slice that produced it. The register check runs
+    before any slice code, and install scripts are refused, but only the reviews
+    judge the rest, and their verdicts are the in-container weakness above (TD-058).
   - Accepted code is not contained. Once merged, it runs wherever the repository is used: on
-    developer machines (`pnpm install` with the build scripts `allowBuilds` permits, `infra:up`,
-    the tests), in GitHub CI, and in the agent-free re-gate. The re-gate has no credentials but
+    developer machines (the tests, `infra:up`, and on `pnpm install` the build scripts of any
+    dependency `allowBuilds` permits), in GitHub CI, and in the agent-free re-gate. The re-gate has no credentials but
     has network access. The boundary protects the host's repository, harness and decisions from
     the agent while it runs; what may be merged is decided by the gates and the reviews.
   - Container output reaches the operator's terminal while a run is in progress. The importer

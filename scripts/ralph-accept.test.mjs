@@ -94,7 +94,7 @@ function hostRepo() {
   write(host, "issues/01-demo.md", DEMO);
   write(host, "issues/02-next.md", NEXT);
   write(host, "app.txt", "v1\n");
-  write(host, ".gitignore", ".ralph/\n");
+  write(host, ".gitignore", ".ralph/\nnode_modules/\n.env\n.env.*\nsecrets/\n");
   write(host, "stub/verify.mjs", VERIFY);
   git(host, "add", "-A");
   git(host, "commit", "--quiet", "-m", "init");
@@ -538,6 +538,9 @@ describe("ralph-accept: attack path 3, harness, CI and gate definitions", () => 
     ["an upper-case workflow", ".GITHUB/workflows/ci.yml", /protected/],
     ["an 8.3 short name", "SCRIPT~1/ralph-ci.sh", /not a portable path/],
     ["a stream name", "scripts/ralph-ci.sh:evil", /not a portable path/],
+    ["an ignorable code point", "scripts\u200c/ralph-ci.sh", /protected/],
+    ["a long s", "\u017fcripts/ralph-ci.sh", /protected/],
+    ["a device name", "aux.ts", /not a portable path/],
   ]) {
     it(`refuses ${name} of the host's CI check (${path})`, () => {
       const host = hostRepo();
@@ -584,6 +587,7 @@ describe("ralph-accept: attack path 3, harness, CI and gate definitions", () => 
     ["the infrastructure definition", "docker-compose.yml", "services: {}\n"],
     ["the infrastructure directory", "infra/nats.conf", "jetstream: off\n"],
     ["the Node version", ".nvmrc", "18\n"],
+    ["a nested Turborepo configuration", "packages/demo/turbo.json", '{"tasks":{}}\n'],
   ]) {
     it(`refuses a slice that changes ${name}`, () => {
       const host = hostRepo();
@@ -604,6 +608,28 @@ describe("ralph-accept: attack path 3, harness, CI and gate definitions", () => 
       (dir) => write(dir, "packages/demo/package.json", '{"scripts":{"dev":"x"}}\n'),
     ],
     ["deletes a package", (dir) => rmSync(join(dir, "packages/demo/package.json"))],
+    [
+      "redefines what runs before a package's tests",
+      (dir) =>
+        write(
+          dir,
+          "packages/demo/package.json",
+          '{"scripts":{"test":"vitest run","pretest":"x"}}\n',
+        ),
+    ],
+    [
+      "gives a package an install script",
+      (dir) =>
+        write(
+          dir,
+          "packages/demo/package.json",
+          '{"scripts":{"test":"vitest run","dev":"x","postinstall":"node evil.js"}}\n',
+        ),
+    ],
+    [
+      "adds a package with an install script",
+      (dir) => write(dir, "packages/new/package.json", '{"scripts":{"prepare":"node evil.js"}}\n'),
+    ],
   ]) {
     it(`refuses a slice that ${name}`, () => {
       const host = hostRepo();
@@ -612,7 +638,7 @@ describe("ralph-accept: attack path 3, harness, CI and gate definitions", () => 
       merge(ws, "01-demo", { change });
       assert.match(
         assertRefused(host, finish(host, ws), { base }).output,
-        /define the gate|removes its tests/,
+        /define the gate|removes its tests|install scripts/,
       );
     });
   }
@@ -638,6 +664,46 @@ describe("ralph-accept: attack path 3, harness, CI and gate definitions", () => 
 });
 
 describe("ralph-accept: attack path 4, pause and resume checkpoints", () => {
+  // A fast-forward writes over files the host ignores without a trace in `git status`.
+  for (const [name, path, stagedOnly] of [
+    ["the batch state", ".ralph/batch/state.json"],
+    ["a resume checkpoint", ".ralph/state/02-next.pause"],
+    ["a resume checkpoint under a case variant", ".RALPH/state/02-next.pause", true],
+    ["the host's credentials", ".env"],
+    ["a package's local credentials", "packages/demo/.env.local"],
+    ["an installed executable", "node_modules/.bin/biome"],
+    ["a path only the host's own ignore rules name", "secrets/token"],
+  ]) {
+    it(`refuses a slice that writes ${name} (${path})`, () => {
+      const host = hostRepo();
+      write(host, path.toLowerCase(), "host's own\n");
+      const base = git(host, "rev-parse", "main");
+      const ws = container(host);
+      const forged = "ticket=02\nforged=true\n";
+      merge(ws, "01-demo", {
+        staged: (dir) => stage(dir, path, forged),
+        change: stagedOnly ? undefined : (dir) => write(dir, path, forged),
+      });
+      const result = assertRefused(host, finish(host, ws), { base });
+      assert.match(result.output, /keeps this path out of Git/);
+      assert.equal(readFileSync(join(host, path.toLowerCase()), "utf8"), "host's own\n");
+    });
+  }
+
+  it("refuses host-only paths after a slice stops ignoring them", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "01-demo", {
+      change: (dir) => write(dir, ".gitignore", "# nothing ignored\n"),
+      staged: (dir) => stage(dir, ".ralph/state/02-next.pause", "ticket=02\n"),
+    });
+    assert.match(
+      assertRefused(host, finish(host, ws), { base }).output,
+      /\.ralph\/state\/02-next\.pause: the host keeps this path out of Git/,
+    );
+  });
+
   it("adopts a genuine pause in canonical form and parks the work on the host", () => {
     const host = hostRepo();
     const base = git(host, "rev-parse", "main");
@@ -831,5 +897,22 @@ describe("ralph-accept: what the container leaves in out/", () => {
     const result = accept(host, run, { base });
     assert.equal(result.code, 0, result.output);
     assert.equal(existsSync(join(host, ".ralph", "logs", RUN, "secret.log")), false);
+  });
+
+  it("keeps only the host's bounded, redacted copy of the logs", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws);
+    const run = finish(host, ws);
+    write(join(run, "out"), `logs/${RUN}/huge.log`, "x".repeat(64 * 1024 * 1024 + 1));
+    const result = accept(host, run, { base, verify: 1 });
+    assert.equal(result.code, UNTRUSTED, result.output);
+    assert.equal(existsSync(join(run, "out", "logs", RUN)), false, "the raw logs are gone");
+    assert.equal(existsSync(join(host, ".ralph", "logs", RUN, "huge.log")), false);
+    assert.equal(
+      readFileSync(join(host, ".ralph", "logs", RUN, "01-demo.agent.log"), "utf8"),
+      "agent output\n",
+    );
   });
 });

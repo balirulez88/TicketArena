@@ -390,11 +390,20 @@ repository from a run, and everything in `out/` is data to it:
   - a **blocked-status commit** that changes only that ticket's status line. Its quarantine
     branch `rejected/<slug>-<run-id>` is imported as a new branch.
 - **Protected paths** may not change through a run: `ralph-loop.sh`, `scripts/`, `Dockerfile`,
-  `.dockerignore`, `.github/`, `skills/`, `.claude/`, `CLAUDE.md`, `docs/workflow/`,
-  `biome.json`, `tsconfig.base.json`, `turbo.json`, `.npmrc`, `.pnpmfile.cjs`, and the root
-  `package.json` scripts. Neither may `.gitattributes` and `.gitmodules` anywhere, and no
-  symlinks or submodules may appear. The scripts the batch runs on the host, and the gate that
-  judges the next slice, therefore change only through a human-reviewed commit.
+  `.dockerignore`, `.github/`, `skills/`, `.claude/`, `infra/`, `CLAUDE.md`, `docs/workflow/`,
+  `tsconfig.base.json`, `turbo.json`, `pnpm-workspace.yaml`, `docker-compose.yml`, `.nvmrc`, and
+  `biome.json(c)`, `.npmrc` and `.pnpmfile.cjs` in any directory. All root `package.json`
+  scripts are fixed. In any other `package.json`, the gate scripts (`lint`, `typecheck`, `test`,
+  `check`, `check:debt`, `test:harness`) are fixed and the package may not be deleted; its
+  dependencies and other scripts may change, and new packages may be added. Neither may
+  `.gitattributes` and `.gitmodules` change anywhere, and no symlinks or submodules may appear.
+  The scripts the batch runs on the host, and the gate that judges the next slice, therefore
+  change only through a human-reviewed commit.
+- Every rule compares **folded** path names: Unicode NFC, lower case, trailing dots and spaces
+  dropped per component. That is how Windows and macOS resolve them, so `Scripts/x.sh` or
+  `scripts./x.sh` is `scripts/x.sh`. Names Windows would resolve elsewhere (8.3 short names such
+  as `SCRIPT~1`, stream syntax, reserved characters) and names with control characters are
+  refused, as is a tree in which two paths fold to the same name.
 - The **full gate runs again** on the merged tree before `main` moves, in a fresh sandbox with no
   agent and no key (`sandbox.sh --verify <sha>`).
 - A **pause** is adopted only if it is exactly what `pause_ticket` writes. It must belong to the

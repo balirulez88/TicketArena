@@ -67,22 +67,33 @@ const PAUSED_EXIT = 75;
 const UNTRUSTED_EXIT = 3;
 const ZERO = "0".repeat(40);
 const MAX_STATE_BYTES = 8 * 1024 * 1024;
+const MAX_LOG_BYTES = 64 * 1024 * 1024;
 
-// The harness and everything that defines its gate: a slice that changes any of it could change
-// what judges the next slice, or what the host runs between tickets. Changing it takes a
-// human-reviewed commit.
+// The harness, everything that defines its gate, and what the host runs from the repository
+// (install hooks, the local services): a slice that changes any of it could change what judges
+// the next slice, or what runs on the host. Changing it takes a human-reviewed commit. Names are
+// compared folded (see `fold`), so they are listed in lower case.
 export const PROTECTED_FILES = [
   "ralph-loop.sh",
-  "Dockerfile",
+  "dockerfile",
   ".dockerignore",
-  "CLAUDE.md",
-  "biome.json",
+  "claude.md",
   "tsconfig.base.json",
   "turbo.json",
-  ".npmrc",
-  ".pnpmfile.cjs",
+  "pnpm-workspace.yaml",
+  "docker-compose.yml",
+  ".nvmrc",
 ];
-export const PROTECTED_DIRS = ["scripts/", ".github/", "skills/", ".claude/", "docs/workflow/"];
+export const PROTECTED_DIRS = [
+  "scripts/",
+  ".github/",
+  "skills/",
+  ".claude/",
+  "docs/workflow/",
+  "infra/",
+];
+// Anywhere in the tree: Biome reads nested configuration files, and pnpm reads nested settings.
+const NESTED_GATE_FILES = ["biome.json", "biome.jsonc", ".npmrc", ".pnpmfile.cjs"];
 // Anywhere in the tree: they bring Git filters, diff drivers or other repositories with them.
 const GIT_METADATA = [".gitattributes", ".gitmodules"];
 const COMMIT_TYPES = ["feat", "fix", "refactor", "perf", "test", "docs", "chore"];
@@ -106,11 +117,14 @@ class Refusal extends Error {}
 const refuse = (message) => {
   throw new Refusal(message);
 };
-// Paths and ref names in messages come from the container: control characters are masked so
-// they cannot rewrite the operator's terminal.
+// Paths and ref names in messages come from the container: C0 and C1 control characters are
+// masked so they cannot rewrite the operator's terminal.
 const printable = (text) =>
   [...text]
-    .map((char) => (char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127 ? "?" : char))
+    .map((char) => {
+      const code = char.charCodeAt(0);
+      return code < 32 || (code >= 127 && code < 160) ? "?" : char;
+    })
     .join("");
 const log = (message) => console.error(`[ralph-accept] ${printable(message)}`);
 
@@ -201,37 +215,81 @@ function eligibleTicket(sha, slug) {
 // --- Path rules ---------------------------------------------------------------------------------
 
 const short = (sha) => sha.slice(0, 12);
-const isProtected = (path) =>
-  PROTECTED_FILES.includes(path) || PROTECTED_DIRS.some((dir) => path.startsWith(dir));
 
-function rootScripts(sha) {
-  const text = show(sha, "package.json");
+// The name a path has on the most forgiving file system the host may use. Windows and macOS
+// fold case and Unicode forms, and Windows drops trailing dots and spaces, so `Scripts/x.sh`,
+// `scripts./x.sh` and `scripts/x.sh` are one file there. Every rule compares folded names.
+const fold = (path) =>
+  path
+    .normalize("NFC")
+    .toLowerCase()
+    .split("/")
+    .map((part) => part.replace(/[. ]+$/, ""))
+    .join("/");
+const isProtected = (folded) =>
+  PROTECTED_FILES.includes(folded) ||
+  PROTECTED_DIRS.some((dir) => folded.startsWith(dir)) ||
+  NESTED_GATE_FILES.includes(folded.split("/").at(-1) ?? "");
+// Names Windows resolves to something else: 8.3 short names (`SCRIPT~1` can open `scripts`),
+// stream and device syntax, and characters it cannot store at all.
+const UNPORTABLE = /~\d|[\\:*?"<>|]/;
+const hasControl = (text) => printable(text) !== text;
+
+// The scripts that make up the gate, in any package. A slice may add a package or change its
+// dependencies, but not redefine what `lint`, `typecheck` or `test` run for an existing one.
+const GATE_SCRIPTS = ["lint", "typecheck", "test", "check", "check:debt", "test:harness"];
+function packageScripts(sha, path) {
+  const text = show(sha, path);
   if (text === null) {
     return null;
   }
   try {
-    return JSON.parse(text).scripts ?? null;
+    return JSON.parse(text).scripts ?? {};
   } catch {
     return Symbol("unparseable");
   }
 }
+function scriptsError(from, to, path) {
+  const before = packageScripts(from, path);
+  const after = packageScripts(to, path);
+  if (before === null) {
+    return null;
+  }
+  if (after === null) {
+    return "removing a package removes its tests from the gate";
+  }
+  const gate = (scripts) =>
+    typeof scripts === "symbol"
+      ? scripts
+      : Object.fromEntries(Object.entries(scripts).filter(([name]) => GATE_SCRIPTS.includes(name)));
+  // The root scripts are the gate and the host's tooling: all of them stay as they are.
+  const same =
+    path === "package.json"
+      ? isDeepStrictEqual(before, after)
+      : isDeepStrictEqual(gate(before), gate(after));
+  return same ? null : "the scripts that define the gate cannot change through a run";
+}
 
 // What is wrong with one change, or null. `issues` judges a change under issues/ (true = allowed).
 function changeError({ path, newMode, status }, issues) {
-  const parts = path.split("/");
-  if (parts.some((part) => part.toLowerCase() === ".git")) {
+  const folded = fold(path);
+  const parts = folded.split("/");
+  if (hasControl(path) || parts.some((part) => UNPORTABLE.test(part))) {
+    return "not a portable path name";
+  }
+  if (parts.includes(".git")) {
     return "a .git path component";
   }
   if (GIT_METADATA.includes(parts.at(-1) ?? "")) {
     return "Git attributes and submodules cannot change through a run";
   }
-  if (isProtected(path)) {
+  if (isProtected(folded)) {
     return "protected harness or gate file";
   }
   if (status !== "D" && (newMode === "120000" || newMode === "160000")) {
     return newMode === "120000" ? "symlink" : "submodule";
   }
-  if (path.startsWith("issues/") && !issues({ path, status })) {
+  if (folded.startsWith("issues/") && !issues({ path, status })) {
     return "only the ticket's own file may change in issues/";
   }
   return null;
@@ -241,17 +299,36 @@ function changeError({ path, newMode, status }, issues) {
 function pathErrors(from, to, issues) {
   const errors = [];
   for (const change of changes(from, to)) {
-    const error = changeError(change, issues);
+    const error =
+      changeError(change, issues) ??
+      (fold(change.path).split("/").at(-1) === "package.json"
+        ? scriptsError(from, to, change.path)
+        : null);
     if (error) {
       errors.push(`${change.path}: ${error}`);
-    } else if (
-      change.path === "package.json" &&
-      !isDeepStrictEqual(rootScripts(from), rootScripts(to))
-    ) {
-      errors.push("package.json: the root scripts define the gate and cannot change through a run");
     }
   }
   return errors;
+}
+
+/**
+ * Refuses a tree in which two paths name the same file once folded. A case-insensitive checkout
+ * would write both to one place, and the later one would silently replace the earlier, whatever
+ * the path rules decided about each.
+ */
+function assertNoCollisions(sha, what) {
+  const spelled = new Map();
+  for (const path of gitOut("ls-tree", "-r", "-z", "--name-only", sha).split("\0")) {
+    const parts = path.split("/");
+    for (let end = 1; path !== "" && end <= parts.length; end++) {
+      const prefix = parts.slice(0, end).join("/");
+      const other = spelled.get(fold(prefix));
+      if (other !== undefined && other !== prefix) {
+        refuse(`${what}: ${other} and ${prefix} are the same file on a case-insensitive host`);
+      }
+      spelled.set(fold(prefix), prefix);
+    }
+  }
 }
 
 function assertPaths(from, to, issues, what) {
@@ -384,7 +461,29 @@ function mainOutcomes(base, tip, only) {
   if (reachable.length !== known.size || reachable.some((sha) => !known.has(sha))) {
     refuse(`${BASE} carries commits that are neither slices nor Ralph's own`);
   }
+  assertNoCollisions(tip, BASE);
   return outcomes;
+}
+
+// Untrusted output must be what it claims: a FIFO named result.bundle would hang the host, and a
+// linked state/ or logs/ would read from wherever it points.
+function plain(path, kind) {
+  if (!existsSync(path) && lstatSafe(path) === null) {
+    return false;
+  }
+  const stat = lstatSafe(path);
+  const ok = kind === "file" ? stat?.isFile() : stat?.isDirectory() && !stat.isSymbolicLink();
+  if (!ok) {
+    refuse(`${basename(path)} is not a plain ${kind === "file" ? "file" : "directory"}`);
+  }
+  return true;
+}
+function lstatSafe(path) {
+  try {
+    return lstatSync(path);
+  } catch {
+    return null;
+  }
 }
 
 // --- Pause and resume state -------------------------------------------------------------------
@@ -400,7 +499,7 @@ function readSmallFile(path) {
 /** The state files of the run's output, by slug; anything Ralph does not write is refused. */
 function stateFiles(dir) {
   const bySlug = new Map();
-  if (!existsSync(dir)) {
+  if (!plain(dir, "directory")) {
     return bySlug;
   }
   for (const name of readdirSync(dir)) {
@@ -494,6 +593,7 @@ function newPause(dir, incoming, tip, status, only) {
     eligibleTicket(tip, slug);
     const own = `issues/${slug}.md`;
     assertPaths(tip, fields.paused, ({ path, status: s }) => path === own && s === "M", fields.ref);
+    assertNoCollisions(fields.paused, fields.ref);
     found = { slug, fields, files };
   }
   return found;
@@ -515,6 +615,8 @@ function copyLogs(from, to, copied = new Set()) {
     if (stat.isDirectory()) {
       copied.add(target);
       copyLogs(source, target, copied);
+    } else if (stat.isFile() && stat.size > MAX_LOG_BYTES) {
+      log(`dropped ${name} from the logs: larger than ${MAX_LOG_BYTES} bytes`);
     } else if (stat.isFile()) {
       if (!existsSync(target)) {
         copyFileSync(source, target);
@@ -529,11 +631,18 @@ function copyLogs(from, to, copied = new Set()) {
 function importLogs(outDir) {
   try {
     initRoot(LOG_ROOT);
-    const runs = readdirSync(join(outDir, "logs"), { withFileTypes: true })
+    const logs = join(outDir, "logs");
+    if (!lstatSafe(logs)?.isDirectory()) {
+      log("the run left no plain logs/ directory; no logs imported");
+      return;
+    }
+    const runs = readdirSync(logs, { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && /^\d{8}-\d{6}$/.test(entry.name))
       .map((entry) => entry.name);
     for (const run of runs) {
-      copyLogs(join(outDir, "logs", run), join(LOG_ROOT, run));
+      // The run directory is kept after a refusal, so its copy is redacted as well.
+      redactRun(join(logs, run), secretValues(env));
+      copyLogs(join(logs, run), join(LOG_ROOT, run));
       redactRun(join(LOG_ROOT, run), secretValues(env));
     }
     cleanup({ reviewRoot: join(root, ".ralph/review"), logRoot: LOG_ROOT });
@@ -654,6 +763,15 @@ function validate(outDir, { base, status, only, namespace }) {
 function apply({ tip, outcomes, pause, quarantines }, { base, namespace }) {
   if (tip !== base) {
     gitOut("merge", "--ff-only", "--quiet", tip);
+    // A checkout that does not match the accepted tree means the file system merged paths that
+    // Git keeps apart. The validation above refuses every such tree it knows of; if one slips
+    // through anyway, the host goes back to the base it vouched for.
+    if (gitOut("status", "--porcelain") !== "") {
+      gitOut("reset", "--quiet", "--hard", base);
+      refuse(
+        `the checkout of ${short(tip)} did not match its tree; ${BASE} is back at ${short(base)}`,
+      );
+    }
   }
   for (const outcome of outcomes) {
     if (outcome.kind === "merged") {
@@ -679,7 +797,7 @@ function apply({ tip, outcomes, pause, quarantines }, { base, namespace }) {
 
 function decide(runDir, run) {
   const outDir = join(runDir, "out");
-  if (!existsSync(join(outDir, "result.bundle"))) {
+  if (!plain(join(outDir, "result.bundle"), "file")) {
     log("the run produced no result.bundle; nothing to accept");
     return { exit: 1, outcome: "no-result" };
   }
@@ -728,12 +846,18 @@ function main() {
   try {
     verdict = decide(runDir, { base, status, only: values.ticket, namespace });
   } catch (error) {
-    if (!(error instanceof Refusal)) {
-      throw error;
+    const reason = error instanceof Error ? error.message : String(error);
+    if (error instanceof Refusal) {
+      log(`REFUSED: ${reason}`);
+      log(`the host repository is unchanged; the result is kept in ${namespace}/ and ${runDir}`);
+      verdict = { exit: UNTRUSTED_EXIT, outcome: "untrusted", reason };
+    } else {
+      // A failure while applying a validated result: whatever was applied is valid on its own
+      // (main only moves by fast-forward to a validated tip), and the batch re-reads the
+      // repository, so it never trusts this verdict for what happened.
+      log(`ERROR while accepting the run: ${reason}`);
+      verdict = { exit: 1, outcome: "apply-failed", reason };
     }
-    log(`REFUSED: ${error.message}`);
-    log(`the host repository is unchanged; the result is kept in ${namespace}/ and ${runDir}`);
-    verdict = { exit: UNTRUSTED_EXIT, outcome: "untrusted", reason: error.message };
   }
   writeFileSync(join(runDir, "verdict.json"), `${JSON.stringify(verdict, null, 2)}\n`);
   return verdict.exit;

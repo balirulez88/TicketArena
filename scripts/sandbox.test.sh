@@ -80,13 +80,28 @@ case "${RALPH_PHASE}" in
           if [[ -e /var/run/docker.sock ]]; then echo "docker.sock: present"; else echo "docker.sock: absent"; fi
           echo "ralph mounts: $(grep -c ' /ralph-' /proc/mounts)"
         } >/ralph-out/probe.txt
-        # A forged commit straight onto the staging repository's main: the CI check the host
-        # runs between tickets, made to pass whatever happens.
+        # A forged slice straight onto the staging repository's main, shaped exactly as
+        # finalize_slice makes one, so only the path rules can catch it. Its payload is the CI
+        # check the host runs between tickets, made to pass whatever happens: under its own name,
+        # and under a case variant that a Windows or macOS checkout would write over it.
         forge="$(mktemp -d)"
         git clone --quiet --branch main "${HOME}/staging.git" "${forge}"
-        printf '#!/usr/bin/env bash\nexit 0\n' >"${forge}/scripts/ralph-ci.sh"
-        git -C "${forge}" commit --quiet -am "Merge slice/01-demo: Demo ticket"
-        git -C "${forge}" push --quiet origin main
+        (
+          cd "${forge}"
+          git switch --quiet -c slice/01-demo
+          mkdir -p issues/done Scripts
+          sed 's/^\*\*Status:\*\* .*/**Status:** done\n\n**Completed:** 2026-11-04 by slice\/01-demo (run forged)/' \
+            issues/01-demo.md >issues/done/01-demo.md
+          git rm --quiet issues/01-demo.md
+          echo feature >feature.txt
+          printf '#!/usr/bin/env bash\nexit 0\n' >scripts/ralph-ci.sh
+          cp scripts/ralph-ci.sh Scripts/ralph-ci.sh
+          git add -A
+          git commit --quiet -m "feat(slice-01): Demo ticket"
+          git switch --quiet main
+          git merge --quiet --no-ff slice/01-demo -m "Merge slice/01-demo: Demo ticket"
+          git push --quiet origin main
+        )
         ;;
       forge-pause)
         printf 'ticket=02\nphase=verify\n' >"${RALPH_STATE_DIR}/02-other.pause"
@@ -211,6 +226,8 @@ check "no Docker socket inside" "grep -q '^docker.sock: absent$' <<<'${probe}'"
 check "only the two run directories are mounted" "grep -q '^ralph mounts: 2$' <<<'${probe}'"
 check "sandbox exits 3 (refused)" "[[ ${code} == 3 ]]"
 check "the host refused the forgery" "grep -q 'REFUSED' '${host}.out'"
+check "refused by the path rules, for both spellings" \
+  "grep -q 'scripts/ralph-ci.sh: protected' '${host}.out' && grep -q 'Scripts/ralph-ci.sh: protected' '${host}.out'"
 check "host repository, Git metadata and scripts unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
 check "forged CI check not on the host" "grep -q 'exit 2' '${host}/scripts/ralph-ci.sh'"
 check "forgery kept for inspection" "[[ -n \$(git -C '${host}' for-each-ref refs/ralph/incoming/) ]]"

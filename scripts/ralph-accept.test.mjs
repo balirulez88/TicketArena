@@ -70,6 +70,14 @@ const write = (dir, path, text) => {
   mkdirSync(dirname(join(dir, path)), { recursive: true });
   writeFileSync(join(dir, path), text);
 };
+// Stages a file by name alone, past the working tree. A container on Linux can commit both
+// `Scripts/x` and `scripts/x`, or `scripts./x`, which a Windows checkout cannot even hold.
+const stage = (dir, path, text) => {
+  const file = join(mkdtempSync(join(tmpdir(), "ralph-blob-")), "blob");
+  writeFileSync(file, text);
+  const blob = git(dir, "hash-object", "-w", file);
+  git(dir, "update-index", "--add", "--cacheinfo", `100644,${blob},${path}`);
+};
 
 function hostRepo() {
   const host = mkdtempSync(join(tmpdir(), "ralph-accept-"));
@@ -82,6 +90,7 @@ function hostRepo() {
   write(host, "scripts/ralph-ci.sh", "exit 0\n");
   write(host, ".github/workflows/ci.yml", "name: CI\n");
   write(host, "package.json", '{"scripts":{"test":"vitest"},"devDependencies":{}}\n');
+  write(host, "packages/demo/package.json", '{"scripts":{"test":"vitest run","dev":"x"}}\n');
   write(host, "issues/01-demo.md", DEMO);
   write(host, "issues/02-next.md", NEXT);
   write(host, "app.txt", "v1\n");
@@ -97,6 +106,8 @@ function container(host) {
   const ws = mkdtempSync(join(tmpdir(), "ralph-accept-ws-"));
   git(ws, "clone", "--quiet", "--config", "core.autocrlf=false", host, ".");
   git(ws, "config", "core.autocrlf", "false");
+  // Lets the clone stage names Windows would refuse, as a Linux container can.
+  git(ws, "config", "core.protectNTFS", "false");
   return ws;
 }
 
@@ -122,16 +133,23 @@ function merge(ws, slug = "01-demo", { change, staged, title, subject } = {}) {
   git(ws, "add", "-A");
   staged?.(ws);
   git(ws, "commit", "--quiet", "-m", subject ?? `feat(slice-${slug.slice(0, 2)}): ${ticketTitle}`);
-  git(ws, "switch", "--quiet", "main");
-  git(
+  // The --no-ff merge, written without a checkout: main has not moved, so the merge's tree is the
+  // slice's, and the clone keeps names its own file system could not hold (`stage`).
+  const slice = git(ws, "rev-parse", "HEAD");
+  const message = `Merge slice/${slug}: ${ticketTitle}`;
+  const merged = git(
     ws,
-    "merge",
-    "--quiet",
-    "--no-ff",
-    `slice/${slug}`,
+    "commit-tree",
+    `${slice}^{tree}`,
+    "-p",
+    "main",
+    "-p",
+    slice,
     "-m",
-    `Merge slice/${slug}: ${ticketTitle}`,
+    message,
   );
+  git(ws, "update-ref", "refs/heads/main", merged);
+  git(ws, "symbolic-ref", "HEAD", "refs/heads/main");
   return { slice: git(ws, "rev-parse", `slice/${slug}`), merge: git(ws, "rev-parse", "main") };
 }
 
@@ -304,6 +322,14 @@ describe("ralph-accept: a genuine slice merge", () => {
 describe("ralph-accept: attack path 1, forged merges and archives", () => {
   const cases = [
     [
+      "another ticket marked done under a case variant of issues/",
+      (ws) =>
+        merge(ws, "01-demo", {
+          staged: (dir) => stage(dir, "Issues/02-next.md", NEXT.replace("ready-for-agent", "done")),
+        }),
+      /only the ticket's own file/,
+    ],
+    [
       "a merge commit that changes more than its slice",
       (ws) => {
         merge(ws);
@@ -409,12 +435,14 @@ describe("ralph-accept: attack path 2, Git configuration, hooks and links", () =
     ["Git attributes", ".gitattributes", "* filter=lfs\n"],
     ["a nested Git attributes file", "src/.gitattributes", "*.txt diff=evil\n"],
     ["a submodule declaration", ".gitmodules", '[submodule "x"]\n\tpath = x\n\turl = ../x\n'],
+    ["an upper-case Git attributes file", ".GITATTRIBUTES", "* filter=lfs\n"],
+    ["a Git attributes file with a trailing dot", "src/.gitattributes.", "* diff=evil\n"],
   ]) {
     it(`refuses a slice that adds ${name}`, () => {
       const host = hostRepo();
       const base = git(host, "rev-parse", "main");
       const ws = container(host);
-      merge(ws, "01-demo", { change: (dir) => write(dir, path, text) });
+      merge(ws, "01-demo", { staged: (dir) => stage(dir, path, text) });
       assert.match(assertRefused(host, finish(host, ws), { base }).output, /Git attributes/);
     });
   }
@@ -497,10 +525,116 @@ describe("ralph-accept: attack path 3, harness, CI and gate definitions", () => 
       const ws = container(host);
       merge(ws, "01-demo", { change });
       const result = assertRefused(host, finish(host, ws), { base });
-      assert.match(result.output, /protected|root scripts/);
+      assert.match(result.output, /protected|define the gate/);
       assert.equal(readFileSync(join(host, "scripts/ralph-ci.sh"), "utf8"), "exit 0\n");
     });
   }
+
+  // Spellings a case-insensitive host (Windows, macOS) resolves to a protected file.
+  for (const [name, path, reason] of [
+    ["a case variant", "Scripts/ralph-ci.sh", /protected/],
+    ["a trailing dot", "scripts./ralph-ci.sh", /protected/],
+    ["a trailing space", "scripts /ralph-ci.sh", /protected/],
+    ["an upper-case workflow", ".GITHUB/workflows/ci.yml", /protected/],
+    ["an 8.3 short name", "SCRIPT~1/ralph-ci.sh", /not a portable path/],
+    ["a stream name", "scripts/ralph-ci.sh:evil", /not a portable path/],
+  ]) {
+    it(`refuses ${name} of the host's CI check (${path})`, () => {
+      const host = hostRepo();
+      const base = git(host, "rev-parse", "main");
+      const ws = container(host);
+      merge(ws, "01-demo", { staged: (dir) => stage(dir, path, "exit 0 # forged\n") });
+      assert.match(assertRefused(host, finish(host, ws), { base }).output, reason);
+      assert.equal(readFileSync(join(host, "scripts/ralph-ci.sh"), "utf8"), "exit 0\n");
+    });
+  }
+
+  it("refuses two spellings of one file, which a case-insensitive checkout would merge", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "01-demo", { staged: (dir) => stage(dir, "APP.txt", "replaced\n") });
+    const result = assertRefused(host, finish(host, ws), { base });
+    assert.match(result.output, /same file on a case-insensitive host/);
+    assert.equal(readFileSync(join(host, "app.txt"), "utf8"), "v1\n");
+  });
+
+  it("masks control characters from the container's path names in its output", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "01-demo", {
+      staged: (dir) => stage(dir, "x\u001b]0;owned\u0007\u009b2J.txt", "x\n"),
+    });
+    const result = assertRefused(host, finish(host, ws), { base });
+    assert.match(result.output, /not a portable path/);
+    for (const char of ["\u001b", "\u0007", "\u009b"]) {
+      assert.equal(
+        result.output.includes(char),
+        false,
+        "no raw control character reaches the terminal",
+      );
+    }
+  });
+
+  for (const [name, path, text] of [
+    ["a nested Biome configuration", "packages/demo/biome.json", '{"linter":{"enabled":false}}\n'],
+    ["a nested npm configuration", "packages/demo/.npmrc", "ignore-scripts=false\n"],
+    ["the workspace definition", "pnpm-workspace.yaml", "packages: []\n"],
+    ["the infrastructure definition", "docker-compose.yml", "services: {}\n"],
+    ["the infrastructure directory", "infra/nats.conf", "jetstream: off\n"],
+    ["the Node version", ".nvmrc", "18\n"],
+  ]) {
+    it(`refuses a slice that changes ${name}`, () => {
+      const host = hostRepo();
+      const base = git(host, "rev-parse", "main");
+      const ws = container(host);
+      merge(ws, "01-demo", { change: (dir) => write(dir, path, text) });
+      assert.match(assertRefused(host, finish(host, ws), { base }).output, /protected/);
+    });
+  }
+
+  for (const [name, change] of [
+    [
+      "redefines a package's test script",
+      (dir) => write(dir, "packages/demo/package.json", '{"scripts":{"test":"true","dev":"x"}}\n'),
+    ],
+    [
+      "removes a package's test script",
+      (dir) => write(dir, "packages/demo/package.json", '{"scripts":{"dev":"x"}}\n'),
+    ],
+    ["deletes a package", (dir) => rmSync(join(dir, "packages/demo/package.json"))],
+  ]) {
+    it(`refuses a slice that ${name}`, () => {
+      const host = hostRepo();
+      const base = git(host, "rev-parse", "main");
+      const ws = container(host);
+      merge(ws, "01-demo", { change });
+      assert.match(
+        assertRefused(host, finish(host, ws), { base }).output,
+        /define the gate|removes its tests/,
+      );
+    });
+  }
+
+  it("accepts a slice that changes a package's dependencies and other scripts, or adds one", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "01-demo", {
+      change: (dir) => {
+        write(
+          dir,
+          "packages/demo/package.json",
+          '{"scripts":{"test":"vitest run","dev":"y"},"dependencies":{"zod":"4.0.0"}}\n',
+        );
+        write(dir, "packages/new/package.json", '{"scripts":{"test":"vitest run"}}\n');
+      },
+    });
+    const result = accept(host, finish(host, ws), { base });
+    assert.equal(result.code, 0, result.output);
+    assert.match(readFileSync(join(host, "packages/demo/package.json"), "utf8"), /zod/);
+  });
 });
 
 describe("ralph-accept: attack path 4, pause and resume checkpoints", () => {
@@ -657,5 +791,45 @@ describe("ralph-accept: rejected and interrupted runs", () => {
     assert.equal(result.code, 1, result.output);
     assert.equal(git(host, "rev-parse", "main"), base);
     assert.equal(readFileSync(join(host, "app.txt"), "utf8"), "edited meanwhile\n");
+  });
+});
+
+describe("ralph-accept: what the container leaves in out/", () => {
+  it("refuses a result bundle that is not a plain file", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    const run = join(host, ".ralph", "sandbox", "run1");
+    mkdirSync(join(run, "out", "result.bundle"), { recursive: true });
+    const before = snapshot(host);
+    const result = accept(host, run, { base });
+    assert.equal(result.code, UNTRUSTED, result.output);
+    assert.match(result.output, /result\.bundle is not a plain file/);
+    assert.deepEqual(snapshot(host), before);
+  });
+
+  it("refuses a state directory that links elsewhere", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws);
+    const run = finish(host, ws);
+    const elsewhere = mkdtempSync(join(tmpdir(), "ralph-elsewhere-"));
+    rmSync(join(run, "out", "state"), { recursive: true });
+    symlinkSync(elsewhere, join(run, "out", "state"), "junction");
+    assert.match(assertRefused(host, run, { base }).output, /state is not a plain directory/);
+  });
+
+  it("imports no logs through a logs directory that links elsewhere, and still accepts", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws);
+    const run = finish(host, ws, { logs: false });
+    const elsewhere = mkdtempSync(join(tmpdir(), "ralph-elsewhere-"));
+    write(elsewhere, `${RUN}/secret.log`, "not the run's\n");
+    symlinkSync(elsewhere, join(run, "out", "logs"), "junction");
+    const result = accept(host, run, { base });
+    assert.equal(result.code, 0, result.output);
+    assert.equal(existsSync(join(host, ".ralph", "logs", RUN, "secret.log")), false);
   });
 });

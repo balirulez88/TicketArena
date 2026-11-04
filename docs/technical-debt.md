@@ -38,8 +38,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 | ------------- | -------- | ---- | ------ | --- | ----- |
 | OPEN          | 0        | 1    | 3      | 35  | 39    |
 | PLANNED       | 0        | 0    | 9      | 2   | 11    |
-| IN_PROGRESS   | 0        | 1    | 0      | 0   | 1     |
-| RESOLVED      | 0        | 0    | 5      | 2   | 7     |
+| IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
+| RESOLVED      | 0        | 1    | 5      | 2   | 8     |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 ## Entries
@@ -1143,7 +1143,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-057: The sandboxed agent can write the host repository, its Git metadata and the batch state
 
-- **Status:** IN_PROGRESS
+- **Status:** RESOLVED
 - **Severity:** HIGH
 - **Escalation:** none
 - **Source:** harness preflight before the batch of tickets 09-11 (2026-11-04), not a slice review
@@ -1153,13 +1153,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Impact:** A misbehaving agent could forge a merge that skips review and have the batch push it to GitHub. It could also run code on the host, where `gh` credentials are available, through a hook or `core.fsmonitor`, fake a CI pass by rewriting `ralph-ci.sh`, or forge batch or resume checkpoints. Autonomous production batches are blocked until this is fixed. An audit on 2026-11-04 found no evidence that any of this happened: the host `.git/config` and hooks are clean, there are no symlinks under `.ralph`, and all 15 container pushes to `main` have Ralph's merge or block shape.
 - **Justification:** Found before the batch started, and no batch ran. Fixed by ticket 47, which must merge before the next production batch (user decision, 2026-11-04).
 - **Remediation:** No host repository mount. Input goes in as a read-only Git bundle and output comes back as a bundle in a per-run directory. A trusted host step validates the bundle and accepts it: merge shape, ticket and dependencies, protected paths, no Git attributes, submodules or symlinks, the gate re-run in an agent-free sandbox, and strict pause validation. Batch and resume state stay host-only. Regression tests cover all four attack paths, including through real Docker.
-- **Target:** ticket 47 (`issues/47-sandbox-trust-boundary.md`); must merge before the next production batch (tickets 09-11)
-- **Resolution:** none
-- **Verification:** none
+- **Target:** ticket 47 (`issues/done/47-sandbox-trust-boundary.md`); must merge before the next production batch (tickets 09-11)
+- **Resolution:** The container mounts no part of the host repository: a read-only `/ralph-in` (Git bundle plus a copy of the resume state) and a per-run `/ralph-out`, with `--cap-drop ALL` and `no-new-privileges` (ADR 0014). `scripts/ralph-accept.mjs` imports the result bundle with the host's own Git into a quarantine namespace and moves `main` only for Ralph-shaped merges and blocked-status commits of an eligible ticket. It refuses protected harness, CI and gate paths under any spelling a case-insensitive host resolves, Git attributes, submodules and symlinks, re-runs the gate in an agent-free sandbox, adopts only canonical pauses, and copies logs as redacted plain files. The batch keeps `.ralph/batch` host-only and stops finally on a refused result (`untrusted-result`).
+- **Verification:** `scripts/ralph-accept.test.mjs` (attack paths 1-4, rejected and interrupted runs, run output types), `scripts/ralph-batch.test.mjs` (untrusted-result and checkout-changed stops), `scripts/sandbox.test.sh` (real Docker: boundary probe, merge, rejection, pause/resume, forged merge and forged pause refused)
 - **Fingerprints:** `scripts/sandbox.sh#the-sandboxed-agent-can-write-the-host-repository-its-git-me`
 - **History:**
   - 2026-11-04: recorded: HIGH security finding at `scripts/sandbox.sh:51`, harness preflight before the batch of tickets 09-11
   - 2026-11-04: in progress in ticket 47 (`issues/47-sandbox-trust-boundary.md`); autonomous production batches blocked until it merges (user decision, 2026-11-04)
+  - 2026-11-04: resolved in ticket 47: no host repository mount; the host validates and accepts every run result itself; all four attack paths refused in unit tests and through real Docker
 
 ### TD-058: In-container review verdicts share a user with the agent
 
@@ -1170,7 +1171,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Evidence:** `docs/adr/0014-sandbox-trust-boundary.md` (Consequences, remaining limitations)
 - **Components:** `ralph-loop.sh:579`, `scripts/sandbox-entrypoint.sh:66`
 - **Problem:** Inside the container, the agent runs as the same Unix user as Ralph's own gates and its two LLM reviewers. A deliberately malicious agent can leave a background process behind its session that rewrites a review report or decision file before the in-container review gate reads it. The host independently re-checks everything deterministic: the merge shape, protected paths, the full gate in an agent-free sandbox, and GitHub CI after the push. The approval of the Standards and Spec reviews, however, is not re-derived on the host.
-- **Impact:** An adversarial agent could merge code that passes the tests and CI but was never approved by the reviewers. An accidental, non-malicious agent cannot cause this. The host, its Git metadata and the batch state stay out of reach either way (TD-057).
+- **Impact:** An adversarial agent could merge code that passes the tests and CI but was never approved by the reviewers. That includes narrowing what the gate covers through a package's own `vitest.config` or `tsconfig.json`, which slices may change. Merged code then runs on developer machines (`pnpm install`, `infra:up`, the tests), in GitHub CI and in the agent-free re-gate, which has network access. An accidental, non-malicious agent cannot cause this. The host repository, its Git metadata, the harness and the batch state stay out of reach during the run either way (TD-057).
 - **Justification:** Recorded so it is not silently accepted. Whether it blocks autonomous production batches is the user's decision (raised 2026-11-04). Closing it means running the agent and everything that executes the slice's code under a separate user, or re-running the reviews on the host. Either is a design change beyond ticket 47.
 - **Remediation:** Run the agent, and every command that executes the slice's code, as a separate unprivileged user, with no write access to the harness's review and decision files and with its processes killed after each session. Alternatively, have the host run a final, independent review round in an agent-free sandbox before it accepts a merge.
 - **Target:** none

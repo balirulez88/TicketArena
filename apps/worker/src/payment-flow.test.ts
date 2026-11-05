@@ -5,6 +5,7 @@ import { connectJetStreamMessageBus, type MessageBus } from "@ticketarena/messag
 import { setupTestDatabase, setupTestNats } from "@ticketarena/test-infra";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServiceConsumers } from "./consumers.js";
+import { createMockNotificationProvider } from "./notification/index.js";
 import { startWorker } from "./worker.js";
 
 const database = setupTestDatabase();
@@ -30,7 +31,7 @@ afterAll(async () => {
   await prisma.$disconnect();
 });
 
-async function placeOrderFor(email: string, sessionChar: string) {
+async function placeOrderFor(email: string, sessionChar: string, phone?: string) {
   const buyer = { sessionId: sessionChar.repeat(32), buyerKey: sessionChar.repeat(32) };
   const event = await prisma.event.findFirstOrThrow({ where: { demo: true } });
   const seat = await prisma.seat.findFirstOrThrow({
@@ -43,22 +44,30 @@ async function placeOrderFor(email: string, sessionChar: string) {
     newId: randomUUID,
   });
   const hold = await booking.holdSeats(buyer, event.id, [seat.id]);
-  const order = await booking.placeOrder(buyer, hold.id, { email }, randomUUID());
+  const order = await booking.placeOrder(
+    buyer,
+    hold.id,
+    { email, ...(phone === undefined ? {} : { phone }) },
+    randomUUID(),
+  );
   return { order, seatId: seat.id };
 }
 
 describe("hold -> order -> worker -> CONFIRMED", () => {
-  it("confirms the order with exactly one APPLIED ledger row and SOLD seats", async () => {
+  it("confirms the order: CONFIRMED, one APPLIED ledger row, SOLD seats, one confirmation record (AT-15)", async () => {
     const { order, seatId } = await placeOrderFor("buyer@example.com", "a");
+    const provider = createMockNotificationProvider();
     const worker = await startWorker({
       bus,
       prisma,
       port: 0,
       relay: { intervalMs: 20 },
       consumers: createServiceConsumers({
+        prisma,
         clock: { now: () => new Date(), sleep: async () => undefined },
         random: { next: () => 0 },
         newId: randomUUID,
+        notificationProvider: provider,
       }),
     });
     try {
@@ -75,6 +84,14 @@ describe("hold -> order -> worker -> CONFIRMED", () => {
         await prisma.orderPayment.count({ where: { orderId: order.id, disposition: "APPLIED" } }),
       ).toBe(1);
       expect((await prisma.seat.findUniqueOrThrow({ where: { id: seatId } })).status).toBe("SOLD");
+      await expect.poll(() => provider.deliveries().length, { timeout: 15_000 }).toBe(1);
+      const confirmedId = (
+        await prisma.outboxEvent.findFirstOrThrow({
+          where: { eventType: "order.confirmed", aggregateId: order.id },
+        })
+      ).id;
+      const records = await prisma.notification.findMany({ where: { sourceEventId: confirmedId } });
+      expect(records.map((record) => [record.channel, record.status])).toEqual([["EMAIL", "SENT"]]);
     } finally {
       await worker.stop();
     }
@@ -88,6 +105,7 @@ describe("hold -> order -> worker -> CONFIRMED", () => {
       port: 0,
       relay: { intervalMs: 20 },
       consumers: createServiceConsumers({
+        prisma,
         clock: { now: () => new Date(), sleep: async () => undefined },
         random: { next: () => 0 },
         newId: randomUUID,
@@ -129,6 +147,45 @@ describe("hold -> order -> worker -> CONFIRMED", () => {
           where: { eventType: "order.confirmed", aggregateId: order.id },
         }),
       ).toBe(1);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it("sends exactly one confirmation per channel, even with +dup@ (AT-15, AT-14 second half)", async () => {
+    const { order } = await placeOrderFor("buyer+dup@example.com", "c", "+36301234567");
+    const provider = createMockNotificationProvider();
+    const worker = await startWorker({
+      bus,
+      prisma,
+      port: 0,
+      relay: { intervalMs: 20 },
+      consumers: createServiceConsumers({
+        prisma,
+        clock: { now: () => new Date(), sleep: async () => undefined },
+        random: { next: () => 0 },
+        newId: randomUUID,
+        notificationProvider: provider,
+      }),
+    });
+    try {
+      await expect.poll(() => provider.deliveries().length, { timeout: 15_000 }).toBe(2);
+      const confirmedId = (
+        await prisma.outboxEvent.findFirstOrThrow({
+          where: { eventType: "order.confirmed", aggregateId: order.id },
+        })
+      ).id;
+      const records = await prisma.notification.findMany({
+        where: { sourceEventId: confirmedId },
+        orderBy: { channel: "asc" },
+      });
+      expect(records.map((record) => [record.channel, record.status])).toEqual([
+        ["EMAIL", "SENT"],
+        ["SMS", "SENT"],
+      ]);
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+        "CONFIRMED",
+      );
     } finally {
       await worker.stop();
     }

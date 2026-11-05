@@ -43,7 +43,7 @@ export async function startWorker(options: WorkerOptions): Promise<RunningWorker
     ),
   );
   // One relay per service outbox (ADR 0009).
-  const relays = (["booking", "payment"] as const).map((service) =>
+  const relays = (["booking", "payment", "notification"] as const).map((service) =>
     createOutboxRelay({
       bus: options.bus,
       prisma: options.prisma,

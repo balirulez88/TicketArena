@@ -5,7 +5,7 @@ import type { TransactionClient } from "@ticketarena/db";
  * relay and the consumer runner are shared code, so they reach those tables only through this
  * binding; nothing else in them knows which schema they run against.
  */
-export type ServiceName = "booking" | "payment";
+export type ServiceName = "booking" | "payment" | "notification";
 
 export interface OutboxRowInput {
   readonly id: string;
@@ -74,6 +74,34 @@ const paymentStore: ServiceStore = {
   },
 };
 
+const notificationStore: ServiceStore = {
+  outboxTable: '"notification"."outbox_events"',
+  async insertOutbox(tx, data) {
+    await tx.notificationOutboxEvent.create({ data });
+  },
+  async markPublished(tx, id) {
+    await tx.notificationOutboxEvent.update({
+      where: { id },
+      data: { status: "PUBLISHED", publishedAt: new Date() },
+    });
+  },
+  async recordPublishFailure(tx, id, error) {
+    await tx.notificationOutboxEvent.update({
+      where: { id },
+      data: { attempts: { increment: 1 }, lastError: error },
+    });
+  },
+  async insertProcessed(tx, data) {
+    await tx.notificationProcessedMessage.create({ data });
+  },
+};
+
+const stores: Record<ServiceName, ServiceStore> = {
+  booking: bookingStore,
+  payment: paymentStore,
+  notification: notificationStore,
+};
+
 export function serviceStore(service: ServiceName): ServiceStore {
-  return service === "payment" ? paymentStore : bookingStore;
+  return stores[service];
 }

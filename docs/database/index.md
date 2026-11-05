@@ -103,6 +103,16 @@ The mock Payment service ([ADR 0009](../adr/0009-per-service-schemas.md)) owns t
 | `payment.processed_messages` | Payment consumer dedupe, same shape as `public.processed_messages`                                                                            |
 | `payment.payment_attempts`   | One row per provider attempt: unique `(orderId, attemptNo)`; CHECKs `CAPTURED ⇔ capturedAt IS NOT NULL`, `FAILED ⇔ failureReason IS NOT NULL` |
 
+### `notification` schema
+
+The mock Notification service owns its tables the same way (ADR 0009); no foreign keys to `public`.
+
+| Table                             | Purpose                                                                                                                                                                  |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `notification.outbox_events`      | Notification's own outbox, same shape as `public.outbox_events`; the relay drains it                                                                                     |
+| `notification.processed_messages` | Notification consumer dedupe                                                                                                                                             |
+| `notification.notifications`      | One row per (`sourceEventId` = `order.confirmed` event id, `channel` `EMAIL\|SMS`): `recipient`, `template`, `status` `PENDING\|SENT`; unique `(sourceEventId, channel)` |
+
 ### `outbox_events`
 
 | Column                         | Notes                                                   |

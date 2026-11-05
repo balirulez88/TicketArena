@@ -13,6 +13,7 @@ const prisma = createPrismaClient({ connectionString: env.DATABASE_URL, driver: 
 const bus = await connectJetStreamMessageBus({ servers: env.NATS_URL });
 // The composition root is the only place that reads the system clock and Math.random.
 const consumers = createServiceConsumers({
+  prisma,
   clock: { now: () => new Date(), sleep: (ms) => delay(ms) },
   random: { next: Math.random },
   newId: randomUUID,

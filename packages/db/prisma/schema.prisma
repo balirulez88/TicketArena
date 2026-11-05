@@ -1,5 +1,6 @@
 // Domain models arrive slice by slice under TDD. `public` is booking; `payment` is the mock
-// Payment service, which owns its own outbox and processed_messages (ADR 0009).
+// Payment service, which owns its own outbox and processed_messages (ADR 0009); `notification` is the
+// mock Notification service, same rule.
 
 generator client {
   provider = "prisma-client"
@@ -8,7 +9,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  schemas  = ["public", "payment"]
+  schemas  = ["public", "payment", "notification"]
 }
 
 enum OutboxStatus {
@@ -322,4 +323,75 @@ model PaymentAttempt {
   @@unique([orderId, attemptNo])
   @@map("payment_attempts")
   @@schema("payment")
+}
+
+enum NotificationOutboxStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+
+  @@map("OutboxDelivery")
+  @@schema("notification")
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+
+  @@schema("notification")
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+
+  @@schema("notification")
+}
+
+/// The Notification service's own outbox: same shape and rules as the booking one, separate table.
+model NotificationOutboxEvent {
+  id            String                   @id @default(uuid()) @db.Uuid
+  aggregateType String
+  aggregateId   String
+  eventType     String
+  payload       Json
+  status        NotificationOutboxStatus @default(PENDING)
+  attempts      Int                      @default(0)
+  lastError     String?
+  createdAt     DateTime                 @default(now())
+  publishedAt   DateTime?
+
+  @@index([status, createdAt])
+  @@index([aggregateType, aggregateId])
+  @@map("outbox_events")
+  @@schema("notification")
+}
+
+/// The Notification consumer's idempotency checkpoint (ADR 0007), separate from the others.
+model NotificationProcessedMessage {
+  consumer    String
+  messageId   String
+  streamSeq   BigInt
+  processedAt DateTime @default(now())
+
+  @@id([consumer, messageId])
+  @@map("processed_messages")
+  @@schema("notification")
+}
+
+/// One message to send per (source event, channel). The unique key makes a redelivered
+/// `order.confirmed` insert nothing new; its `id` is the provider idempotency key.
+model Notification {
+  id            String              @id @db.Uuid
+  sourceEventId String
+  channel       NotificationChannel
+  recipient     String
+  template      String
+  status        NotificationStatus  @default(PENDING)
+  createdAt     DateTime            @db.Timestamptz(3)
+  sentAt        DateTime?           @db.Timestamptz(3)
+
+  @@unique([sourceEventId, channel])
+  @@map("notifications")
+  @@schema("notification")
 }

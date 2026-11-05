@@ -36,7 +36,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 5      | 45  | 50    |
+| OPEN          | 0        | 0    | 5      | 46  | 51    |
 | PLANNED       | 0        | 0    | 9      | 2   | 11    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 2    | 5      | 2   | 9     |
@@ -1336,6 +1336,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `packages/booking/src/booking-service.ts#race-lost-is-counted-for-any-seatunavailableerror-from-the-l`
 - **History:**
   - 2026-11-05: recorded: MEDIUM defect at `packages/booking/src/booking-service.ts:488`, standards axis (ticket 10 review-3 standards, run 20261105-143619)
+  - 2026-11-05: seen again: MEDIUM defect at `packages/booking/src/booking-service.ts:488`, spec axis (ticket 10 host review spec, run 20261105-153541-378)
 
 ### TD-067: Saturation detection matches a pg-pool error message string, and P2028 also covers non-saturation timeouts
 
@@ -1390,9 +1391,10 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** none
 - **Resolution:** none
 - **Verification:** none
-- **Fingerprints:** `packages/booking/src/hold-fast-path.test.ts#race-lost-test-can-flake-release-races-the-snapshot-read`
+- **Fingerprints:** `packages/booking/src/hold-fast-path.test.ts#race-lost-test-can-flake-release-races-the-snapshot-read`; `packages/booking/src/hold-fast-path.test.ts#race-lost-test-does-not-prove-the-hold-was-blocked-on-the-lo`
 - **History:**
   - 2026-11-05: recorded: MEDIUM missing_test at `packages/booking/src/hold-fast-path.test.ts:201`, spec axis (ticket 10 review-3 spec, run 20261105-143619)
+  - 2026-11-05: seen again: MEDIUM missing_test at `packages/booking/src/hold-fast-path.test.ts:201`, spec axis (ticket 10 host review spec, run 20261105-153541-378)
 
 ### TD-070: Metrics adapter is never wired in production code
 
@@ -1409,7 +1411,27 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** none
 - **Resolution:** none
 - **Verification:** none
-- **Fingerprints:** `docs/index.md#metrics-adapter-is-never-wired-in-production-code`
+- **Fingerprints:** `docs/index.md#metrics-adapter-is-never-wired-in-production-code`; `docs/index.md#docs-say-counters-go-to-redis-but-the-metrics-adapter-is-not`
 - **History:**
   - 2026-11-05: recorded: LOW spec_gap at `docs/index.md:67`, spec axis (ticket 10 review-3 spec, run 20261105-143619)
+  - 2026-11-05: seen again: LOW spec_gap at `docs/index.md:67`, spec axis (ticket 10 host review spec, run 20261105-153541-378)
+
+### TD-071: Saturation tests assume the occupier holds the only connection after a fixed 50 ms sleep
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 10 (`10-hot-seat-race-and-fast-path`)
+- **Evidence:** `.ralph/host-review/20261105-153541-378/10-hot-seat-race-and-fast-path.standards.json`
+- **Components:** `packages/booking/src/hold-busy.test.ts:70`
+- **Problem:** Both saturation tests start an occupying transaction and then sleep 50 ms, assuming it has taken the pool's only connection. Nothing signals that the occupier's SELECT 1 has run. The same pattern is in apps/web/src/server/routers/booking.test.ts at lines 207-211.
+- **Impact:** On a slow or loaded CI machine a holdSeats call can get the connection before the occupier does. The call then succeeds or fails differently, and the BOOKING_BUSY assertion fails intermittently.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows.
+- **Remediation:** Resolve a promise from inside the occupier transaction after SELECT 1 and await it, as lockSeatElsewhere does with lockTaken, instead of sleeping.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/booking/src/hold-busy.test.ts#saturation-tests-assume-the-occupier-holds-the-only-connecti`
+- **History:**
+  - 2026-11-05: recorded: LOW missing_test at `packages/booking/src/hold-busy.test.ts:70`, standards axis (ticket 10 host review standards, run 20261105-153541-378)
 <!-- ralph-debt:end -->

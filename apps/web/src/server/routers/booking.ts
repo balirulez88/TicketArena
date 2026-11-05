@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  BookingBusyError,
   type Buyer,
   createBookingService,
   HoldExpiredError,
@@ -86,6 +87,9 @@ export const bookingRouter = createTRPCRouter({
       } catch (error) {
         if (error instanceof SeatUnavailableError) {
           throw new TRPCError({ code: "CONFLICT", message: error.message, cause: error });
+        }
+        if (error instanceof BookingBusyError) {
+          throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: error.message, cause: error });
         }
         if (error instanceof InvalidSeatSelectionError) {
           throw new TRPCError({ code: "BAD_REQUEST", message: error.message, cause: error });

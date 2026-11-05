@@ -29,6 +29,12 @@ export type DatabaseDriver = "pg" | "neon";
 export interface PrismaClientOptions {
   readonly connectionString: string;
   readonly driver: DatabaseDriver;
+  /** `pg` pool size; defaults to the driver's. Size it for the concurrency you expect. */
+  readonly poolMax?: number;
+  /** How long a caller waits for a free pooled connection before failing (`pg` only). */
+  readonly acquireTimeoutMs?: number;
+  /** Interactive-transaction start wait and total runtime, in ms (Prisma defaults 2000/5000). */
+  readonly transaction?: { readonly maxWaitMs: number; readonly timeoutMs: number };
 }
 
 /**
@@ -40,13 +46,27 @@ export interface PrismaClientOptions {
 export function createPrismaClient({
   connectionString,
   driver,
+  poolMax,
+  acquireTimeoutMs,
+  transaction,
 }: PrismaClientOptions): PrismaClient {
   if (connectionString.trim() === "") {
     throw new Error("createPrismaClient: connectionString must be a non-empty Postgres URL");
   }
   const adapter =
-    driver === "neon" ? new PrismaNeon({ connectionString }) : new PrismaPg({ connectionString });
-  return new PrismaClient({ adapter });
+    driver === "neon"
+      ? new PrismaNeon({ connectionString })
+      : new PrismaPg({
+          connectionString,
+          ...(poolMax === undefined ? {} : { max: poolMax }),
+          ...(acquireTimeoutMs === undefined ? {} : { connectionTimeoutMillis: acquireTimeoutMs }),
+        });
+  return new PrismaClient({
+    adapter,
+    ...(transaction === undefined
+      ? {}
+      : { transactionOptions: { maxWait: transaction.maxWaitMs, timeout: transaction.timeoutMs } }),
+  });
 }
 
 /** The client handed to an interactive `$transaction` callback. */

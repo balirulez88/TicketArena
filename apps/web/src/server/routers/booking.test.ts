@@ -190,3 +190,38 @@ describe("booking.placeOrder / getOrder", () => {
     ).rejects.toMatchObject({ code: "BAD_REQUEST", message: expect.stringContaining("email") });
   });
 });
+
+describe("booking.holdSeats saturation", () => {
+  test("a database that cannot take the request in time is TOO_MANY_REQUESTS (BOOKING_BUSY)", async () => {
+    const { eventId, seatId } = await availableSeat();
+    const tight = createPrismaClient({
+      connectionString: database.url,
+      driver: "pg",
+      poolMax: 1,
+      acquireTimeoutMs: 100,
+    });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const occupier = tight.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT 1`;
+      await gate;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    try {
+      await expect(
+        createCaller({
+          now: () => NOW,
+          principal: alice,
+          db: tight,
+          logger: silentLogger,
+        }).booking.holdSeats({ eventId, seatIds: [seatId] }),
+      ).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS", message: /BOOKING_BUSY/ });
+    } finally {
+      release();
+      await occupier;
+      await tight.$disconnect();
+    }
+  });
+});

@@ -1,4 +1,7 @@
 export {
+  BookingBusyError,
+  type BookingMetric,
+  type BookingMetrics,
   type BookingService,
   type BookingServiceDeps,
   type Buyer,
@@ -23,3 +26,4 @@ export {
   type SagaContext,
   type SagaMessage,
 } from "./payment-saga";
+export { createRedisBookingMetrics, type RedisMetricsClient } from "./redis-metrics";

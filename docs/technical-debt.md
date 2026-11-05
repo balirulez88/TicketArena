@@ -36,7 +36,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 3      | 46  | 49    |
+| OPEN          | 0        | 0    | 3      | 47  | 50    |
 | PLANNED       | 0        | 0    | 9      | 2   | 11    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 2    | 7      | 2   | 11    |
@@ -301,6 +301,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-10-30: escalation flagged (correctness review of tickets 03-05, 2026-10-30)
   - 2026-10-30: planned for ticket 14 (`issues/14-hold-expiry.md`), AC1 and AC7 (correctness review of tickets 03-05, 2026-10-30)
   - 2026-11-03: ticket 38 now lists ticket 14 as a blocker, so deployment cannot start before lazy expiry is verified (user decision, 2026-11-03)
+  - 2026-11-05: when ticket 14 lands, the expired HELD seat becomes holdable, so TD-066's Verification test `hold-fast-path.test.ts::an expired HELD seat refused under the lock counts seat_unavailable, not race_lost` must be replaced by a refusal of an unchanged seat that does not rely on this gap
 
 ### TD-014: Duplicate seat ids are not rejected at the service level
 
@@ -1317,6 +1318,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `apps/worker/src/payment-flow.test.ts#dup-end-to-end-test-does-not-prove-nothing-extra-arrives-lat`
 - **History:**
   - 2026-11-05: recorded: LOW missing_test at `apps/worker/src/payment-flow.test.ts:172`, spec axis (ticket 09 review-3 spec, run 20261105-075349)
+  - 2026-11-05: still open, not made worse: branch `fix/flaky-tests-and-race-lost-metric` replaced the delivery-count poll with a bounded poll of this order's persisted states and keyed deliveries (`confirmationOf`), fixing the CI flake on main a81412f (EMAIL read as PENDING); a late extra record or a second order.confirmed is still not asserted. Cross-test leakage it works around is TD-072
 
 ### TD-066: race_lost is counted for any SeatUnavailableError from the locked step, not only real races
 
@@ -1331,8 +1333,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
 - **Remediation:** Count race_lost only when the refusal cannot be explained by the snapshot, for example by checking that the refused seats were AVAILABLE or unexpired-free in the snapshot. Otherwise count seat_unavailable for the other cases, or fix lazy expiry (TD-013) and add a test with an expired HELD seat that asserts the counter.
 - **Target:** none
-- **Resolution:** The lock-free snapshot now records each requested seat's status and hold, the locked read selects the same, and `lostRace` counts `race_lost` only when a refused seat changed between the two reads. A refused seat that is unchanged (an expired but unswept hold, TD-013) or outside the event counts `seat_unavailable`. The spec (holdSeats step 5) and `docs/database/index.md` say the same.
-- **Verification:** `packages/booking/src/hold-fast-path.test.ts::an expired HELD seat refused under the lock counts seat_unavailable, not race_lost`; `packages/booking/src/hold-fast-path.test.ts::a seat id outside the event counts seat_unavailable, not race_lost`; `packages/booking/src/hold-fast-path.test.ts::a seat taken between snapshot and lock counts race_lost only`
+- **Resolution:** The lock-free snapshot now records each requested seat's status and hold, the locked read selects the same, and `lostRace` counts `race_lost` only when a refused seat changed between the two reads. A refused seat that is unchanged (an expired but unswept hold, TD-013) or unknown to the event counts `seat_unavailable`. The spec (holdSeats step 5) and `docs/database/index.md` say the same.
+- **Verification:** `packages/booking/src/hold-fast-path.test.ts::an expired HELD seat refused under the lock counts seat_unavailable, not race_lost`; `packages/booking/src/hold-fast-path.test.ts::an unknown seat id counts seat_unavailable, not race_lost`; `packages/booking/src/hold-fast-path.test.ts::a seat taken between snapshot and lock counts race_lost only`
 - **Fingerprints:** `packages/booking/src/booking-service.ts#race-lost-is-counted-for-any-seatunavailableerror-from-the-l`
 - **History:**
   - 2026-11-05: recorded: MEDIUM defect at `packages/booking/src/booking-service.ts:488`, standards axis (ticket 10 review-3 standards, run 20261105-143619)
@@ -1436,4 +1438,23 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `packages/booking/src/hold-busy.test.ts#saturation-tests-assume-the-occupier-holds-the-only-connecti`
 - **History:**
   - 2026-11-05: recorded: LOW missing_test at `packages/booking/src/hold-busy.test.ts:70`, standards axis (ticket 10 host review standards, run 20261105-153541-378)
+
+### TD-072: payment-flow tests share one durable consumer, so a test can receive an earlier test's unacked event
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** fix branch `fix/flaky-tests-and-race-lost-metric` (after batch #3)
+- **Evidence:** a repeated local run of `apps/worker/src/payment-flow.test.ts` (19/20) saw 3 provider deliveries in the `+dup@` test instead of 2; independent Standards and Spec review of that branch, 2026-11-05
+- **Components:** `apps/worker/src/payment-flow.test.ts:56`
+- **Problem:** All tests in the file start a worker on the same NATS stream prefix with the same durable `notification` consumer. A test that stops its worker once its order is CONFIRMED (the `+dup@` state test) can leave its `order.confirmed` unacked; the next test's worker then receives and sends it. The AT-15 assertions now scope deliveries to the order's own notification ids (`confirmationOf`), which removes the flake but hides the leak.
+- **Impact:** Cross-test leakage makes exact-count assertions on shared state unreliable, and a test can no longer see a redelivery that reached the provider again after an earlier, uncommitted send.
+- **Justification:** Test isolation only; production consumers are per deployment and idempotent per `(sourceEventId, channel)`. The scoped assertions keep AT-14/AT-15 exact for each order.
+- **Remediation:** Give each test its own consumer (or stream prefix), or have each test wait until the notification consumer has no pending or unacked messages before `worker.stop()`.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/worker/src/payment-flow.test.ts#payment-flow-tests-share-one-durable-consumer`
+- **History:**
+  - 2026-11-05: recorded: LOW test_isolation at `apps/worker/src/payment-flow.test.ts:56`, found while deflaking AT-15 (repeated runs) and confirmed by the branch's Standards and Spec review
 <!-- ralph-debt:end -->

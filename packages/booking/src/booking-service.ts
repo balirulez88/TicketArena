@@ -444,85 +444,88 @@ export function createBookingService({
       count("seat_unavailable", eventId);
       throw new SeatUnavailableError(taken);
     }
-    // Set inside the transaction when it refuses, read by the catch below to pick the counter.
-    let refusal: BookingMetric | undefined;
-    const hold = await db
-      .$transaction(async (tx) => {
-        // Waiting (not NOWAIT) lock in id order: a loser sees the winner's committed state
-        // instead of a spurious "taken" while the winner might still roll back (ADR 0005).
-        const locked = await tx.$queryRaw<SeatState[]>`
+    const outcome = await db.$transaction(async (tx) => {
+      // Waiting (not NOWAIT) lock in id order: a loser sees the winner's committed state
+      // instead of a spurious "taken" while the winner might still roll back (ADR 0005).
+      const locked = await tx.$queryRaw<SeatState[]>`
           SELECT id::text AS id, status::text AS status, "holdId"::text AS "holdId"
           FROM seats
           WHERE id = ANY(${[...seatIds]}::uuid[]) AND "eventId" = ${eventId}::uuid
           ORDER BY id
           FOR UPDATE`;
 
-        // Decision time is read only after the locks are held: it is the linearization point.
-        const decidedAt = clock.now();
+      // Decision time is read only after the locks are held: it is the linearization point.
+      const decidedAt = clock.now();
 
-        const free = new Set(locked.filter((seat) => seat.status === "AVAILABLE").map((s) => s.id));
-        const unavailable = seatIds.filter((id) => !free.has(id));
-        if (unavailable.length > 0) {
-          refusal = lostRace(seen, locked, unavailable) ? "race_lost" : "seat_unavailable";
-          throw new SeatUnavailableError(unavailable);
-        }
+      const free = new Set(locked.filter((seat) => seat.status === "AVAILABLE").map((s) => s.id));
+      const unavailable = seatIds.filter((id) => !free.has(id));
+      if (unavailable.length > 0) {
+        // Returned, not thrown: nothing was written, so committing only releases the locks, and
+        // the refusal carries the counter it earned out of the transaction.
+        const metric: BookingMetric = lostRace(seen, locked, unavailable)
+          ? "race_lost"
+          : "seat_unavailable";
+        return { kind: "refused" as const, seatIds: unavailable, metric };
+      }
 
-        const holdId = newId();
-        const correlationId = newId();
-        const holdExpiresAt = new Date(decidedAt.getTime() + HOLD_DURATION_MS);
+      const holdId = newId();
+      const correlationId = newId();
+      const holdExpiresAt = new Date(decidedAt.getTime() + HOLD_DURATION_MS);
 
-        await tx.hold.create({
-          data: {
-            id: holdId,
-            eventId,
-            sessionId: buyer.sessionId,
-            ...(buyer.userId === undefined ? {} : { userId: buyer.userId }),
-            buyerKey: buyer.buyerKey,
-            holdExpiresAt,
-            correlationId,
-          },
-        });
-        await tx.seat.updateMany({
-          where: { id: { in: [...seatIds] } },
-          data: { status: "HELD", holdId, claimBuyerKey: buyer.buyerKey },
-        });
-
-        // Same transaction as the state change: the event exists iff the hold committed.
-        const envelope = heldEnvelope.parse({
-          id: newId(),
-          type: SEAT_HELD_EVENT,
-          version: 1,
-          occurredAt: decidedAt.toISOString(),
+      await tx.hold.create({
+        data: {
+          id: holdId,
+          eventId,
+          sessionId: buyer.sessionId,
+          ...(buyer.userId === undefined ? {} : { userId: buyer.userId }),
+          buyerKey: buyer.buyerKey,
+          holdExpiresAt,
           correlationId,
-          causationId: null,
-          holdId,
-          payload: { holdId, eventId, seatIds, holdExpiresAt: holdExpiresAt.toISOString() },
-        });
-        await tx.outboxEvent.create({
-          data: {
-            id: envelope.id,
-            aggregateType: "hold",
-            aggregateId: holdId,
-            eventType: SEAT_HELD_EVENT,
-            payload: envelope,
-          },
-        });
+        },
+      });
+      await tx.seat.updateMany({
+        where: { id: { in: [...seatIds] } },
+        data: { status: "HELD", holdId, claimBuyerKey: buyer.buyerKey },
+      });
 
-        return {
+      // Same transaction as the state change: the event exists iff the hold committed.
+      const envelope = heldEnvelope.parse({
+        id: newId(),
+        type: SEAT_HELD_EVENT,
+        version: 1,
+        occurredAt: decidedAt.toISOString(),
+        correlationId,
+        causationId: null,
+        holdId,
+        payload: { holdId, eventId, seatIds, holdExpiresAt: holdExpiresAt.toISOString() },
+      });
+      await tx.outboxEvent.create({
+        data: {
+          id: envelope.id,
+          aggregateType: "hold",
+          aggregateId: holdId,
+          eventType: SEAT_HELD_EVENT,
+          payload: envelope,
+        },
+      });
+
+      return {
+        kind: "held" as const,
+        hold: {
           id: holdId,
           eventId,
           seatIds: [...seatIds],
           status: "HELD" as const,
           holdExpiresAt,
           correlationId,
-        };
-      })
-      .catch((error: unknown) => {
-        if (error instanceof SeatUnavailableError && refusal !== undefined) {
-          count(refusal, eventId);
-        }
-        throw error;
-      });
+        },
+      };
+    });
+    if (outcome.kind === "refused") {
+      count(outcome.metric, eventId);
+      throw new SeatUnavailableError(outcome.seatIds);
+    }
+    const { hold } = outcome;
     // After commit, so a rolled-back hold never claims to have happened.
     count("hold_ok", eventId);
     logger

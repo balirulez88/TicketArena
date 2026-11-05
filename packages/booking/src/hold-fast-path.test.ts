@@ -252,7 +252,7 @@ describe("holdSeats metrics on the fast path and the race", () => {
     expect(calls).toEqual(["seat_unavailable"]);
   });
 
-  test("a seat id outside the event counts seat_unavailable, not race_lost", async () => {
+  test("an unknown seat id counts seat_unavailable, not race_lost", async () => {
     const event = await db().event.findFirstOrThrow({ where: { demo: true } });
     const unknownSeatId = randomUUID();
     const { calls, metrics } = recordingMetrics();

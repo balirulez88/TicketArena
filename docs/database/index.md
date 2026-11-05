@@ -67,12 +67,27 @@ and concurrent seed runs leave one row per venue.
 
 Booking: `booking.holdSeats` (one seat for now) and `booking.getHold` (owner only, else
 `NOT_FOUND`) delegate to `BookingService` (`packages/booking`). `holdSeats` rejects an empty or duplicated `seatIds` list with `INVALID_SEAT_SELECTION` (tRPC
-`BAD_REQUEST`) before writing, then runs one transaction:
+`BAD_REQUEST`) before writing. It then takes a lock-free snapshot read (`seats` joined to `holds`) and
+refuses with `SEAT_UNAVAILABLE` any seat visibly `SOLD`, `IN_CHECKOUT` or `HELD` with an unexpired hold,
+without locking; the snapshot is advisory and only ever refuses, so the locked step decides
+success (ADR 0005). Otherwise it runs one transaction:
 `SELECT … FOR UPDATE` on the seat, then `T = clock.now()` read **after** the lock, then the `holds`
 row (`holdExpiresAt = T + 10 min`, fresh `correlationId`), the seat set `HELD`, and a `seat.held`
 row in `outbox_events` whose `payload` is the full event envelope and whose `id` is the envelope
 `id`. A seat that is not `AVAILABLE` fails with `SEAT_UNAVAILABLE` (tRPC `CONFLICT`) naming its id.
 No SQL `now()`; the `Clock` is injected.
+
+Metrics: an optional `BookingMetrics` port counts `hold_ok`, `seat_unavailable` (snapshot refusals)
+and `race_lost` (refused under the lock after the snapshot said free) per event. Counters are bumped
+after the outcome is decided, fire-and-forget; a failure is logged and never fails a booking. The
+Redis adapter (`createRedisBookingMetrics`) keeps one hash per event,
+`booking:metrics:<eventId>`, with the metric as field. Seat state is never decided by Redis.
+
+Saturation: a `holdSeats` whose pool acquire (`pg` `connectionTimeoutMillis`) or transaction start
+(Prisma `maxWait`, `P2028`) times out fails with `BookingBusyError` (`BOOKING_BUSY`, tRPC
+`TOO_MANY_REQUESTS`) and counts `booking_busy`. `createPrismaClient` takes `poolMax`,
+`acquireTimeoutMs` and `transaction` so callers size pool and timeouts. Lock-timeout and deadlock
+retry, and the same mapping for `placeOrder`, remain ticket 12 (TD-020).
 
 Orders: `booking.placeOrder` (no admission required) and `booking.getOrder` (owner only, else
 `NOT_FOUND`). `placeOrder` runs one transaction with the lock order hold `FOR UPDATE`, seats

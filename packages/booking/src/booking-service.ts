@@ -27,6 +27,15 @@ export interface BookingServiceDeps {
   readonly newId: () => string;
   /** Injected by the app; lines are bound to the booking's correlation, hold and order ids. */
   readonly logger?: Logger;
+  /** Optional; counters are best-effort and never decide or fail a booking. */
+  readonly metrics?: BookingMetrics;
+}
+
+export type BookingMetric = "hold_ok" | "seat_unavailable" | "race_lost" | "booking_busy";
+
+/** Per-event counters. Implementations may reject; the service logs and moves on. */
+export interface BookingMetrics {
+  increment(metric: BookingMetric, eventId: string): Promise<void>;
 }
 
 type HoldStatus = "HELD" | "ORDERED" | "RELEASED" | "EXPIRED";
@@ -122,6 +131,16 @@ export class SeatUnavailableError extends Error {
   constructor(readonly seatIds: readonly string[]) {
     super(`SEAT_UNAVAILABLE: ${seatIds.join(", ")}`);
     this.name = "SeatUnavailableError";
+  }
+}
+
+/** The database could not take the request in time (pool or transaction start); retryable. */
+export class BookingBusyError extends Error {
+  readonly code = "BOOKING_BUSY";
+
+  constructor(options?: { cause: unknown }) {
+    super("BOOKING_BUSY: the booking system is saturated, retry shortly", options);
+    this.name = "BookingBusyError";
   }
 }
 
@@ -260,6 +279,22 @@ function requestHash(holdId: string, contact: Contact): string {
     .digest("hex");
 }
 
+const PRISMA_TRANSACTION_START_TIMEOUT = "P2028";
+const POOL_ACQUIRE_TIMEOUT_MESSAGE = "timeout exceeded when trying to connect";
+
+/** Pool-acquire (pg-pool) and transaction-start (Prisma) timeouts mean saturation, not a bug. */
+function isSaturation(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  return (
+    ("code" in error && error.code === PRISMA_TRANSACTION_START_TIMEOUT) ||
+    ("message" in error &&
+      typeof error.message === "string" &&
+      error.message.includes(POOL_ACQUIRE_TIMEOUT_MESSAGE))
+  );
+}
+
 function isUniqueViolation(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -311,7 +346,40 @@ export function createBookingService({
   clock,
   newId,
   logger = silentLogger,
+  metrics,
 }: BookingServiceDeps): BookingService {
+  // Called only once the outcome is decided; fire-and-forget so a metrics outage can never
+  // turn a booking into an error or add latency to it.
+  function count(metric: BookingMetric, eventId: string): void {
+    if (metrics === undefined) {
+      return;
+    }
+    const failed = (error: unknown) =>
+      logger.warn({ err: error, metric, eventId }, "metric failed");
+    try {
+      metrics.increment(metric, eventId).catch(failed);
+    } catch (error) {
+      failed(error);
+    }
+  }
+
+  /** Lock-free read: requested seats that are visibly not holdable right now. Advisory only. */
+  async function visiblyTaken(
+    eventId: string,
+    seatIds: readonly string[],
+    at: Date,
+  ): Promise<string[]> {
+    const rows = await db.$queryRaw<{ id: string }[]>`
+      SELECT s.id::text AS id
+      FROM seats s
+      LEFT JOIN holds h ON h.id = s."holdId"
+      WHERE s.id = ANY(${[...seatIds]}::uuid[]) AND s."eventId" = ${eventId}::uuid
+        AND (s.status::text IN ('SOLD', 'IN_CHECKOUT')
+             OR (s.status::text = 'HELD' AND h."holdExpiresAt" > ${at}))`;
+    const taken = new Set(rows.map((row) => row.id));
+    return seatIds.filter((id) => taken.has(id));
+  }
+
   async function findByIdempotencyKey(
     client: Pick<PrismaClient, "order">,
     buyer: Buyer,
@@ -331,15 +399,21 @@ export function createBookingService({
     return toOrderView(existing);
   }
 
-  return {
-    async holdSeats(buyer, eventId, seatIds) {
-      if (seatIds.length === 0) {
-        throw new InvalidSeatSelectionError("seatIds is empty");
-      }
-      if (new Set(seatIds).size !== seatIds.length) {
-        throw new InvalidSeatSelectionError("seatIds contains duplicates");
-      }
-      const hold = await db.$transaction(async (tx) => {
+  async function holdOnce(buyer: Buyer, eventId: string, seatIds: readonly string[]) {
+    if (seatIds.length === 0) {
+      throw new InvalidSeatSelectionError("seatIds is empty");
+    }
+    if (new Set(seatIds).size !== seatIds.length) {
+      throw new InvalidSeatSelectionError("seatIds contains duplicates");
+    }
+    // Optimization only: the locked step below alone decides success (ADR 0005).
+    const taken = await visiblyTaken(eventId, seatIds, clock.now());
+    if (taken.length > 0) {
+      count("seat_unavailable", eventId);
+      throw new SeatUnavailableError(taken);
+    }
+    const hold = await db
+      .$transaction(async (tx) => {
         // Waiting (not NOWAIT) lock in id order: a loser sees the winner's committed state
         // instead of a spurious "taken" while the winner might still roll back (ADR 0005).
         const locked = await tx.$queryRaw<LockedSeat[]>`
@@ -407,18 +481,39 @@ export function createBookingService({
           holdExpiresAt,
           correlationId,
         };
+      })
+      .catch((error: unknown) => {
+        // The snapshot said free, so a refusal here means another buyer won the race.
+        if (error instanceof SeatUnavailableError) {
+          count("race_lost", eventId);
+        }
+        throw error;
       });
-      // After commit, so a rolled-back hold never claims to have happened.
-      logger
-        .child(
-          envelopeLogBindings({
-            correlationId: hold.correlationId,
-            causationId: null,
-            holdId: hold.id,
-          }),
-        )
-        .info({ eventId, seatIds: hold.seatIds }, "seats held");
-      return hold;
+    // After commit, so a rolled-back hold never claims to have happened.
+    count("hold_ok", eventId);
+    logger
+      .child(
+        envelopeLogBindings({
+          correlationId: hold.correlationId,
+          causationId: null,
+          holdId: hold.id,
+        }),
+      )
+      .info({ eventId, seatIds: hold.seatIds }, "seats held");
+    return hold;
+  }
+
+  return {
+    async holdSeats(buyer, eventId, seatIds) {
+      try {
+        return await holdOnce(buyer, eventId, seatIds);
+      } catch (error) {
+        if (!isSaturation(error)) {
+          throw error;
+        }
+        count("booking_busy", eventId);
+        throw new BookingBusyError({ cause: error });
+      }
     },
 
     async placeOrder(buyer, holdId, contact, idempotencyKey) {

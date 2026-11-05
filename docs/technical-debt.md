@@ -36,7 +36,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 3      | 42  | 45    |
+| OPEN          | 0        | 0    | 5      | 45  | 50    |
 | PLANNED       | 0        | 0    | 9      | 2   | 11    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 2    | 5      | 2   | 9     |
@@ -1317,4 +1317,99 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `apps/worker/src/payment-flow.test.ts#dup-end-to-end-test-does-not-prove-nothing-extra-arrives-lat`
 - **History:**
   - 2026-11-05: recorded: LOW missing_test at `apps/worker/src/payment-flow.test.ts:172`, spec axis (ticket 09 review-3 spec, run 20261105-075349)
+
+### TD-066: race_lost is counted for any SeatUnavailableError from the locked step, not only real races
+
+- **Status:** OPEN
+- **Severity:** MEDIUM
+- **Escalation:** none
+- **Source:** ticket 10 (`10-hot-seat-race-and-fast-path`)
+- **Evidence:** `.ralph/logs/20261105-143619/10-hot-seat-race-and-fast-path.review-3.standards.json`
+- **Components:** `packages/booking/src/booking-service.ts:488`
+- **Problem:** The snapshot treats a HELD seat with an expired hold as holdable. The locked step still refuses every seat whose status is not AVAILABLE (booking-service.ts:429-433), which is the lazy-expiry gap in TD-013. It also refuses seats that are not in the event. Both cases pass the snapshot and then throw SeatUnavailableError inside the transaction, so the catch counts them as race_lost although no other buyer won a race.
+- **Impact:** The race_lost counter, which is documented as 'a prevented double booking', over-counts. Every attempt on an expired-but-unswept hold is recorded as a lost race, which skews contention monitoring.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Count race_lost only when the refusal cannot be explained by the snapshot, for example by checking that the refused seats were AVAILABLE or unexpired-free in the snapshot. Otherwise count seat_unavailable for the other cases, or fix lazy expiry (TD-013) and add a test with an expired HELD seat that asserts the counter.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/booking/src/booking-service.ts#race-lost-is-counted-for-any-seatunavailableerror-from-the-l`
+- **History:**
+  - 2026-11-05: recorded: MEDIUM defect at `packages/booking/src/booking-service.ts:488`, standards axis (ticket 10 review-3 standards, run 20261105-143619)
+
+### TD-067: Saturation detection matches a pg-pool error message string, and P2028 also covers non-saturation timeouts
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 10 (`10-hot-seat-race-and-fast-path`)
+- **Evidence:** `.ralph/logs/20261105-143619/10-hot-seat-race-and-fast-path.review-3.standards.json`
+- **Components:** `packages/booking/src/booking-service.ts:286`
+- **Problem:** isSaturation matches the substring 'timeout exceeded when trying to connect' in error.message. This couples the code to pg-pool wording. P2028 is also raised when an interactive transaction exceeds its own runtime timeout, or when it is already closed, so a slow transaction can be reported as BOOKING_BUSY ('retryable').
+- **Impact:** A pg-pool upgrade that rewords the message silently turns saturation into a generic 500. A P2028 raised at commit time is ambiguous, so a client retry could repeat a hold that actually committed. The retry would then get SEAT_UNAVAILABLE, which is confusing but not unsafe.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Pin the message in a test against the real driver (hold-busy.test.ts partly does this) and note the coupling next to the constant. Consider limiting P2028 to the start-wait case if the error meta allows.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/booking/src/booking-service.ts#saturation-detection-matches-a-pg-pool-error-message-string-`
+- **History:**
+  - 2026-11-05: recorded: LOW maintainability at `packages/booking/src/booking-service.ts:286`, standards axis (ticket 10 review-3 standards, run 20261105-143619)
+
+### TD-068: SOLD/IN_CHECKOUT test re-implements settleWithin inline
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 10 (`10-hot-seat-race-and-fast-path`)
+- **Evidence:** `.ralph/logs/20261105-143619/10-hot-seat-race-and-fast-path.review-3.standards.json`
+- **Components:** `packages/booking/src/hold-fast-path.test.ts:108`
+- **Problem:** The test.each body repeats the Promise.race with a timeout that the settleWithin helper (line 28) already provides, and the other tests use the helper.
+- **Impact:** The 'blocked' budget logic exists in two places and can drift.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Call settleWithin(service.holdSeats(bob, event.id, [seat.id])) here, as the other tests do.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/booking/src/hold-fast-path.test.ts#sold-in-checkout-test-re-implements-settlewithin-inline`
+- **History:**
+  - 2026-11-05: recorded: LOW maintainability at `packages/booking/src/hold-fast-path.test.ts:108`, standards axis (ticket 10 review-3 standards, run 20261105-143619)
+
+### TD-069: race_lost test can flake: release races the snapshot read
+
+- **Status:** OPEN
+- **Severity:** MEDIUM
+- **Escalation:** none
+- **Source:** ticket 10 (`10-hot-seat-race-and-fast-path`)
+- **Evidence:** `.ralph/logs/20261105-143619/10-hot-seat-race-and-fast-path.review-3.spec.json`
+- **Components:** `packages/booking/src/hold-fast-path.test.ts:201`
+- **Problem:** The test starts holdSeats and calls lock.release() immediately. Nothing proves the snapshot has run while the seat was still visibly AVAILABLE. If the other transaction's UPDATE and COMMIT reach Postgres before the snapshot query, the snapshot sees SOLD and counts seat_unavailable, so the assertion calls toEqual(['race_lost']) fails.
+- **Impact:** Intermittent failures on a slow or loaded CI machine, or a pass that no longer exercises the race path. AC4's race_lost counting then rests on timing luck.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Release only once the hold is provably blocked on the lock. For example, poll pg_locks or pg_stat_activity for a waiting backend on the seat row, or wait until the snapshot has resolved, before calling release().
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/booking/src/hold-fast-path.test.ts#race-lost-test-can-flake-release-races-the-snapshot-read`
+- **History:**
+  - 2026-11-05: recorded: MEDIUM missing_test at `packages/booking/src/hold-fast-path.test.ts:201`, spec axis (ticket 10 review-3 spec, run 20261105-143619)
+
+### TD-070: Metrics adapter is never wired in production code
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 10 (`10-hot-seat-race-and-fast-path`)
+- **Evidence:** `.ralph/logs/20261105-143619/10-hot-seat-race-and-fast-path.review-3.spec.json`
+- **Components:** `docs/index.md:67`
+- **Problem:** bookingServiceFor in apps/web/src/server/routers/booking.ts:70-76 builds the service without `metrics`, and no other non-test caller uses createRedisBookingMetrics. In the app, hold_ok, seat_unavailable and race_lost are therefore never counted. The docs state that counters go to Redis.
+- **Impact:** The docs overstate current behaviour. The counters exist only in tests until a later ticket wires a Redis client into the app. The ACs only require the port and the adapter, so this is not an AC failure.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Either soften the docs sentence to say the adapter exists but is not yet wired, or name the ticket that wires it in.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `docs/index.md#metrics-adapter-is-never-wired-in-production-code`
+- **History:**
+  - 2026-11-05: recorded: LOW spec_gap at `docs/index.md:67`, spec axis (ticket 10 review-3 spec, run 20261105-143619)
 <!-- ralph-debt:end -->

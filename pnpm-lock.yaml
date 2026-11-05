@@ -316,6 +316,9 @@ importers:
       '@types/node':
         specifier: 26.6.5
         version: 26.6.5
+      redis:
+        specifier: 6.3.0
+        version: 6.3.0
       typescript:
         specifier: 6.0.3
         version: 6.0.3

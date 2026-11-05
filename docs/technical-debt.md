@@ -36,7 +36,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 3      | 38  | 41    |
+| OPEN          | 0        | 0    | 3      | 42  | 45    |
 | PLANNED       | 0        | 0    | 9      | 2   | 11    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 2    | 5      | 2   | 9     |
@@ -1041,10 +1041,11 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** ticket 44 (`issues/44-payment-latency-outside-the-transaction.md`); must merge before tickets 17 and 27, which are blocked by it, so no further payment or saga work builds on the transaction behaviour
 - **Resolution:** none
 - **Verification:** none
-- **Fingerprints:** `apps/worker/src/payment/payment-handler.ts#provider-latency-is-awaited-inside-the-runner-s-db-transacti`
+- **Fingerprints:** `apps/worker/src/payment/payment-handler.ts#provider-latency-is-awaited-inside-the-runner-s-db-transacti`; `apps/worker/src/notification/notification-handler.ts#external-provider-call-awaited-inside-the-runner-s-db-transa`
 - **History:**
   - 2026-11-03: recorded: MEDIUM defect at `apps/worker/src/payment/payment-handler.ts:53`, standards axis (ticket 08 review-2 standards, run 20261103-160343)
   - 2026-11-04: planned for ticket 44 (`issues/44-payment-latency-outside-the-transaction.md`), before tickets 17 and 27 (remediation planning, 2026-11-04)
+  - 2026-11-05: seen again: MEDIUM regression_risk at `apps/worker/src/notification/notification-handler.ts:77`, standards axis (ticket 09 review-3 standards, run 20261105-075349)
 
 ### TD-052: bookingStore and paymentStore are line-for-line copies; service names are listed in two places
 
@@ -1061,9 +1062,10 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** none
 - **Resolution:** none
 - **Verification:** none
-- **Fingerprints:** `packages/messaging/src/service-store.ts#bookingstore-and-paymentstore-are-line-for-line-copies-servi`
+- **Fingerprints:** `packages/messaging/src/service-store.ts#bookingstore-and-paymentstore-are-line-for-line-copies-servi`; `packages/messaging/src/service-store.ts#notificationstore-is-a-third-line-for-line-copy-of-the-store`; `apps/worker/src/worker.ts#relay-service-list-still-hard-coded-separately-from-servicen`
 - **History:**
   - 2026-11-03: recorded: LOW maintainability at `packages/messaging/src/service-store.ts:55`, standards axis (ticket 08 review-2 standards, run 20261103-160343)
+  - 2026-11-05: seen again: LOW maintainability at `packages/messaging/src/service-store.ts:77`, standards axis (ticket 09 review-3 standards, run 20261105-075349)
 
 ### TD-053: Payment redelivery/poison paths are untested
 
@@ -1239,4 +1241,80 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `scripts/sandbox-entrypoint.sh#the-verifiers-prepare-stage-hard-codes-the-workspace-groups`
 - **History:**
   - 2026-11-04: recorded: LOW finding deferred from ticket 48's independent Standards review
+
+### TD-062: Resume test does not redeliver the same message and hides errors
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 09 (`09-confirmation-notification`)
+- **Evidence:** `.ralph/logs/20261105-075349/09-confirmation-notification.review-3.standards.json`
+- **Components:** `apps/worker/src/notification/notification-handler.test.ts:137`
+- **Problem:** The second `deliver` call uses a new subject, consumer and msgId, so it is a fresh message rather than a redelivery of the failed one. `.catch(() => undefined)` is dead code because `pollOnce` nak's and never throws. It would also hide a real setup error.
+- **Impact:** The test proves resume-by-unique-key but not nak, redelivery or the partial-failure case, where one channel is sent and the next fails. That case is the at-least-once behaviour the ticket documents.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Drop the catch. Add a case where the SMS send fails after the EMAIL send, then redeliver and assert both end SENT with the same keys and no duplicate deliveries.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/worker/src/notification/notification-handler.test.ts#resume-test-does-not-redeliver-the-same-message-and-hides-er`
+- **History:**
+  - 2026-11-05: recorded: LOW missing_test at `apps/worker/src/notification/notification-handler.test.ts:137`, standards axis (ticket 09 review-3 standards, run 20261105-075349)
+
+### TD-063: Test asserts a literal markdown string
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 09 (`09-confirmation-notification`)
+- **Evidence:** `.ralph/logs/20261105-075349/09-confirmation-notification.review-3.standards.json`
+- **Components:** `apps/worker/src/notification/delivery-docs.test.ts:12`
+- **Problem:** The test passes if the docs contain the bold phrase and fails on any rewording. It checks neither provider nor handler behaviour. The path `../../../../docs` also couples it to the repo layout.
+- **Impact:** The test breaks on harmless edits to the docs and proves nothing about delivery.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Drop the test, since the docs are reviewed, or keep it only if the ticket explicitly demands an enforced doc.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/worker/src/notification/delivery-docs.test.ts#test-asserts-a-literal-markdown-string`
+- **History:**
+  - 2026-11-05: recorded: LOW maintainability at `apps/worker/src/notification/delivery-docs.test.ts:12`, standards axis (ticket 09 review-3 standards, run 20261105-075349)
+
+### TD-064: Channel union duplicates the Prisma NotificationChannel enum
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 09 (`09-confirmation-notification`)
+- **Evidence:** `.ralph/logs/20261105-075349/09-confirmation-notification.review-3.standards.json`
+- **Components:** `apps/worker/src/notification/mock-provider.ts:1`
+- **Problem:** `NotificationChannel = "EMAIL" | "SMS"` is declared by hand next to the generated Prisma enum of the same name and values.
+- **Impact:** Adding a channel needs edits in the schema, the migration and this union. The compiler only partly links them, since the handler passes the string into Prisma.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Derive the type from the Prisma enum, or document why the provider boundary stays decoupled from the db package.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/worker/src/notification/mock-provider.ts#channel-union-duplicates-the-prisma-notificationchannel-enum`
+- **History:**
+  - 2026-11-05: recorded: LOW maintainability at `apps/worker/src/notification/mock-provider.ts:1`, standards axis (ticket 09 review-3 standards, run 20261105-075349)
+
+### TD-065: +dup@ end-to-end test does not prove nothing extra arrives later
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 09 (`09-confirmation-notification`)
+- **Evidence:** `.ralph/logs/20261105-075349/09-confirmation-notification.review-3.spec.json`
+- **Components:** `apps/worker/src/payment-flow.test.ts:172`
+- **Problem:** The test polls until provider.deliveries() is 2, then reads records through findFirstOrThrow on a single order.confirmed outbox row. A second order.confirmed or a late duplicate notification would not be caught if it arrived after the poll returned. It never asserts that only one order.confirmed event exists, and never asserts a stable count of notification rows.
+- **Impact:** A regression that emitted two order.confirmed events for the duplicated payment.succeeded, or that created extra records, could pass. Today the saga ignores the duplicate through the known_payment check, so the real risk is low.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Assert that exactly one order.confirmed outbox row exists for the order. Assert notification.count is 2 after the relay has had a short settle period, for example by polling until the outbox is PUBLISHED.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/worker/src/payment-flow.test.ts#dup-end-to-end-test-does-not-prove-nothing-extra-arrives-lat`
+- **History:**
+  - 2026-11-05: recorded: LOW missing_test at `apps/worker/src/payment-flow.test.ts:172`, spec axis (ticket 09 review-3 spec, run 20261105-075349)
 <!-- ralph-debt:end -->

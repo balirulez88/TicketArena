@@ -59,7 +59,7 @@ optional `holdId`/`orderId`, `payload`); the full envelope is stored as the outb
 | `seat.held`         | `BookingService.holdSeats` (same TX)             | none yet       | 1               |
 | `order.placed`      | `BookingService.placeOrder` (same TX)            | `payment`      | 1               |
 | `payment.succeeded` | mock Payment handler (same TX, `payment` outbox) | `booking-saga` | 1               |
-| `order.confirmed`   | booking saga handler (same TX)                   | none yet       | 1               |
+| `order.confirmed`   | booking saga handler (same TX)                   | `notification` | 1               |
 
 `seat.held` payload: `holdId`, `eventId`, `seatIds`, `holdExpiresAt`. Its `correlationId` is
 minted here and reused by every later event of the booking.
@@ -71,9 +71,21 @@ minted here and reused by every later event of the booking.
 `capturedAt` (provider time). `order.confirmed` payload: `orderId`, `seatIds`, `totalMinor`, `currency`,
 `contact`.
 
+## Notification
+
+`notification` (`service: "notification"`, `apps/worker/src/notification/`) consumes `order.confirmed`. Per
+channel (EMAIL; SMS when a phone was given) it first commits a `PENDING` `notification.notifications`
+row in its own transaction (via the injected `prisma`), calls the provider with
+`idempotencyKey = notification id`, then marks it `SENT` in the handler's transaction. A failed send
+leaves the `PENDING` row; redelivery resumes it with the same key. Unique `(sourceEventId, channel)`
+plus the consumer's `processed_messages` keep a redelivered or `+dup@` event at one record per
+channel. The mock provider records deliveries and dedupes by key.
+**External delivery is at-least-once**: a crash between the call and the `SENT` commit repeats it on redelivery, and only
+the provider's key dedupe absorbs that.
+
 ## Payment saga (happy path)
 
-`apps/worker/src/consumers.ts` registers two durable consumers. `payment` (`service: "payment"`)
+`apps/worker/src/consumers.ts` registers the durable consumers `payment` and `booking-saga`. `payment` (`service: "payment"`)
 handles `order.placed` in `apps/worker/src/payment/`: one CAPTURED `payment.payment_attempts` row and a
 `payment.succeeded` event, with latency and outcome drawn from the injected `Random`/`Clock`. A
 `+dup@` email emits the result twice under distinct event ids. `booking-saga` handles
@@ -82,7 +94,7 @@ handles `order.placed` in `apps/worker/src/payment/`: one CAPTURED `payment.paym
 the seats `SOLD` and write `order.confirmed`. Late, mismatched or non-pending cases throw (retried)
 until the later tickets build the rest of the decision matrix.
 
-Relay and runner take a `service` (`booking` default, or `payment`) that selects the outbox and
+Relay and runner take a `service` (`booking` default, `payment` or `notification`) that selects the outbox and
 `processed_messages` of that schema (ADR 0009); the worker runs one relay per outbox.
 
 ## Decided, not yet built

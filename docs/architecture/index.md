@@ -4,16 +4,16 @@
 
 ## Module boundaries
 
-| Workspace            | Responsibility                                                                                                                                       | Depends on                   |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| `apps/web`           | Next.js App Router UI and the tRPC API (the only public entry)                                                                                       | `db`, `booking`, `contracts` |
-| `packages/db`        | Prisma schema, migrations, client factory over the Neon adapter                                                                                      | (none)                       |
-| `packages/contracts` | Zod schemas for the event envelope and payloads (`seat.held`, `order.placed`, `payment.succeeded`, `order.confirmed`); `Logger` port, id helpers     | (none)                       |
-| `packages/booking`   | `BookingService`: `holdSeats`, `getHold`, `placeOrder`, `getOrder`; payment saga handler                                                             | `contracts`, `db`            |
-| `packages/messaging` | `MessageBus` port, JetStream adapter (the only `@nats-io/*` importer), outbox relay, consumer runner                                                 | `db`                         |
-| `apps/worker`        | Long-running worker: validates env, ensures the topology, runs the relay and hosts consumer runners, serves `/health`; hosts the mock Payment module | `db`, `booking`, `messaging` |
+| Workspace            | Responsibility                                                                                                                                                         | Depends on                   |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| `apps/web`           | Next.js App Router UI and the tRPC API (the only public entry)                                                                                                         | `db`, `booking`, `contracts` |
+| `packages/db`        | Prisma schema, migrations, client factory over the Neon adapter                                                                                                        | (none)                       |
+| `packages/contracts` | Zod schemas for the event envelope and payloads (`seat.held`, `order.placed`, `payment.succeeded`, `order.confirmed`); `Logger` port, id helpers                       | (none)                       |
+| `packages/booking`   | `BookingService`: `holdSeats`, `getHold`, `placeOrder`, `getOrder`; payment saga handler                                                                               | `contracts`, `db`            |
+| `packages/messaging` | `MessageBus` port, JetStream adapter (the only `@nats-io/*` importer), outbox relay, consumer runner                                                                   | `db`                         |
+| `apps/worker`        | Long-running worker: validates env, ensures the topology, runs the relay and hosts consumer runners, serves `/health`; hosts the mock Payment and Notification modules | `db`, `booking`, `messaging` |
 
-Planned (created by tickets, not up front): a waiting-room module (Redis queue logic) and the notification consumer.
+Planned (created by tickets, not up front): a waiting-room module (Redis queue logic).
 New modules are added when a slice needs them, not speculatively.
 
 ## Conventions that shape the code

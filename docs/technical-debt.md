@@ -36,10 +36,10 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 5      | 46  | 51    |
+| OPEN          | 0        | 0    | 3      | 46  | 49    |
 | PLANNED       | 0        | 0    | 9      | 2   | 11    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
-| RESOLVED      | 0        | 2    | 5      | 2   | 9     |
+| RESOLVED      | 0        | 2    | 7      | 2   | 11    |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 ## Entries
@@ -1320,7 +1320,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-066: race_lost is counted for any SeatUnavailableError from the locked step, not only real races
 
-- **Status:** OPEN
+- **Status:** RESOLVED
 - **Severity:** MEDIUM
 - **Escalation:** none
 - **Source:** ticket 10 (`10-hot-seat-race-and-fast-path`)
@@ -1331,12 +1331,13 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
 - **Remediation:** Count race_lost only when the refusal cannot be explained by the snapshot, for example by checking that the refused seats were AVAILABLE or unexpired-free in the snapshot. Otherwise count seat_unavailable for the other cases, or fix lazy expiry (TD-013) and add a test with an expired HELD seat that asserts the counter.
 - **Target:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** The lock-free snapshot now records each requested seat's status and hold, the locked read selects the same, and `lostRace` counts `race_lost` only when a refused seat changed between the two reads. A refused seat that is unchanged (an expired but unswept hold, TD-013) or outside the event counts `seat_unavailable`. The spec (holdSeats step 5) and `docs/database/index.md` say the same.
+- **Verification:** `packages/booking/src/hold-fast-path.test.ts::an expired HELD seat refused under the lock counts seat_unavailable, not race_lost`; `packages/booking/src/hold-fast-path.test.ts::a seat id outside the event counts seat_unavailable, not race_lost`; `packages/booking/src/hold-fast-path.test.ts::a seat taken between snapshot and lock counts race_lost only`
 - **Fingerprints:** `packages/booking/src/booking-service.ts#race-lost-is-counted-for-any-seatunavailableerror-from-the-l`
 - **History:**
   - 2026-11-05: recorded: MEDIUM defect at `packages/booking/src/booking-service.ts:488`, standards axis (ticket 10 review-3 standards, run 20261105-143619)
   - 2026-11-05: seen again: MEDIUM defect at `packages/booking/src/booking-service.ts:488`, spec axis (ticket 10 host review spec, run 20261105-153541-378)
+  - 2026-11-05: resolved on branch `fix/flaky-tests-and-race-lost-metric` (human commit after batch #3): both regression tests failed before the fix (counted race_lost) and pass after; `hold-fast-path.test.ts` passed 40/40 repeated runs, `hold-race.test.ts` 10/10
 
 ### TD-067: Saturation detection matches a pg-pool error message string, and P2028 also covers non-saturation timeouts
 
@@ -1378,7 +1379,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-069: race_lost test can flake: release races the snapshot read
 
-- **Status:** OPEN
+- **Status:** RESOLVED
 - **Severity:** MEDIUM
 - **Escalation:** none
 - **Source:** ticket 10 (`10-hot-seat-race-and-fast-path`)
@@ -1389,12 +1390,13 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
 - **Remediation:** Release only once the hold is provably blocked on the lock. For example, poll pg_locks or pg_stat_activity for a waiting backend on the seat row, or wait until the snapshot has resolved, before calling release().
 - **Target:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** The locking transaction reports its `pg_backend_pid()`, and the test releases the lock only after `pg_stat_activity` shows a backend blocked by it (`pg_blocking_pids`). holdSeats reads its snapshot before opening the locking transaction, so the snapshot provably saw the seat AVAILABLE before it became SOLD, with no timing assumption. The poll is bounded (10 s).
+- **Verification:** `packages/booking/src/hold-fast-path.test.ts::a seat taken between snapshot and lock counts race_lost only`
 - **Fingerprints:** `packages/booking/src/hold-fast-path.test.ts#race-lost-test-can-flake-release-races-the-snapshot-read`; `packages/booking/src/hold-fast-path.test.ts#race-lost-test-does-not-prove-the-hold-was-blocked-on-the-lo`
 - **History:**
   - 2026-11-05: recorded: MEDIUM missing_test at `packages/booking/src/hold-fast-path.test.ts:201`, spec axis (ticket 10 review-3 spec, run 20261105-143619)
   - 2026-11-05: seen again: MEDIUM missing_test at `packages/booking/src/hold-fast-path.test.ts:201`, spec axis (ticket 10 host review spec, run 20261105-153541-378)
+  - 2026-11-05: resolved on branch `fix/flaky-tests-and-race-lost-metric` (human commit after batch #3): the release now waits for a backend blocked by the lock (`pg_blocking_pids`); `hold-fast-path.test.ts` passed 40/40 repeated runs, run alongside the worker suite for load
 
 ### TD-070: Metrics adapter is never wired in production code
 

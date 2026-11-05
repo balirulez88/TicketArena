@@ -199,7 +199,8 @@ Requires admission (see Waiting room). 1–6 seat ids, all from one event.
    4. A seat is free iff `AVAILABLE`, or `HELD` and its hold has `holdExpiresAt <= T`.
       `IN_CHECKOUT` and `SOLD` are never free.
    5. Any seat not free: roll back, return `SEAT_UNAVAILABLE` (seat ids), count `race_lost` when
-      the snapshot had said free.
+      the snapshot had said free and a refused seat changed after the snapshot read it (another
+      buyer got there first); otherwise count `seat_unavailable`.
    6. **Limit:** `usage = count of seats in this event with claimBuyerKey = buyerKey that are
       (HELD with hold not expired at T) or IN_CHECKOUT or SOLD`. If `usage + requested > 6`, roll
       back with `LIMIT_EXCEEDED`. Counting seats, not holds or orders, means a hold that becomes an

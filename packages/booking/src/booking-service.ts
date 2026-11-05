@@ -336,9 +336,38 @@ function toOrderView(order: {
   };
 }
 
-interface LockedSeat {
+interface SeatState {
   readonly id: string;
   readonly status: string;
+  readonly holdId: string | null;
+}
+
+interface Snapshot {
+  /** Requested seats that are visibly not holdable. */
+  readonly taken: string[];
+  /** What the snapshot saw of each requested seat that belongs to the event. */
+  readonly seen: ReadonlyMap<string, SeatState>;
+}
+
+/**
+ * A refusal under the lock is a lost race only when a refused seat changed after the snapshot
+ * read it, i.e. another buyer got there first. A refused seat the snapshot saw as it still is
+ * (an expired but unswept hold, TD-013) or never saw (not in the event) lost no race.
+ */
+function lostRace(
+  seen: ReadonlyMap<string, SeatState>,
+  locked: readonly SeatState[],
+  refused: readonly string[],
+): boolean {
+  const now = new Map(locked.map((seat) => [seat.id, seat]));
+  return refused.some((id) => {
+    const before = seen.get(id);
+    const after = now.get(id);
+    if (before === undefined) {
+      return false;
+    }
+    return after === undefined || after.status !== before.status || after.holdId !== before.holdId;
+  });
 }
 
 export function createBookingService({
@@ -363,21 +392,24 @@ export function createBookingService({
     }
   }
 
-  /** Lock-free read: requested seats that are visibly not holdable right now. Advisory only. */
-  async function visiblyTaken(
+  /** Lock-free read of the requested seats: which are visibly not holdable now. Advisory only. */
+  async function snapshot(
     eventId: string,
     seatIds: readonly string[],
     at: Date,
-  ): Promise<string[]> {
-    const rows = await db.$queryRaw<{ id: string }[]>`
-      SELECT s.id::text AS id
+  ): Promise<Snapshot> {
+    const rows = await db.$queryRaw<(SeatState & { taken: boolean | null })[]>`
+      SELECT s.id::text AS id, s.status::text AS status, s."holdId"::text AS "holdId",
+             (s.status::text IN ('SOLD', 'IN_CHECKOUT')
+              OR (s.status::text = 'HELD' AND h."holdExpiresAt" > ${at})) AS taken
       FROM seats s
       LEFT JOIN holds h ON h.id = s."holdId"
-      WHERE s.id = ANY(${[...seatIds]}::uuid[]) AND s."eventId" = ${eventId}::uuid
-        AND (s.status::text IN ('SOLD', 'IN_CHECKOUT')
-             OR (s.status::text = 'HELD' AND h."holdExpiresAt" > ${at}))`;
-    const taken = new Set(rows.map((row) => row.id));
-    return seatIds.filter((id) => taken.has(id));
+      WHERE s.id = ANY(${[...seatIds]}::uuid[]) AND s."eventId" = ${eventId}::uuid`;
+    const taken = new Set(rows.filter((row) => row.taken === true).map((row) => row.id));
+    return {
+      taken: seatIds.filter((id) => taken.has(id)),
+      seen: new Map(rows.map(({ id, status, holdId }) => [id, { id, status, holdId }])),
+    };
   }
 
   async function findByIdempotencyKey(
@@ -407,17 +439,19 @@ export function createBookingService({
       throw new InvalidSeatSelectionError("seatIds contains duplicates");
     }
     // Optimization only: the locked step below alone decides success (ADR 0005).
-    const taken = await visiblyTaken(eventId, seatIds, clock.now());
+    const { taken, seen } = await snapshot(eventId, seatIds, clock.now());
     if (taken.length > 0) {
       count("seat_unavailable", eventId);
       throw new SeatUnavailableError(taken);
     }
+    // Set inside the transaction when it refuses, read by the catch below to pick the counter.
+    let refusal: BookingMetric | undefined;
     const hold = await db
       .$transaction(async (tx) => {
         // Waiting (not NOWAIT) lock in id order: a loser sees the winner's committed state
         // instead of a spurious "taken" while the winner might still roll back (ADR 0005).
-        const locked = await tx.$queryRaw<LockedSeat[]>`
-          SELECT id::text AS id, status::text AS status
+        const locked = await tx.$queryRaw<SeatState[]>`
+          SELECT id::text AS id, status::text AS status, "holdId"::text AS "holdId"
           FROM seats
           WHERE id = ANY(${[...seatIds]}::uuid[]) AND "eventId" = ${eventId}::uuid
           ORDER BY id
@@ -429,6 +463,7 @@ export function createBookingService({
         const free = new Set(locked.filter((seat) => seat.status === "AVAILABLE").map((s) => s.id));
         const unavailable = seatIds.filter((id) => !free.has(id));
         if (unavailable.length > 0) {
+          refusal = lostRace(seen, locked, unavailable) ? "race_lost" : "seat_unavailable";
           throw new SeatUnavailableError(unavailable);
         }
 
@@ -483,9 +518,8 @@ export function createBookingService({
         };
       })
       .catch((error: unknown) => {
-        // The snapshot said free, so a refusal here means another buyer won the race.
-        if (error instanceof SeatUnavailableError) {
-          count("race_lost", eventId);
+        if (error instanceof SeatUnavailableError && refusal !== undefined) {
+          count(refusal, eventId);
         }
         throw error;
       });

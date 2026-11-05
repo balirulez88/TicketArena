@@ -63,14 +63,18 @@ async function lockSeatElsewhere(seatId: string, thenSetStatus?: "SOLD") {
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
-  let locked: () => void = () => undefined;
-  const lockTaken = new Promise<void>((resolve) => {
+  let locked: (backendPid: number) => void = () => undefined;
+  const lockTaken = new Promise<number>((resolve) => {
     locked = resolve;
   });
   const transaction = db().$transaction(
     async (tx) => {
       await tx.$queryRaw`SELECT id FROM seats WHERE id = ${seatId}::uuid FOR UPDATE`;
-      locked();
+      const [backend] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      if (backend === undefined) {
+        throw new Error("pg_backend_pid() returned no row");
+      }
+      locked(backend.pid);
       await gate;
       if (thenSetStatus !== undefined) {
         await tx.seat.update({ where: { id: seatId }, data: { status: thenSetStatus } });
@@ -78,8 +82,25 @@ async function lockSeatElsewhere(seatId: string, thenSetStatus?: "SOLD") {
     },
     { timeout: 30_000 },
   );
-  await lockTaken;
+  const lockerPid = await lockTaken;
   return {
+    /**
+     * Resolves once another backend is queued behind this lock. holdSeats reads its lock-free
+     * snapshot before it opens the locking transaction, so from then on the snapshot has already
+     * seen the seat as it was before `release` changes it: no timing assumption is left.
+     */
+    waitForWaiter: () =>
+      expect
+        .poll(
+          async () => {
+            const [row] = await db().$queryRaw<{ waiting: bigint }[]>`
+              SELECT count(*) AS waiting FROM pg_stat_activity
+              WHERE ${lockerPid}::int = ANY(pg_blocking_pids(pid))`;
+            return Number(row?.waiting ?? 0);
+          },
+          { timeout: 10_000 },
+        )
+        .toBeGreaterThan(0),
     release: async () => {
       release();
       await transaction;
@@ -198,8 +219,53 @@ describe("holdSeats metrics on the fast path and the race", () => {
       () => "held" as const,
       (error: unknown) => error,
     );
-    await lock.release();
+    try {
+      await lock.waitForWaiter();
+    } finally {
+      await lock.release();
+    }
     expect(await settled).toMatchObject({ code: "SEAT_UNAVAILABLE", seatIds: [seat.id] });
     expect(calls).toEqual(["race_lost"]);
+  });
+
+  // Until lazy expiry lands (TD-013, ticket 14) the locked step refuses an expired HELD seat that
+  // the snapshot let through. Nobody changed the seat in between, so no race was lost.
+  test("an expired HELD seat refused under the lock counts seat_unavailable, not race_lost", async () => {
+    const event = await db().event.findFirstOrThrow({ where: { demo: true } });
+    const seat = await freeSeat(event.id);
+    await createBookingService({
+      db: db(),
+      clock: { now: () => NOW },
+      newId: randomUUID,
+    }).holdSeats(alice, event.id, [seat.id]);
+    const { calls, metrics } = recordingMetrics();
+    const service = createBookingService({
+      db: db(),
+      clock: { now: () => new Date(NOW.getTime() + 24 * 60 * 60 * 1000) },
+      newId: randomUUID,
+      metrics,
+    });
+    expect(await settleWithin(service.holdSeats(bob, event.id, [seat.id]))).toMatchObject({
+      code: "SEAT_UNAVAILABLE",
+      seatIds: [seat.id],
+    });
+    expect(calls).toEqual(["seat_unavailable"]);
+  });
+
+  test("a seat id outside the event counts seat_unavailable, not race_lost", async () => {
+    const event = await db().event.findFirstOrThrow({ where: { demo: true } });
+    const unknownSeatId = randomUUID();
+    const { calls, metrics } = recordingMetrics();
+    const service = createBookingService({
+      db: db(),
+      clock: { now: () => NOW },
+      newId: randomUUID,
+      metrics,
+    });
+    expect(await settleWithin(service.holdSeats(bob, event.id, [unknownSeatId]))).toMatchObject({
+      code: "SEAT_UNAVAILABLE",
+      seatIds: [unknownSeatId],
+    });
+    expect(calls).toEqual(["seat_unavailable"]);
   });
 });

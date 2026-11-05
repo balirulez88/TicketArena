@@ -53,6 +53,36 @@ async function placeOrderFor(email: string, sessionChar: string, phone?: string)
   return { order, seatId: seat.id };
 }
 
+/**
+ * One order's confirmation as persisted ([channel, status] by channel) and as sent (the channels
+ * of the provider deliveries keyed by its notification ids). Scoped to the order on purpose: the
+ * tests share a durable consumer, so a worker may also deliver an earlier test's unacked event.
+ */
+async function confirmationOf(
+  orderId: string,
+  provider: ReturnType<typeof createMockNotificationProvider>,
+) {
+  const confirmed = await prisma.outboxEvent.findFirst({
+    where: { eventType: "order.confirmed", aggregateId: orderId },
+  });
+  if (confirmed === null) {
+    return { states: [], sent: [] };
+  }
+  const records = await prisma.notification.findMany({
+    where: { sourceEventId: confirmed.id },
+    orderBy: { channel: "asc" },
+  });
+  const keys = new Set(records.map((record) => record.id));
+  return {
+    states: records.map((record) => [record.channel, record.status]),
+    sent: provider
+      .deliveries()
+      .filter((delivery) => keys.has(delivery.idempotencyKey))
+      .map((delivery) => delivery.channel)
+      .sort(),
+  };
+}
+
 describe("hold -> order -> worker -> CONFIRMED", () => {
   it("confirms the order: CONFIRMED, one APPLIED ledger row, SOLD seats, one confirmation record (AT-15)", async () => {
     const { order, seatId } = await placeOrderFor("buyer@example.com", "a");
@@ -84,14 +114,10 @@ describe("hold -> order -> worker -> CONFIRMED", () => {
         await prisma.orderPayment.count({ where: { orderId: order.id, disposition: "APPLIED" } }),
       ).toBe(1);
       expect((await prisma.seat.findUniqueOrThrow({ where: { id: seatId } })).status).toBe("SOLD");
-      await expect.poll(() => provider.deliveries().length, { timeout: 15_000 }).toBe(1);
-      const confirmedId = (
-        await prisma.outboxEvent.findFirstOrThrow({
-          where: { eventType: "order.confirmed", aggregateId: order.id },
-        })
-      ).id;
-      const records = await prisma.notification.findMany({ where: { sourceEventId: confirmedId } });
-      expect(records.map((record) => [record.channel, record.status])).toEqual([["EMAIL", "SENT"]]);
+      // The record becomes SENT only after the provider call returns, so both are polled for.
+      await expect
+        .poll(() => confirmationOf(order.id, provider), { timeout: 15_000 })
+        .toEqual({ states: [["EMAIL", "SENT"]], sent: ["EMAIL"] });
     } finally {
       await worker.stop();
     }
@@ -169,20 +195,15 @@ describe("hold -> order -> worker -> CONFIRMED", () => {
       }),
     });
     try {
-      await expect.poll(() => provider.deliveries().length, { timeout: 15_000 }).toBe(2);
-      const confirmedId = (
-        await prisma.outboxEvent.findFirstOrThrow({
-          where: { eventType: "order.confirmed", aggregateId: order.id },
-        })
-      ).id;
-      const records = await prisma.notification.findMany({
-        where: { sourceEventId: confirmedId },
-        orderBy: { channel: "asc" },
-      });
-      expect(records.map((record) => [record.channel, record.status])).toEqual([
-        ["EMAIL", "SENT"],
-        ["SMS", "SENT"],
-      ]);
+      await expect
+        .poll(() => confirmationOf(order.id, provider), { timeout: 15_000 })
+        .toEqual({
+          states: [
+            ["EMAIL", "SENT"],
+            ["SMS", "SENT"],
+          ],
+          sent: ["EMAIL", "SMS"],
+        });
       expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
         "CONFIRMED",
       );

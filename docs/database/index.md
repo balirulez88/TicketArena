@@ -77,8 +77,10 @@ row in `outbox_events` whose `payload` is the full event envelope and whose `id`
 `id`. A seat that is not `AVAILABLE` fails with `SEAT_UNAVAILABLE` (tRPC `CONFLICT`) naming its id.
 No SQL `now()`; the `Clock` is injected.
 
-Metrics: an optional `BookingMetrics` port counts `hold_ok`, `seat_unavailable` (snapshot refusals)
-and `race_lost` (refused under the lock after the snapshot said free) per event. Counters are bumped
+Metrics: an optional `BookingMetrics` port counts `hold_ok`, `seat_unavailable` (snapshot refusals,
+and refusals under the lock of seats nobody changed since the snapshot, such as an expired but
+unswept hold or a seat outside the event) and `race_lost` (refused under the lock because a refused
+seat's status or hold changed after the snapshot read it) per event. Counters are bumped
 after the outcome is decided, fire-and-forget; a failure is logged and never fails a booking. The
 Redis adapter (`createRedisBookingMetrics`) keeps one hash per event,
 `booking:metrics:<eventId>`, with the metric as field. Seat state is never decided by Redis.

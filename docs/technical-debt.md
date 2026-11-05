@@ -1340,6 +1340,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-05: recorded: MEDIUM defect at `packages/booking/src/booking-service.ts:488`, standards axis (ticket 10 review-3 standards, run 20261105-143619)
   - 2026-11-05: seen again: MEDIUM defect at `packages/booking/src/booking-service.ts:488`, spec axis (ticket 10 host review spec, run 20261105-153541-378)
   - 2026-11-05: resolved on branch `fix/flaky-tests-and-race-lost-metric` (human commit after batch #3): both regression tests failed before the fix (counted race_lost) and pass after; `hold-fast-path.test.ts` passed 40/40 repeated runs, `hold-race.test.ts` 10/10
+  - 2026-11-05: resolution verified: independent host-side Standards and Spec review of `fix/flaky-tests-and-race-lost-metric` approved in its third round with no remaining findings, and `pnpm run check` passed on the branch
 
 ### TD-067: Saturation detection matches a pg-pool error message string, and P2028 also covers non-saturation timeouts
 
@@ -1399,6 +1400,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-05: recorded: MEDIUM missing_test at `packages/booking/src/hold-fast-path.test.ts:201`, spec axis (ticket 10 review-3 spec, run 20261105-143619)
   - 2026-11-05: seen again: MEDIUM missing_test at `packages/booking/src/hold-fast-path.test.ts:201`, spec axis (ticket 10 host review spec, run 20261105-153541-378)
   - 2026-11-05: resolved on branch `fix/flaky-tests-and-race-lost-metric` (human commit after batch #3): the release now waits for a backend blocked by the lock (`pg_blocking_pids`); `hold-fast-path.test.ts` passed 40/40 repeated runs, run alongside the worker suite for load
+  - 2026-11-05: resolution verified: independent host-side Standards and Spec review of `fix/flaky-tests-and-race-lost-metric` approved in its third round with no remaining findings, and `pnpm run check` passed on the branch
 
 ### TD-070: Metrics adapter is never wired in production code
 

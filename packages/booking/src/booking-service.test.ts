@@ -8,7 +8,7 @@ import {
   InvalidSeatSelectionError,
   SeatUnavailableError,
 } from "./booking-service";
-import { backendPid, inTransaction, latch, waitUntilBlockedBy } from "./pg-blocking";
+import { backendPid, latch, waitUntilBlockedBy } from "./pg-blocking";
 
 const database = setupTestDatabase();
 let prisma: PrismaClient | undefined;
@@ -153,14 +153,15 @@ describe("holdSeats", () => {
       await commit.promise;
     });
     await locked.promise;
-    // The clock is synchronous, so each read starts a probe of whether the blocker's transaction
-    // is still open; a read taken before the lock was granted can only see it open.
-    // A separate pool: on the blocker's own, a probe could reuse its released backend and see itself.
+    // The clock is synchronous, so each read is stamped with the phase it happens in, there and
+    // then. A read before the lock was granted can only happen while the blocker is uncommitted:
+    // the hold is already blocked on the lock (awaited below) before the blocker is let go.
     const observer = createPrismaClient({ connectionString: database.url, driver: "pg" });
-    const probes: Promise<boolean>[] = [];
+    let phase: "blocker-open" | "blocker-released" | "blocker-committed" = "blocker-open";
+    const reads: string[] = [];
     const clock = {
       now: () => {
-        probes.push(inTransaction(observer, blockerPid));
+        reads.push(phase);
         return NOW;
       },
     };
@@ -171,15 +172,58 @@ describe("holdSeats", () => {
       seatIds,
     );
     await waitUntilBlockedBy(observer, blockerPid);
+    phase = "blocker-released";
     commit.open();
     await blocker;
+    phase = "blocker-committed";
     await held;
-
-    const stillOpenAtRead = await Promise.all(probes);
     await observer.$disconnect();
-    // The last read is the decision time: it must come after the blocker committed.
-    expect(stillOpenAtRead.length).toBeGreaterThan(0);
-    expect(stillOpenAtRead.at(-1)).toBe(false);
+
+    expect(reads.length).toBeGreaterThan(0);
+    // The first read is the advisory lock-free snapshot; the last is the decision time.
+    expect(reads.at(-1)).not.toBe("blocker-open");
+  });
+
+  test("runs under lock_timeout 3s and statement_timeout 5s (ADR 0005)", async () => {
+    const { eventId, seatIds } = await freshSeats(1);
+    const seen: { lock: string; statement: string }[] = [];
+    // Observe the settings from inside the service's own transaction, after it has set them.
+    const observing = new Proxy(db(), {
+      get(target, property) {
+        if (property !== "$transaction") {
+          return Reflect.get(target, property);
+        }
+        return (fn: (tx: PrismaClient) => Promise<unknown>, options?: object) =>
+          target.$transaction(async (tx) => {
+            const wrapped = new Proxy(tx as PrismaClient, {
+              get(inner, name) {
+                if (name !== "$executeRaw") {
+                  return Reflect.get(inner, name);
+                }
+                return async (...args: Parameters<PrismaClient["$executeRaw"]>) => {
+                  const result = await inner.$executeRaw(...args);
+                  const [row] = await inner.$queryRaw<{ lock: string; statement: string }[]>`
+                    SELECT current_setting('lock_timeout') AS lock,
+                           current_setting('statement_timeout') AS statement`;
+                  if (row) {
+                    seen.push(row);
+                  }
+                  return result;
+                };
+              },
+            });
+            return fn(wrapped);
+          }, options);
+      },
+    });
+
+    await createBookingService({
+      db: observing,
+      clock: { now: () => NOW },
+      newId: randomUUID,
+    }).holdSeats(alice, eventId, seatIds);
+
+    expect(seen).toContainEqual({ lock: "3s", statement: "5s" });
   });
 });
 

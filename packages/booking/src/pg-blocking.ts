@@ -23,16 +23,6 @@ export async function waitUntilBlockedBy(
   }
 }
 
-/** Whether the backend still has a transaction open (it holds its locks until it ends). */
-export async function inTransaction(
-  observer: Pick<PrismaClient, "$queryRaw">,
-  pid: number,
-): Promise<boolean> {
-  const [row] = await observer.$queryRaw<{ open: boolean }[]>`
-    SELECT (xact_start IS NOT NULL) AS open FROM pg_stat_activity WHERE pid = ${pid}::int`;
-  return row?.open ?? false;
-}
-
 export interface Latch {
   readonly promise: Promise<void>;
   readonly open: () => void;

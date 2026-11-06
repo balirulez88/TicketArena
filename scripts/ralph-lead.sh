@@ -50,6 +50,12 @@ readonly USAGE_REPORT="${LEAD_DIR}/ralph-usage.mjs"
 
 LEAD_PID=""
 LEAD_INTERRUPTED=""
+# The ticket in flight, for the signal handler (set by lead_ticket). LEAD_CANDIDATE is the
+# checkpoint commit once the Lead has finished; it is what must survive a stop.
+LEAD_SLUG=""
+LEAD_BRANCH=""
+LEAD_BASE=""
+LEAD_CANDIDATE=""
 
 # ---------------------------------------------------------------------------------------------
 # Prompt
@@ -116,13 +122,41 @@ EOF
 # The Lead session
 # ---------------------------------------------------------------------------------------------
 
+# The work as a patch in the run's logs, which the host imports. After the Lead has finished the
+# candidate commit is the source (the working tree may be mid-way through the RED proof).
+lead_save_patch() {
+  local patch="${LOG_DIR}/${LEAD_SLUG}.lead-work.patch"
+  if [[ -n "${LEAD_CANDIDATE}" ]]; then
+    git diff --binary "${LEAD_BASE}" "${LEAD_CANDIDATE}" >"${patch}" 2>/dev/null || true
+  else
+    git add -A 2>/dev/null || true
+    git diff --cached --binary "${LEAD_BASE}" >"${patch}" 2>/dev/null || true
+  fi
+  printf '%s
+' "${patch}"
+}
+
+# SIGINT/SIGTERM, from the start of the Lead session to the end of the run (bash runs the handler
+# once the foreground command it is waiting for, such as a test run, has returned). During the
+# session it stops the Lead and lets lead_session report it. Afterwards it saves the candidate and
+# leaves: a stop never loses the paid work, and never judges or merges it.
 lead_interrupt() {
-  LEAD_INTERRUPTED=$1
-  log "interrupted (signal status ${1}): stopping the lead session; nothing is merged, rejected or retried"
   if [[ -n "${LEAD_PID}" ]]; then
+    LEAD_INTERRUPTED=$1
+    log "interrupted (signal status ${1}): stopping the lead session; nothing is merged, rejected or retried"
     kill -TERM "${LEAD_PID}" 2>/dev/null || true
     wait "${LEAD_PID}" 2>/dev/null || true
+    return 0
   fi
+  log "interrupted (signal status ${1}) after the lead session: saving the candidate, judging nothing"
+  trap '' INT TERM
+  local patch
+  patch="$(lead_save_patch)"
+  # The RED proof moves the slice branch to the base; put the candidate back.
+  [[ -z "${LEAD_CANDIDATE}" ]] || git reset --quiet --hard "${LEAD_CANDIDATE}" 2>/dev/null || true
+  log "STOPPED ${LEAD_SLUG}: interrupted. No retry, no fallback, ticket not blocked. Work saved in ${patch}"
+  RUN_STATUS=failed
+  exit "$1"
 }
 
 # Like fresh_session (ralph-loop.sh), with one deliberate difference: compaction stays on. One
@@ -140,15 +174,14 @@ lead_session() {
   config="$(mktemp -d "${TMPDIR:-/tmp}/ralph-lead.XXXXXX")"
   [[ "${argv[0]##*/}" == claude ]] && argv+=(--session-id "${session}")
   [[ -z "${LEAD_BUDGET}" ]] || argv+=(--max-budget-usd "${LEAD_BUDGET}")
-  ((LEAD_TIMEOUT > 0)) && argv=(timeout "${LEAD_TIMEOUT}" "${argv[@]}")
+  # -k: a Lead that ignores SIGTERM is killed 30 s later instead of hanging the run.
+  ((LEAD_TIMEOUT > 0)) && argv=(timeout -k 30 "${LEAD_TIMEOUT}" "${argv[@]}")
   started="$(date -u +%FT%TZ)"
   record="${LOG_DIR}/sessions/$(date -u +%Y%m%dT%H%M%S%N)-${session}.tsv"
   mkdir -p "${record%/*}"
   session_record "${record}" "${started}" "$(ticket_number "${ticket}") lead" "${session}" running - -
   # In the background so a signal reaches this shell's trap while the Lead is running; the trap
-  # stops the Lead and this function reports 130/143.
-  trap 'lead_interrupt 130' INT
-  trap 'lead_interrupt 143' TERM
+  # (installed by lead_ticket) stops the Lead and this function reports 130/143.
   CLAUDE_CONFIG_DIR="${config}" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 RALPH_SESSION_ID="${session}" \
     RALPH_TICKET="$(ticket_number "${ticket}")" RALPH_PHASE=lead \
     "${argv[@]}" "${prompt}" >"${out}" 2>"${err}" &
@@ -156,7 +189,6 @@ lead_session() {
   wait "${LEAD_PID}" || status=$?
   [[ -z "${LEAD_INTERRUPTED}" ]] || status=${LEAD_INTERRUPTED}
   LEAD_PID=""
-  trap - INT TERM
   rm -rf "${config}"
   if [[ -n "${LEAD_INTERRUPTED}" ]]; then
     outcome=interrupted
@@ -181,14 +213,16 @@ lead_session() {
 lead_stop() {
   local ticket=$1 branch=$2 base_sha=$3 why=$4 slug patch
   slug="$(ticket_slug "${ticket}")"
-  patch="${LOG_DIR}/${slug}.lead-work.patch"
+  patch="$(lead_save_patch)"
   if git symbolic-ref --quiet --short HEAD >/dev/null 2>&1; then
-    git add -A 2>/dev/null || true
-    git diff --cached --binary "${base_sha}" >"${patch}" 2>/dev/null || true
     # A Lead that moved git is not trusted to leave a branch worth keeping.
     if [[ "$(git symbolic-ref --short HEAD)" == "${branch}" ]]; then
       git commit --quiet --allow-empty -m "wip(ralph): lead stopped: ${why}" || true
       git switch --quiet "${BASE_BRANCH}" || true
+    else
+      # On the base branch (the Lead switched there): leave it as the harness found it.
+      git reset --quiet --hard HEAD 2>/dev/null || true
+      git clean --quiet -fd 2>/dev/null || true
     fi
   fi
   log "STOPPED ${slug}: ${why}"
@@ -238,6 +272,8 @@ lead_prove_red() {
     git diff -z --name-only --diff-filter=d "${base_sha}" "${candidate}" |
       grep -zE '\.test\.tsx?$|(^|/)__fixtures__/' || true
   )
+  # The branch moves to the base for the proof; this ref keeps the candidate reachable meanwhile.
+  git update-ref refs/ralph/lead-candidate "${candidate}"
   git reset --quiet --hard "${base_sha}"
   git clean --quiet -fd
   if ((${#tests[@]} > 0)); then
@@ -299,9 +335,13 @@ lead_ticket() {
   [[ ! -e "${STATE_DIR}/${slug}.pause" ]] ||
     die "${slug} is paused by the Ralph driver: resume it with that driver, not the lead driver"
 
+  # lead_ticket runs under `|| exit`, where errexit is off: every step that matters is checked.
   base_sha="$(git rev-parse HEAD)"
-  git switch --quiet -c "${branch}" "${BASE_BRANCH}"
+  git switch --quiet -c "${branch}" "${BASE_BRANCH}" || die "could not create ${branch}"
   CURRENT_BRANCH="${branch}"
+  LEAD_SLUG="${slug}" LEAD_BRANCH="${branch}" LEAD_BASE="${base_sha}" LEAD_CANDIDATE=""
+  trap 'lead_interrupt 130' INT
+  trap 'lead_interrupt 143' TERM
   set_status "${ticket}" "in-progress"
   mkdir -p .ralph/lead
 
@@ -325,8 +365,12 @@ lead_ticket() {
     return 1
   fi
 
-  checkpoint "lead candidate"
+  if ! checkpoint "lead candidate"; then
+    lead_stop "${ticket}" "${branch}" "${base_sha}" "could not commit the candidate"
+    return 1
+  fi
   candidate="$(git rev-parse HEAD)"
+  LEAD_CANDIDATE="${candidate}"
   if ! lead_prove_red "${base_sha}" "${candidate}" "${LOG_DIR}/${slug}.lead.red.log"; then
     reject_slice "${ticket}" "${branch}" "RED not re-proved: the candidate's tests do not fail on the base"
     return 1
@@ -336,6 +380,12 @@ lead_ticket() {
     return 1
   fi
   finalize_slice "${ticket}" "${branch}"
+  # finalize_slice also runs with errexit off: a merge that failed must not be reported as one.
+  if ! git merge-base --is-ancestor "${branch}" "${BASE_BRANCH}" ||
+    [[ ! -f "${DONE_DIR}/$(basename "${ticket}")" ]]; then
+    log "ERROR: ${branch} is not merged into ${BASE_BRANCH}; the candidate is kept on ${branch}"
+    return 1
+  fi
   CURRENT_BRANCH=""
   RUN_STATUS=succeeded
 }

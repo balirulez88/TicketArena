@@ -392,7 +392,7 @@ without `--ticket`, exit 2 before a container exists (`scripts/ralph-driver.sh`)
   scenarios in `scripts/ralph-accept.test.mjs`) and `pnpm test:sandbox` (real Docker, scenarios
   `lead-*`).
 - **Usage.** The Lead's JSON result is kept as `<slug>.lead.json`; `node scripts/ralph-usage.mjs
-  <logs dir> [host review dir]` totals tokens and the CLI's reported cost. The dollar figure is
+  .ralph/logs/<run> .ralph/host-review/<run>` totals tokens and the CLI's reported cost. The dollar figure is
   API-price arithmetic, not subscription usage: compare tokens and read the plan's own meter.
   Tokens are summed from `modelUsage`, which includes subagent turns; the result's top-level
   `usage` counts only the session's own (measured on a one-subagent call).

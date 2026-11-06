@@ -173,7 +173,7 @@ sandbox_start_services
 # pause are results as well. The exit status is only a hint to the host: what the host accepts
 # is decided by validating the bundle.
 status=0
-if [[ "${driver}" == ./scripts/ralph-lead.sh ]]; then
+if ralph_driver_forwards_signals "${driver}"; then
   # As PID 1 this shell ignores a `docker stop` (SIGTERM) it has no handler for, and the container
   # would be killed with no result.bundle and no logs. The lead driver stops its session and saves
   # the work on a signal, so pass the signal on and wait for it to finish (ADR 0017). Ralph's own
@@ -185,6 +185,11 @@ if [[ "${driver}" == ./scripts/ralph-lead.sh ]]; then
   while kill -0 "${driver_pid}" 2>/dev/null; do
     wait "${driver_pid}" || status=$?
   done
+  # A signal can interrupt `wait` just as the driver exits; bash still remembers its status.
+  wait "${driver_pid}" 2>/dev/null && status=0 || {
+    rc=$?
+    ((rc == 127)) || status=$rc
+  }
   trap - INT TERM
 else
   RALPH_PUSH_REMOTE=origin RALPH_LOG_ROOT="${OUT}/logs" RALPH_STATE_DIR="${STATE}" \

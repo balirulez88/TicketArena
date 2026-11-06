@@ -88,15 +88,22 @@ run_lead_body() {
     export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
     export RALPH_AGENT_CMD="bash ${WORK}/agent.sh" RALPH_REVIEW_CMD="bash ${WORK}/agent.sh"
     export RALPH_LEAD_CMD="bash ${WORK}/lead.sh" STUB_CALLS="${dir}.calls"
+    [[ -z "${STUB_LEAD_TIMEOUT:-}" ]] || export RALPH_LEAD_TIMEOUT="${STUB_LEAD_TIMEOUT}"
     # shellcheck source=ralph-lead.sh
     source ./scripts/ralph-lead.sh
     run_gate() {
+      : >"${STUB_CALLS}.gate-ran"
       if [[ "${STUB_GATE:-pass}" == pass ]]; then : >"$1"; else
         echo "gate failed" >"$1"
         return 1
       fi
     }
     verify_red() {
+      if [[ "${STUB_RED:-pass}" == slow ]]; then
+        : >"${STUB_CALLS}.red-started"
+        sleep 60 &
+        wait $!
+      fi
       git status --porcelain --untracked-files=all | cut -c4- >"${STUB_CALLS}.red-tree"
       if [[ "${STUB_RED:-pass}" == pass ]]; then : >"$1"; else
         echo "RED rejected" >"$1"
@@ -120,6 +127,7 @@ expect() {
 }
 calls() { { [[ -f "${WORK}/$1.calls.$2" ]] && wc -l <"${WORK}/$1.calls.$2" | tr -d ' '; } || echo 0; }
 status_of() { sed -n 's/^\*\*Status:\*\* //p' "$1" | head -n 1; }
+main_status() { git -C "${WORK}/$1" show main:issues/01-demo.md | sed -n 's/^\*\*Status:\*\* //p'; }
 base_of() { git -C "${WORK}/$1" rev-parse refs/heads/main; }
 no_merge() { [[ "$(git -C "${WORK}/$1" log --format=%s main | grep -c '^Merge slice/' || true)" == 0 ]]; }
 
@@ -163,7 +171,8 @@ expect "RED judged the candidate's test alone" bash -c \
   "grep -qx 'feature.test.ts' '${d}.calls.red-tree' && ! grep -qx 'feature.ts' '${d}.calls.red-tree'"
 expect "usage is reported with its caveat" bash -c \
   "grep -q '\$0.4200' '${d}'/.ralph/logs/*/usage.md && grep -q 'not subscription usage' '${d}'/.ralph/logs/*/usage.md"
-expect "the session is logged" bash -c "grep -q 'ok' '${d}'/.ralph/logs/*/sessions.tsv"
+expect "the session is logged as ok with exit 0" bash -c \
+  "awk -F'\t' '\$4==\"ok\" && \$5==0 {f=1} END{exit !f}' '${d}'/.ralph/logs/*/sessions.tsv"
 
 # ---------------------------------------------------------------------------- rejection (judged)
 scenario "a candidate whose tests do not fail on the base is rejected like Ralph rejects"
@@ -219,6 +228,17 @@ expect "the gate and RED were never asked to approve it" test ! -e "${d}.calls.r
 expect "the ticket is not blocked" test "$(status_of "${d}/issues/01-demo.md")" != blocked
 expect "one lead session" test "$(calls tamper lead)" = 1
 
+# ------------------------------------------------------------------------------------- timeout
+scenario "a lead session that times out stops like any failed one"
+d="$(new_repo timeout)"
+code=0
+STUB_LEAD=slow STUB_LEAD_TIMEOUT=2 run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "non-zero exit" test "${code}" != 0
+expect "the timeout is named" grep -q 'timed out' "${d}.out"
+expect "the session is recorded as timed-out" bash -c   "grep -q 'timed-out' '${d}'/.ralph/logs/*/sessions.tsv"
+expect "the ticket is NOT blocked, nothing merged" test "$(main_status timeout)" = ready-for-agent
+expect "exactly one lead session" test "$(calls timeout lead)" = 1
+
 # ---------------------------------------------------------------------------------- interruption
 scenario "an interrupted run stops the lead, keeps the work and starts nothing else"
 d="$(new_repo interrupt)"
@@ -245,6 +265,26 @@ expect "the session is recorded as interrupted" bash -c \
   "grep -q 'interrupted' '${d}'/.ralph/logs/*/sessions.tsv"
 expect "the work is kept as a patch in the logs" bash -c \
   "grep -q 'partial.ts' '${d}'/.ralph/logs/*/01-demo.lead-work.patch"
+
+scenario "a signal after the session saves the candidate and judges nothing"
+d="$(new_repo late)"
+base="$(base_of late)"
+(STUB_LEAD=ok STUB_RED=slow run_lead_body "${d}" --ticket 01 >"${d}.out" 2>&1) &
+runner=$!
+for _ in $(seq 1 100); do
+  [[ -e "${d}.calls.red-started" ]] && break
+  sleep 0.2
+done
+expect "the RED proof started" test -e "${d}.calls.red-started"
+kill -TERM "${runner}" 2>/dev/null || true
+code=0
+wait "${runner}" || code=$?
+expect "the run exits non-zero" test "${code}" != 0
+expect "main did not move, nothing merged" test "$(base_of late)" = "${base}"
+expect "the candidate is on the slice branch again, not lost at the base" bash -c   "git -C '${d}' show slice/01-demo:feature.ts | grep -q feature"
+expect "the candidate is saved as a patch" bash -c   "grep -q 'feature.ts' '${d}'/.ralph/logs/*/01-demo.lead-work.patch"
+expect "the ticket is NOT blocked on main" test "$(main_status late)" = ready-for-agent
+expect "the gate was never asked to approve it" test ! -e "${d}.calls.gate-ran"
 
 # --------------------------------------------------------------------------- never starts unasked
 scenario "the lead runs nothing it was not asked to: no ticket, an unready ticket, a Ralph pause"

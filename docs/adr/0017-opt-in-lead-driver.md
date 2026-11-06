@@ -29,7 +29,9 @@ works exactly one ticket per run and never selects, and pays for, work on its ow
 
 One Lead session per ticket keeps its context for the whole ticket. It delegates editing to an
 Implementer subagent and may call a read-only Reviewer subagent **once**
-(`.claude/agents/ticketarena-*.md`). There is no review loop. The Lead has no authority: it cannot
+(`.claude/agents/ticketarena-*.md`). There is no review loop. "At most once" and "few
+delegations" are instructions in the Lead's prompt, **not enforced**: the result's
+`subagent_stats` (shown by `ralph-usage.mjs`) is how a disobedient run is noticed afterwards. The Lead has no authority: it cannot
 approve or merge. Its review is advisory, because the host's isolated Standards and Spec review of
 the exact candidate commit (ADR 0015) decides the merge, as it does for Ralph.
 
@@ -41,7 +43,9 @@ from Ralph in four places:
 1. **RED is re-proved by the harness.** The Lead writes tests and code in one session, so the
    harness resets to the base commit, applies only the candidate's `*.test.ts(x)` and
    `__fixtures__/` files, and runs `verify_red`: lint passes, the tests load and execute, at least
-   one fails. A candidate without that evidence is rejected, as in Ralph. The cost: a test that
+   one fails. That is exactly Ralph's RED rule (it too needs one failing test among the changed
+   test files, not one per criterion); the per-criterion evidence is the Spec review's job in
+   both drivers. A candidate without that evidence is rejected, as in Ralph. The cost: a test that
    needs a new non-test helper file, or imports a module the base lacks, fails to load and is
    rejected, exactly as in Ralph's RED phase.
 2. **Git must be as the harness left it.** If the Lead changed the branch or the base, the
@@ -49,7 +53,11 @@ from Ralph in four places:
 3. **No retry, no fallback.** A session that fails, times out, hits a provider limit or is
    interrupted is never repeated, never handed to the Ralph driver, and never blocks the ticket.
    The work is saved as `<slug>.lead-work.patch` in the run's logs (which the host imports) and the
-   run exits 1. A judged candidate that fails RED or the gate is rejected like Ralph's (quarantine
+   run exits non-zero (the session's own status: 1, 124 for a timeout, 130/143 for a signal).
+   A signal is handled from the start of the Lead session to the end of the run; bash runs the
+   handler when the foreground command it is waiting for (a test run) returns, so `docker stop`
+   during the gate can outlast Docker's grace period and end in a kill. The candidate is held on
+   `refs/ralph/lead-candidate` during the RED proof, which moves the slice branch to the base. A judged candidate that fails RED or the gate is rejected like Ralph's (quarantine
    branch, ticket blocked). Running again is a human decision.
 4. **Compaction stays on** (`fresh_session` turns it off), because one session carries the whole
    ticket. The Lead stays small by delegating the reading and editing.
@@ -71,7 +79,9 @@ ignore `docker stop` and the container would die with no bundle and no logs.
 
 The Lead's `claude -p --output-format=json` result is kept as `<slug>.lead.json`, and
 `scripts/ralph-usage.mjs` totals tokens and the CLI's reported cost over any result files (the
-Lead's, and the reviewers' reports where they keep them). The dollar figure is the CLI's API-price
+Lead's, and the host's reviewers' `.ralph/host-review/<run>/<slug>/*.json`, which the host keeps
+and the container never sees: pass both directories). A Lead killed by a timeout or signal leaves a
+partial or no result, so its spend is not counted. The dollar figure is the CLI's API-price
 arithmetic. It is **not** subscription usage and cannot be converted to it; tokens are the
 comparable quantity, and a plan's own meter is read before and after.
 

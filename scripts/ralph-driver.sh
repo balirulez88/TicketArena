@@ -19,6 +19,12 @@ ralph_driver_script() {
   esac
 }
 
+# Only the lead driver stops cleanly on a signal (it saves the work), so only it is run in the
+# background with SIGTERM/SIGINT forwarded. Ralph's own launch stays as it was.
+ralph_driver_forwards_signals() {
+  [[ "${1:-}" == "$(ralph_driver_script lead)" ]]
+}
+
 # The lead driver works exactly one explicit ticket, so it never picks (and pays for) work on its
 # own. Refused here too so a missing --ticket costs nothing, not even a bundle.
 ralph_driver_check() {

@@ -4,7 +4,7 @@
 
 **Blocked by:** 10
 
-**Status:** ready-for-agent
+**Status:** blocked
 
 - [ ] Booking transactions set `lock_timeout` 3s and `statement_timeout` 5s.
 - [ ] `40P01`, `55P03` and `40001` retry the whole transaction up to 3 times with jitter; each retry increments `deadlock_retry`.

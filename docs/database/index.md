@@ -65,19 +65,24 @@ and concurrent seed runs leave one row per venue.
 | `outbox_events_status_createdAt_idx`          | `outbox_events(status, createdAt)`          | Relay polling                                    |
 | `outbox_events_aggregateType_aggregateId_idx` | `outbox_events(aggregateType, aggregateId)` | Aggregate lookup                                 |
 
-Booking: `booking.holdSeats` (one seat for now) and `booking.getHold` (owner only, else
-`NOT_FOUND`) delegate to `BookingService` (`packages/booking`). `holdSeats` rejects an empty or duplicated `seatIds` list with `INVALID_SEAT_SELECTION` (tRPC
+Booking: `booking.holdSeats` (1–6 seats of one event, all or nothing) and `booking.getHold` (owner only, else
+`NOT_FOUND`) delegate to `BookingService` (`packages/booking`). `holdSeats` rejects an empty, duplicated or longer-than-6 `seatIds` list with `INVALID_SEAT_SELECTION` (tRPC
 `BAD_REQUEST`) before writing. It then takes a lock-free snapshot read (`seats` joined to `holds`) and
 refuses with `SEAT_UNAVAILABLE` any seat visibly `SOLD`, `IN_CHECKOUT` or `HELD` with an unexpired hold,
 without locking; the snapshot is advisory and only ever refuses, so the locked step decides
-success (ADR 0005). Otherwise it runs one transaction:
-`SELECT … FOR UPDATE` on the seat, then `T = clock.now()` read **after** the lock, then the `holds`
+success (ADR 0005). Otherwise it runs one transaction: first the buyer lock
+(`pg_advisory_xact_lock` on a hash of `eventId:buyerKey`), then `SELECT … FOR UPDATE` on the seats
+`ORDER BY id`, then `T = clock.now()` read **after** the lock, then the `holds`
 row (`holdExpiresAt = T + 10 min`, fresh `correlationId`), the seat set `HELD`, and a `seat.held`
 row in `outbox_events` whose `payload` is the full event envelope and whose `id` is the envelope
-`id`. A seat that is not `AVAILABLE` fails with `SEAT_UNAVAILABLE` (tRPC `CONFLICT`) naming its id.
+`id`. Buyer limit: under the lock the transaction counts the buyer's seats of the event with
+`claimBuyerKey = buyerKey` that are `IN_CHECKOUT`, `SOLD` or `HELD` with an unexpired hold (each
+seat once); if that plus the request exceeds 6 (`MAX_SEATS_PER_BUYER`) it rolls back with
+`LIMIT_EXCEEDED` (tRPC `CONFLICT`) and counts `limit_exceeded`, so overlapping requests never leave
+a partial hold. A seat that is not `AVAILABLE` fails with `SEAT_UNAVAILABLE` (tRPC `CONFLICT`) naming its id.
 No SQL `now()`; the `Clock` is injected.
 
-Metrics: an optional `BookingMetrics` port counts `hold_ok`, `seat_unavailable` (snapshot refusals,
+Metrics: an optional `BookingMetrics` port counts `hold_ok`, `limit_exceeded`, `seat_unavailable` (snapshot refusals,
 and refusals under the lock of seats nobody changed since the snapshot, such as an expired but
 unswept hold or a seat outside the event) and `race_lost` (refused under the lock because a refused
 seat's status or hold changed after the snapshot read it) per event. Counters are bumped
@@ -92,7 +97,7 @@ Saturation: a `holdSeats` whose pool acquire (`pg` `connectionTimeoutMillis`) or
 retry, and the same mapping for `placeOrder`, remain ticket 12 (TD-020).
 
 Orders: `booking.placeOrder` (no admission required) and `booking.getOrder` (owner only, else
-`NOT_FOUND`). `placeOrder` runs one transaction with the lock order hold `FOR UPDATE`, seats
+`NOT_FOUND`). `placeOrder` runs one transaction with the lock order buyer lock (same key as `holdSeats`, taken after an unlocked read of the hold's event), hold `FOR UPDATE`, seats
 `ORDER BY id FOR UPDATE`, then `T = clock.now()`. It requires a `HELD` hold owned by the caller's
 `BuyerKey` (else `NOT_FOUND`), `T < holdExpiresAt` (else `HOLD_EXPIRED`, tRPC
 `PRECONDITION_FAILED`) and every seat still `HELD` with this `holdId`; the expected seat set is

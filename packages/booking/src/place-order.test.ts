@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import {
   type Buyer,
   createBookingService,
@@ -23,7 +23,13 @@ function db(): PrismaClient {
 }
 
 const NOW = new Date("2027-03-01T12:00:00.000Z");
-const alice: Buyer = { sessionId: "a".repeat(32), buyerKey: "a".repeat(32) };
+// Fresh per test: the buyer limit counts a buyer's seats across the shared database.
+let alice: Buyer = { sessionId: "a".repeat(32), buyerKey: "a".repeat(32) };
+
+beforeEach(() => {
+  const key = randomUUID().replaceAll("-", "");
+  alice = { sessionId: key, buyerKey: key };
+});
 const contact = { email: "alice@example.com" };
 
 function service(now = NOW) {

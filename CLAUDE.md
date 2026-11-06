@@ -13,6 +13,8 @@ Agent instructions for TicketArena. Humans: see `README.md`.
 `/grill-me` → `/to-spec` → `/to-tickets` → `ralph-loop.sh` (`/implement` + `/tdd` → `/update-docs`
 → independent `/code-review` → fix → merge).
 Skill sources live in `skills/`; `.claude/skills/*` are thin wrappers.
+Opt-in alternative for the execution step only: `RALPH_DRIVER=lead` (one Lead session per explicit
+`--ticket`, [ADR 0017](docs/adr/0017-opt-in-lead-driver.md)); the same host checks judge it. Ralph is the default.
 
 ## Quality gate (all must pass, zero warnings)
 

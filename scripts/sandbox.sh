@@ -2,6 +2,8 @@
 #
 # Builds the sandbox image and runs ralph-loop.sh inside it. Arguments are forwarded to the
 # loop, e.g. `./scripts/sandbox.sh --once` or `./scripts/sandbox.sh --ticket 03`.
+# `RALPH_DRIVER=lead ./scripts/sandbox.sh --ticket NN` runs the opt-in lead driver instead (ADR
+# 0017): one explicit ticket, the same trust boundary. Unset, Ralph runs, as always.
 # `./scripts/sandbox.sh --verify [commit]` only runs the quality gate on real services on that
 # commit (default: the base branch), with no agent and no key, in the hardened staged containers
 # of scripts/ralph-verify.mjs.
@@ -41,6 +43,10 @@ git() { command git -C "${REPO_ROOT}" "$@"; }
 verify=false
 [[ "${1:-}" != "--verify" ]] || verify=true
 if [[ "${verify}" == false ]]; then
+  # A bad RALPH_DRIVER, or the lead without --ticket, is refused before any container exists.
+  # shellcheck source=ralph-driver.sh
+  source "${REPO_ROOT}/scripts/ralph-driver.sh"
+  ralph_driver_check "${RALPH_DRIVER:-}" "$@" || exit 2
   [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] || {
     echo "sandbox: export ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN first" >&2
     exit 1
@@ -109,6 +115,10 @@ sandbox_run \
   --env ANTHROPIC_API_KEY \
   --env CLAUDE_CODE_OAUTH_TOKEN \
   --env RALPH_AGENT_CMD \
+  --env RALPH_DRIVER \
+  --env RALPH_LEAD_CMD \
+  --env RALPH_LEAD_TIMEOUT \
+  --env RALPH_LEAD_MAX_BUDGET_USD \
   --env RALPH_MAX_ATTEMPTS \
   --env RALPH_REVIEW_CMD \
   --env RALPH_MAX_REVIEW_ROUNDS \

@@ -5,4 +5,5 @@
 !scripts/sandbox-services.sh
 !scripts/ralph-bins.mjs
 !scripts/ralph-toolchain.mjs
+!scripts/ralph-driver.sh
 !infra/nats/nats.conf

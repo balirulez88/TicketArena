@@ -16,7 +16,7 @@
     "format": "biome check --write .",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "test:harness": "node --test \"scripts/*.test.mjs\" && bash scripts/ralph-loop.test.sh && bash scripts/ralph-sessions.test.sh && bash scripts/ralph-resume.test.sh",
+    "test:harness": "node --test \"scripts/*.test.mjs\" && bash scripts/ralph-loop.test.sh && bash scripts/ralph-sessions.test.sh && bash scripts/ralph-resume.test.sh && bash scripts/ralph-lead.test.sh",
     "test:sandbox": "bash scripts/sandbox.test.sh",
     "check:debt": "node scripts/ralph-debt.mjs check docs/technical-debt.md",
     "format:debt": "node scripts/ralph-debt.mjs format docs/technical-debt.md",

@@ -15,6 +15,8 @@ export {
   type HoldView,
   IdempotencyKeyReusedError,
   InvalidSeatSelectionError,
+  LimitExceededError,
+  MAX_SEATS_PER_BUYER,
   MixedCurrencyError,
   type OrderLineView,
   type OrderView,

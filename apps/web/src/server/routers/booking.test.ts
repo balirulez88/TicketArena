@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { silentLogger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import type { Principal } from "../identity/identity";
 import { createCaller } from "./_app";
 
@@ -15,7 +15,8 @@ function db(): PrismaClient {
 }
 
 const NOW = new Date("2027-03-01T12:00:00.000Z");
-const alice: Principal = { kind: "guest", sessionId: "a".repeat(32) };
+// Fresh per test: the buyer limit counts a buyer's seats across the shared database.
+let alice: Principal = { kind: "guest", sessionId: "a".repeat(32) };
 const bob: Principal = { kind: "guest", sessionId: "b".repeat(32) };
 
 function caller(principal: Principal) {
@@ -29,6 +30,10 @@ async function availableSeat() {
   });
   return { eventId: event.id, seatId: seat.id };
 }
+
+beforeEach(() => {
+  alice = { kind: "guest", sessionId: randomUUID().replaceAll("-", "") };
+});
 
 beforeAll(async () => {
   await seedCatalog(db(), NOW);
@@ -73,6 +78,50 @@ describe("booking.holdSeats", () => {
     await expect(
       caller(alice).booking.holdSeats({ eventId, seatIds: ["nope"] }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST", message: expect.stringContaining("seatIds") });
+  });
+});
+
+describe("booking.holdSeats seat-count boundary", () => {
+  test("rejects zero and seven seat ids as BAD_REQUEST naming seatIds", async () => {
+    const { eventId } = await availableSeat();
+    const seven = Array.from({ length: 7 }, () => randomUUID());
+
+    for (const seatIds of [[], seven]) {
+      await expect(caller(alice).booking.holdSeats({ eventId, seatIds })).rejects.toMatchObject({
+        code: "BAD_REQUEST",
+        message: expect.stringContaining("seatIds"),
+      });
+    }
+  });
+
+  test("holds six seats of one event in one call", async () => {
+    const event = await db().event.findFirstOrThrow({ where: { demo: true } });
+    const seats = await db().seat.findMany({
+      where: { eventId: event.id, status: "AVAILABLE" },
+      take: 6,
+    });
+
+    const hold = await caller(alice).booking.holdSeats({
+      eventId: event.id,
+      seatIds: seats.map((seat) => seat.id),
+    });
+
+    expect(hold.seatIds).toHaveLength(6);
+  });
+
+  test("seats of another event are CONFLICT and nothing is held", async () => {
+    const demo = await db().event.findFirstOrThrow({ where: { demo: true } });
+    const other = await db().event.findFirstOrThrow({ where: { demo: false } });
+    const foreign = await db().seat.findFirstOrThrow({
+      where: { eventId: other.id, status: "AVAILABLE" },
+    });
+
+    await expect(
+      caller(alice).booking.holdSeats({ eventId: demo.id, seatIds: [foreign.id] }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await db().seat.findUniqueOrThrow({ where: { id: foreign.id } })).status).toBe(
+      "AVAILABLE",
+    );
   });
 });
 

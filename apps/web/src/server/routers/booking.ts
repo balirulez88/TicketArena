@@ -9,6 +9,8 @@ import {
   HoldSeatSetMissingError,
   IdempotencyKeyReusedError,
   InvalidSeatSelectionError,
+  LimitExceededError,
+  MAX_SEATS_PER_BUYER,
   MixedCurrencyError,
   SeatUnavailableError,
 } from "@ticketarena/booking";
@@ -21,8 +23,7 @@ import { createTRPCRouter, publicProcedure } from "../trpc";
 
 const holdSeatsInput = z.object({
   eventId: z.uuid(),
-  // One seat until the waiting room and the 6-ticket limit land.
-  seatIds: z.array(z.uuid()).length(1),
+  seatIds: z.array(z.uuid()).min(1).max(MAX_SEATS_PER_BUYER),
 });
 
 const getHoldInput = z.object({ holdId: z.uuid() });
@@ -85,7 +86,7 @@ export const bookingRouter = createTRPCRouter({
       try {
         return await booking.holdSeats(toBuyer(ctx.principal), input.eventId, input.seatIds);
       } catch (error) {
-        if (error instanceof SeatUnavailableError) {
+        if (error instanceof SeatUnavailableError || error instanceof LimitExceededError) {
           throw new TRPCError({ code: "CONFLICT", message: error.message, cause: error });
         }
         if (error instanceof BookingBusyError) {

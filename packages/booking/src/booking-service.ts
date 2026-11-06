@@ -31,7 +31,12 @@ export interface BookingServiceDeps {
   readonly metrics?: BookingMetrics;
 }
 
-export type BookingMetric = "hold_ok" | "seat_unavailable" | "race_lost" | "booking_busy";
+export type BookingMetric =
+  | "hold_ok"
+  | "seat_unavailable"
+  | "race_lost"
+  | "booking_busy"
+  | "limit_exceeded";
 
 /** Per-event counters. Implementations may reject; the service logs and moves on. */
 export interface BookingMetrics {
@@ -153,6 +158,21 @@ export class InvalidSeatSelectionError extends Error {
   }
 }
 
+/** The buyer would hold, be checking out or own more than MAX_SEATS_PER_BUYER seats of the event. */
+export class LimitExceededError extends Error {
+  readonly code = "LIMIT_EXCEEDED";
+
+  constructor(
+    readonly used: number,
+    readonly requested: number,
+  ) {
+    super(
+      `LIMIT_EXCEEDED: ${used} seat(s) in use plus ${requested} requested exceeds ${MAX_SEATS_PER_BUYER}`,
+    );
+    this.name = "LimitExceededError";
+  }
+}
+
 /** The hold's `seat.held` event, the source of its seat set, no longer exists. */
 export class HoldSeatSetMissingError extends Error {
   readonly code = "HOLD_SEAT_SET_MISSING";
@@ -172,6 +192,8 @@ export class MixedCurrencyError extends Error {
   }
 }
 
+/** Per buyer and event, counting held, in-checkout and sold seats exactly once. */
+export const MAX_SEATS_PER_BUYER = 6;
 const HOLD_DURATION_MS = 10 * 60_000;
 const SEAT_HELD_EVENT = "seat.held";
 const heldEnvelope = envelopeSchema(seatHeldPayloadSchema);
@@ -384,6 +406,17 @@ class LockedRefusal extends Error {
   }
 }
 
+/** Internal: rolls the hold transaction back; holdOnce counts it and raises the public error. */
+class LimitExceeded extends Error {
+  constructor(
+    readonly used: number,
+    readonly requested: number,
+  ) {
+    super("limit exceeded");
+    this.name = "LimitExceeded";
+  }
+}
+
 export function createBookingService({
   db,
   clock,
@@ -445,9 +478,35 @@ export function createBookingService({
     return toOrderView(existing);
   }
 
+  /**
+   * First lock of every buyer-scoped transaction (holdSeats, placeOrder), before any seat row,
+   * so the usage count cannot race a sibling request of the same buyer (ADR 0005).
+   */
+  async function lockBuyer(
+    tx: Pick<PrismaClient, "$executeRaw">,
+    eventId: string,
+    buyerKey: string,
+  ): Promise<void> {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${eventId}:${buyerKey}`}, 0))`;
+  }
+
+  async function ownedHold(buyer: Buyer, holdId: string) {
+    const owned = await db.hold.findUnique({
+      where: { id: holdId },
+      select: { eventId: true, buyerKey: true },
+    });
+    if (owned === null || owned.buyerKey !== buyer.buyerKey) {
+      throw new HoldNotFoundError(holdId);
+    }
+    return owned;
+  }
+
   async function holdOnce(buyer: Buyer, eventId: string, seatIds: readonly string[]) {
     if (seatIds.length === 0) {
       throw new InvalidSeatSelectionError("seatIds is empty");
+    }
+    if (seatIds.length > MAX_SEATS_PER_BUYER) {
+      throw new InvalidSeatSelectionError(`at most ${MAX_SEATS_PER_BUYER} seats per hold`);
     }
     if (new Set(seatIds).size !== seatIds.length) {
       throw new InvalidSeatSelectionError("seatIds contains duplicates");
@@ -460,6 +519,7 @@ export function createBookingService({
     }
     const hold = await db
       .$transaction(async (tx) => {
+        await lockBuyer(tx, eventId, buyer.buyerKey);
         // Waiting (not NOWAIT) lock in id order: a loser sees the winner's committed state
         // instead of a spurious "taken" while the winner might still roll back (ADR 0005).
         const locked = await tx.$queryRaw<SeatState[]>`
@@ -479,6 +539,19 @@ export function createBookingService({
             unavailable,
             lostRace(seen, locked, unavailable) ? "race_lost" : "seat_unavailable",
           );
+        }
+
+        // Expired holds do not count: they are unswept but already released in effect (TD-013).
+        const [usage] = await tx.$queryRaw<{ used: bigint }[]>`
+          SELECT count(*) AS used
+          FROM seats s
+          LEFT JOIN holds h ON h.id = s."holdId"
+          WHERE s."eventId" = ${eventId}::uuid AND s."claimBuyerKey" = ${buyer.buyerKey}
+            AND (s.status::text IN ('IN_CHECKOUT', 'SOLD')
+                 OR (s.status::text = 'HELD' AND h."holdExpiresAt" > ${decidedAt}))`;
+        const used = Number(usage?.used ?? 0);
+        if (used + seatIds.length > MAX_SEATS_PER_BUYER) {
+          throw new LimitExceeded(used, seatIds.length);
         }
 
         const holdId = newId();
@@ -532,6 +605,10 @@ export function createBookingService({
         };
       })
       .catch((error: unknown) => {
+        if (error instanceof LimitExceeded) {
+          count("limit_exceeded", eventId);
+          throw new LimitExceededError(error.used, error.requested);
+        }
         if (error instanceof LockedRefusal) {
           count(error.metric, eventId);
           throw new SeatUnavailableError(error.seatIds);
@@ -574,8 +651,11 @@ export function createBookingService({
       }
 
       try {
+        // Unlocked read only to learn which buyer lock to take; the locked read below decides.
+        const owned = await ownedHold(buyer, holdId);
         const placed = await db.$transaction(async (tx) => {
-          // Lock order is hold, then seats by id, matching holdSeats (ADR 0005).
+          // Lock order is buyer, hold, then seats by id, matching holdSeats (ADR 0005).
+          await lockBuyer(tx, owned.eventId, buyer.buyerKey);
           const holds = await tx.$queryRaw<LockedHold[]>`
             SELECT "buyerKey", status::text AS status, "holdExpiresAt",
                    "correlationId"::text AS "correlationId", "eventId"::text AS "eventId"

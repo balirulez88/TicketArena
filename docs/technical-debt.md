@@ -36,7 +36,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 3      | 47  | 50    |
+| OPEN          | 0        | 0    | 3      | 52  | 55    |
 | PLANNED       | 0        | 0    | 9      | 2   | 11    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 2    | 7      | 2   | 11    |
@@ -1459,4 +1459,99 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `apps/worker/src/payment-flow.test.ts#payment-flow-tests-share-one-durable-consumer`
 - **History:**
   - 2026-11-05: recorded: LOW test_isolation at `apps/worker/src/payment-flow.test.ts:56`, found while deflaking AT-15 (repeated runs) and confirmed by the branch's Standards and Spec review
+
+### TD-073: One constant serves as both the per-hold cap and the per-buyer limit
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 11 (`11-multi-seat-holds-and-buyer-limit`)
+- **Evidence:** `.ralph/logs/20261106-073411/11-multi-seat-holds-and-buyer-limit.review-2.standards.json`
+- **Components:** `packages/booking/src/booking-service.ts:196`
+- **Problem:** MAX_SEATS_PER_BUYER is also used as the maximum seats in one hold (holdOnce validation at line 508, zod max in the router). Both are 6 today, but they are distinct rules: seats per request and seats per buyer and event. The comment says only 'per buyer and event'. hold-seat-count.test.ts then defines its own MAX_SEATS_PER_HOLD = 6.
+- **Impact:** If one limit changes, the other silently changes or the tests drift, and the test constant is a second copy of the value.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Either document that the per-hold cap deliberately equals the buyer limit, or add a separate MAX_SEATS_PER_HOLD. Have the tests import the exported constant.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/booking/src/booking-service.ts#one-constant-serves-as-both-the-per-hold-cap-and-the-per-buy`
+- **History:**
+  - 2026-11-06: recorded: LOW maintainability at `packages/booking/src/booking-service.ts:196`, standards axis (ticket 11 review-2 standards, run 20261106-073411)
+
+### TD-074: Internal LimitExceeded mirrors the public LimitExceededError
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 11 (`11-multi-seat-holds-and-buyer-limit`)
+- **Evidence:** `.ralph/logs/20261106-073411/11-multi-seat-holds-and-buyer-limit.review-2.standards.json`
+- **Components:** `packages/booking/src/booking-service.ts:410`
+- **Problem:** A private LimitExceeded class (used, requested) is thrown inside the transaction, and the catch immediately re-wraps it into LimitExceededError with the same fields. LockedRefusal does the same for SeatUnavailableError, so the pattern is consistent, but the public error could be thrown directly because the metric is the only extra step.
+- **Impact:** Two parallel classes and one more catch branch for no behavioural gain.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Throw LimitExceededError inside the transaction and count the metric in the catch by instanceof, or leave as is for consistency with LockedRefusal.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/booking/src/booking-service.ts#internal-limitexceeded-mirrors-the-public-limitexceedederror`
+- **History:**
+  - 2026-11-06: recorded: LOW maintainability at `packages/booking/src/booking-service.ts:410`, standards axis (ticket 11 review-2 standards, run 20261106-073411)
+
+### TD-075: Lock-order tests rely on a fixed 400 ms sleep to show 'pending'
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 11 (`11-multi-seat-holds-and-buyer-limit`)
+- **Evidence:** `.ralph/logs/20261106-073411/11-multi-seat-holds-and-buyer-limit.review-2.standards.json`
+- **Components:** `packages/booking/src/hold-buyer-limit.test.ts:202`
+- **Problem:** The tests assert that holdSeats and placeOrder are still pending after sleep(400) while a foreign transaction holds the advisory lock. A call that is merely slow also passes, so the 'waits on the lock' claim is shown by elapsed time only. The same sleep-based pattern is already tracked for other tests.
+- **Impact:** If the lock were dropped, the first test would still fail through the NOWAIT probe, but the placeOrder test would pass vacuously on a slow machine. That test has no seat-level check.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Confirm the wait through pg_stat_activity / pg_blocking_pids on the advisory lock, as hold-fast-path.test.ts does, instead of a fixed sleep. Alternatively assert that the placeOrder order row does not exist before release.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/booking/src/hold-buyer-limit.test.ts#lock-order-tests-rely-on-a-fixed-400-ms-sleep-to-show-pendin`
+- **History:**
+  - 2026-11-06: recorded: LOW missing_test at `packages/booking/src/hold-buyer-limit.test.ts:202`, standards axis (ticket 11 review-2 standards, run 20261106-073411)
+
+### TD-076: buyer(), freeSeats(), service() and DB setup are copied across new test files
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 11 (`11-multi-seat-holds-and-buyer-limit`)
+- **Evidence:** `.ralph/logs/20261106-073411/11-multi-seat-holds-and-buyer-limit.review-2.standards.json`
+- **Components:** `packages/booking/src/hold-seat-count.test.ts:18`
+- **Problem:** hold-seat-count.test.ts and hold-buyer-limit.test.ts repeat the same db(), buyer(n), freeSeats() and service() helpers, plus the beforeAll/afterAll scaffolding (lines 7-43 here, 7-42 there).
+- **Impact:** Fixture drift between the files, and more places to edit when the setup changes.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Move the shared helpers into a test support module in packages/booking/src.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/booking/src/hold-seat-count.test.ts#buyer-freeseats-service-and-db-setup-are-copied-across-new-t`
+- **History:**
+  - 2026-11-06: recorded: LOW maintainability at `packages/booking/src/hold-seat-count.test.ts:18`, standards axis (ticket 11 review-2 standards, run 20261106-073411)
+
+### TD-077: Index summary omits the new limit_exceeded counter
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 11 (`11-multi-seat-holds-and-buyer-limit`)
+- **Evidence:** `.ralph/logs/20261106-073411/11-multi-seat-holds-and-buyer-limit.review-2.standards.json`
+- **Components:** `docs/index.md:67`
+- **Problem:** The summary now describes the buyer limit but still lists the per-event counters as 'hold_ok/seat_unavailable/race_lost'. docs/database/index.md lists limit_exceeded.
+- **Impact:** A small inconsistency between the two docs.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
+- **Remediation:** Add limit_exceeded to the counter list in docs/index.md.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `docs/index.md#index-summary-omits-the-new-limit-exceeded-counter`
+- **History:**
+  - 2026-11-06: recorded: LOW maintainability at `docs/index.md:67`, standards axis (ticket 11 review-2 standards, run 20261106-073411)
 <!-- ralph-debt:end -->

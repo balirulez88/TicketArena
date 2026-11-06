@@ -29,6 +29,7 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Causation id**       | The `id` of the message being handled when the event was written; `null` for a chain's first event.   |
 | **DLQ**                | Dead-letter stream `TICKETARENA_DLQ` for messages past their retry budget or poison.                  |
 | **Ack floor**          | The stream sequence up to which a consumer has acked everything; the safe resume point.               |
+| **Buyer limit**        | At most 6 seats per BuyerKey and event, counting held (unexpired), in-checkout and sold seats.        |
 | **Race lost**          | A hold refused because another buyer locked the seat first: a prevented double booking.               |
 | **Snapshot fast path** | Lock-free read in `holdSeats` that refuses visibly taken seats before any lock; advisory only.        |
 | **Oversell**           | Selling the same seat twice. Must be impossible, not merely unlikely.                                 |

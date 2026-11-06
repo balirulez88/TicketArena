@@ -554,8 +554,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** The advisory lock serializes the per-event buyer limit, which arrives with ticket 11; its AC2 makes placeOrder take the same lock first.
 - **Remediation:** Take pg_advisory_xact_lock(hash(eventId:buyerKey)) first in holdSeats and placeOrder, as ticket 11 AC2 specifies, with a test that races the two paths.
 - **Target:** ticket 11 (`issues/11-multi-seat-holds-and-buyer-limit.md`), AC2
-- **Resolution:** Ticket 11 made `lockBuyer` (`pg_advisory_xact_lock(hashtextextended(eventId:buyerKey))`) the first statement of the locking transaction in both holdSeats and placeOrder, before the hold row and the seats by id. Tests now prove the order through Postgres itself: while a foreign transaction holds the buyer lock, each request is observed waiting on an advisory lock (`pg_locks` / `pg_blocking_pids`) and the hold row and seat rows it will need can still be locked `NOWAIT`. A hold and an order of one buyer started together both queue on the buyer lock and serialize, with the same outcome in either order and no partial hold.
-- **Verification:** `packages/booking/src/hold-buyer-limit.test.ts::holdSeats waits on the buyer lock before touching any seat row`; `packages/booking/src/hold-buyer-limit.test.ts::placeOrder waits on the buyer lock before locking the hold or its seats`; `packages/booking/src/hold-buyer-limit.test.ts::a hold of 2 seats racing the order of a 2-seat hold queues on the buyer lock (limit refused: false)`; `packages/booking/src/hold-buyer-limit.test.ts::a hold of 3 seats racing the order of a 4-seat hold queues on the buyer lock (limit refused: true)`
+- **Resolution:** Ticket 11 made `lockBuyer` (`pg_advisory_xact_lock(hashtextextended(eventId:buyerKey))`) the first statement of the locking transaction in both holdSeats and placeOrder, before the hold row and the seats by id. Tests now prove the order through Postgres itself: while a foreign transaction holds the buyer lock, each request is observed waiting on an advisory lock (`pg_locks` / `pg_blocking_pids`) and the hold row and seat rows it will need can still be locked `NOWAIT`. A hold and an order of one buyer started together both queue on the buyer lock and serialize; each test case fixes which of the two queues first, both orders are run, and each gives the same outcome with no partial hold (a refused hold leaves its seats AVAILABLE, unclaimed and without a hold row).
+- **Verification:** `packages/booking/src/hold-buyer-limit.test.ts::holdSeats waits on the buyer lock before touching any seat row`; `packages/booking/src/hold-buyer-limit.test.ts::placeOrder waits on the buyer lock before locking the hold or its seats`; `packages/booking/src/hold-buyer-limit.test.ts::a hold of 1 seats and the order of a 1-seat hold queue on the buyer lock, order first (limit refused: false)`; `packages/booking/src/hold-buyer-limit.test.ts::a hold of 1 seats and the order of a 1-seat hold queue on the buyer lock, hold first (limit refused: false)`; `packages/booking/src/hold-buyer-limit.test.ts::a hold of 3 seats and the order of a 4-seat hold queue on the buyer lock, order first (limit refused: true)`; `packages/booking/src/hold-buyer-limit.test.ts::a hold of 3 seats and the order of a 4-seat hold queue on the buyer lock, hold first (limit refused: true)`
 - **Fingerprints:** none
 - **History:**
   - 2026-10-30: backfilled from an earlier review round; confirmed still present on main at 2513586 (correctness review of tickets 03-05, 2026-10-30)
@@ -1526,7 +1526,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Escalation:** none
 - **Source:** ticket 11 (`11-multi-seat-holds-and-buyer-limit`)
 - **Evidence:** `.ralph/logs/20261106-073411/11-multi-seat-holds-and-buyer-limit.review-2.standards.json`
-- **Components:** `packages/booking/src/hold-seat-count.test.ts:18`
+- **Components:** `packages/booking/src/hold-seat-count.test.ts:18`; `packages/booking/src/hold-buyer-limit.test.ts:179`
 - **Problem:** hold-seat-count.test.ts and hold-buyer-limit.test.ts repeat the same db(), buyer(n), freeSeats() and service() helpers, plus the beforeAll/afterAll scaffolding (lines 7-43 here, 7-42 there).
 - **Impact:** Fixture drift between the files, and more places to edit when the setup changes.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
@@ -1537,6 +1537,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `packages/booking/src/hold-seat-count.test.ts#buyer-freeseats-service-and-db-setup-are-copied-across-new-t`
 - **History:**
   - 2026-11-06: recorded: LOW maintainability at `packages/booking/src/hold-seat-count.test.ts:18`, standards axis (ticket 11 review-2 standards, run 20261106-073411)
+  - 2026-11-06: seen again: the lock-holder helper `holdBuyerLock` in `hold-buyer-limit.test.ts` repeats the locker-pid pattern of `lockSeatElsewhere` in `hold-fast-path.test.ts`, with its own wait query (independent Standards review of `fix/buyer-lock-order-tests`)
 
 ### TD-077: Index summary omits the new limit_exceeded counter
 

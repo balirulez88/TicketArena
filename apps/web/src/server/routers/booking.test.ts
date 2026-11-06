@@ -116,17 +116,19 @@ describe("booking.holdSeats seat-count boundary", () => {
       orderBy: { id: "asc" },
       take: 7,
     });
-    expect(seats).toHaveLength(7);
-    const [seventh, ...six] = seats.map((seat) => seat.id);
+    const [extra, ...six] = seats.map((seat) => seat.id);
+    if (extra === undefined || six.length !== 6) {
+      throw new Error(`the demo event needs 7 free seats, found ${seats.length}`);
+    }
     await caller(alice).booking.holdSeats({ eventId: event.id, seatIds: six });
 
     await expect(
-      caller(alice).booking.holdSeats({ eventId: event.id, seatIds: [seventh ?? ""] }),
+      caller(alice).booking.holdSeats({ eventId: event.id, seatIds: [extra] }),
     ).rejects.toMatchObject({
       code: "CONFLICT",
       message: expect.stringContaining("LIMIT_EXCEEDED"),
     });
-    expect(await db().seat.findUniqueOrThrow({ where: { id: seventh ?? "" } })).toMatchObject({
+    expect(await db().seat.findUniqueOrThrow({ where: { id: extra } })).toMatchObject({
       status: "AVAILABLE",
       holdId: null,
       claimBuyerKey: null,

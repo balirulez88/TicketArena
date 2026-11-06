@@ -239,14 +239,15 @@ describe("buyer lock order (ADR 0005)", () => {
     const { eventId, seatIds } = await freeSeats(2);
     const lock = await holdBuyerLock(eventId, buyer(30).buyerKey);
 
-    const pending = service().holdSeats(buyer(30), eventId, seatIds);
+    // Settled up front so a failed check below cannot leave the request's rejection unhandled.
+    const outcome = Promise.allSettled([service().holdSeats(buyer(30), eventId, seatIds)]);
     try {
       await lock.waitForBuyerLockWaiters(1);
       expect(await lockRowsNowait([], seatIds)).toEqual({ holds: 0, seats: 2 });
     } finally {
       await lock.release();
     }
-    expect((await pending).seatIds).toHaveLength(2);
+    expect((await outcome)[0]).toMatchObject({ status: "fulfilled", value: { seatIds } });
   });
 
   test("placeOrder waits on the buyer lock before locking the hold or its seats", async () => {
@@ -254,40 +255,59 @@ describe("buyer lock order (ADR 0005)", () => {
     const hold = await service().holdSeats(buyer(31), eventId, seatIds);
     const lock = await holdBuyerLock(eventId, buyer(31).buyerKey);
 
-    const pending = service().placeOrder(
-      buyer(31),
-      hold.id,
-      { email: "a@example.com" },
-      randomUUID(),
-    );
+    const outcome = Promise.allSettled([
+      service().placeOrder(buyer(31), hold.id, { email: "a@example.com" }, randomUUID()),
+    ]);
     try {
       await lock.waitForBuyerLockWaiters(1);
       expect(await lockRowsNowait([hold.id], seatIds)).toEqual({ holds: 1, seats: 1 });
     } finally {
       await lock.release();
     }
-    expect((await pending).status).toBe("PENDING_PAYMENT");
+    expect((await outcome)[0]).toMatchObject({
+      status: "fulfilled",
+      value: { status: "PENDING_PAYMENT" },
+    });
   });
 
-  // TD-026: a hold and an order of one buyer, in flight together, queue on the buyer lock with no
-  // row lock taken, so neither can deadlock the other and each decides on the other's committed
-  // result. Whichever runs first, the outcome is the same, which is what the assertions check.
+  // TD-026: a hold and an order of one buyer, in flight together, queue on the buyer lock before
+  // taking any row lock, so each decides on the other's committed result. Each case fixes which
+  // request queues first (Postgres grants the waiters of one advisory lock in arrival order), so
+  // both orders run, and both must give the same outcome.
   test.each([
-    { held: 2, more: 2, refused: false },
-    { held: 4, more: 3, refused: true },
-  ])(
-    "a hold of $more seats racing the order of a $held-seat hold queues on the buyer lock (limit refused: $refused)",
-    async ({ held, more, refused }) => {
-      const who = buyer(40 + held);
+    { held: 1, more: 1, refused: false, queuedFirst: "order" },
+    { held: 1, more: 1, refused: false, queuedFirst: "hold" },
+    { held: 4, more: 3, refused: true, queuedFirst: "order" },
+    { held: 4, more: 3, refused: true, queuedFirst: "hold" },
+  ] as const)(
+    "a hold of $more seats and the order of a $held-seat hold queue on the buyer lock, $queuedFirst first (limit refused: $refused)",
+    async ({ held, more, refused, queuedFirst }) => {
+      const who = buyer(40 + held * 2 + (queuedFirst === "order" ? 0 : 1));
       const first = await freeSeats(held);
       const hold = await service().holdSeats(who, first.eventId, first.seatIds);
       const extra = await freeSeats(more);
       const lock = await holdBuyerLock(first.eventId, who.buyerKey);
 
-      const order = service().placeOrder(who, hold.id, { email: "a@example.com" }, randomUUID());
-      const second = service().holdSeats(who, extra.eventId, extra.seatIds);
-      const settled = Promise.allSettled([order, second]);
+      const startOrder = () =>
+        Promise.allSettled([
+          service().placeOrder(who, hold.id, { email: "a@example.com" }, randomUUID()),
+        ]);
+      const startHold = () =>
+        Promise.allSettled([service().holdSeats(who, extra.eventId, extra.seatIds)]);
+      const started: {
+        order?: ReturnType<typeof startOrder>;
+        hold?: ReturnType<typeof startHold>;
+      } = {};
       try {
+        if (queuedFirst === "order") {
+          started.order = startOrder();
+          await lock.waitForBuyerLockWaiters(1);
+          started.hold = startHold();
+        } else {
+          started.hold = startHold();
+          await lock.waitForBuyerLockWaiters(1);
+          started.order = startOrder();
+        }
         await lock.waitForBuyerLockWaiters(2);
         expect(await lockRowsNowait([hold.id], [...first.seatIds, ...extra.seatIds])).toEqual({
           holds: 1,
@@ -296,7 +316,8 @@ describe("buyer lock order (ADR 0005)", () => {
       } finally {
         await lock.release();
       }
-      const [placed, again] = await settled;
+      const [placed] = (await started.order) ?? [];
+      const [again] = (await started.hold) ?? [];
 
       expect(placed).toMatchObject({ status: "fulfilled", value: { status: "PENDING_PAYMENT" } });
       expect(
@@ -305,15 +326,16 @@ describe("buyer lock order (ADR 0005)", () => {
       if (refused) {
         expect(again).toMatchObject({ status: "rejected", reason: { code: "LIMIT_EXCEEDED" } });
         expect(
-          await db().seat.count({
-            where: {
-              id: { in: extra.seatIds },
-              OR: [{ status: { not: "AVAILABLE" } }, { holdId: { not: null } }],
-            },
+          await db().seat.findMany({
+            where: { id: { in: extra.seatIds } },
+            select: { status: true, holdId: true, claimBuyerKey: true },
           }),
-        ).toBe(0);
+        ).toEqual(
+          extra.seatIds.map(() => ({ status: "AVAILABLE", holdId: null, claimBuyerKey: null })),
+        );
+        expect(await db().hold.count({ where: { buyerKey: who.buyerKey } })).toBe(1);
       } else {
-        expect(again).toMatchObject({ status: "fulfilled", value: { seatIds: expect.any(Array) } });
+        expect(again).toMatchObject({ status: "fulfilled", value: { seatIds: extra.seatIds } });
         expect(
           await db().seat.count({ where: { id: { in: extra.seatIds }, status: "HELD" } }),
         ).toBe(more);

@@ -8,6 +8,7 @@ import {
   checkRegisterText,
   debtGate,
   fingerprint,
+  loadTickets,
   parseRegister,
   parseTicket,
   recordFindings,
@@ -381,6 +382,17 @@ describe("register format with the debt gate's fields", () => {
       [],
     );
   });
+
+  it("judges an active ticket file over an archived copy with the same number", () => {
+    // A ticket put back into issues/ while its archive exists must still get a verdict, so the
+    // loop selects it and its own refusal to process an archived ticket again fires.
+    const root = mkdtempSync(join(tmpdir(), "ralph-debt-"));
+    mkdirSync(join(root, "issues", "done"), { recursive: true });
+    writeFileSync(join(root, "issues", "done", "01-demo.md"), "**Status:** done\n");
+    writeFileSync(join(root, "issues", "01-demo.md"), "**Status:** ready-for-agent\n");
+    assert.equal(loadTickets(root).get("01")?.status, "ready-for-agent");
+    assert.equal(debtGate(register(), loadTickets(root)).get("01")?.state, "clear");
+  });
 });
 
 describe("triage rules", () => {
@@ -391,14 +403,8 @@ describe("triage rules", () => {
     assert.equal(verdicts(triaged("TD-001", { Risk: "SECURITY" }))["03"], "clear");
   });
 
-  it("refuses a triaged entry without a class and an untriaged one that blocks", () => {
+  it("refuses a triaged entry without a class", () => {
     assert.match(errorsOf(triaged("TD-001", { Risk: "UNTRIAGED" })), /needs a Risk class/);
-    const untriagedBlock = entry("TD-001", {
-      Severity: "LOW",
-      Target: "ticket 04",
-      Blocks: "03",
-    });
-    assert.match(errorsOf(untriagedBlock), /only a triaged entry may block/);
   });
 
   it("refuses blocking without an owner, or blocking the owner itself", () => {
@@ -695,6 +701,28 @@ describe("recording keeps triage a human decision", () => {
     assert.match(
       after.entries[0]?.history[0] ?? "",
       /higher severity than recorded.*back to triage/,
+    );
+  });
+
+  it("keeps what a blocking entry blocks when it is sent back to triage, and holds those tickets", () => {
+    const blocking = triaged("TD-001", { Status: "PLANNED", Target: "ticket 04", Blocks: "30" });
+    const before = register(blocking);
+    const { register: after, errors } = record(before, [finding({ debt: "TD-001" })]);
+    assert.deepEqual(errors, []);
+    assert.equal(after.entries[0]?.fields.Triage, "pending");
+    assert.equal(after.entries[0]?.fields.Blocks, "30");
+    assert.deepEqual(validateRegister(after), []);
+    // What the recorder did is a change a slice may carry.
+    assert.deepEqual(sliceErrors(before, after, { ticket: "09" }), []);
+    const tickets = new Map([
+      ["04", { number: "04", status: "ready-for-agent", blockedBy: [] }],
+      ["30", { number: "30", status: "ready-for-agent", blockedBy: [] }],
+    ]);
+    const verdict = debtGate(after, tickets).get("30");
+    assert.equal(verdict?.state, "needs-triage");
+    assert.match(
+      verdict?.reasons.join("\n") ?? "",
+      /TD-001 blocks ticket 30 and is back in triage/,
     );
   });
 

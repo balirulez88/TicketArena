@@ -248,7 +248,10 @@ export function parseTicket(name, text) {
 /** Every ticket in `<root>/issues` and `<root>/issues/done`, by number. */
 export function loadTickets(root) {
   const tickets = new Map();
-  for (const dir of [join(root, "issues"), join(root, "issues", "done")]) {
+  // An active ticket file wins over an archived one with the same number: the gate then judges
+  // the ticket the loop would pick, and the loop's own refusal to process an archived ticket
+  // again fires instead of the ticket silently getting no verdict.
+  for (const dir of [join(root, "issues", "done"), join(root, "issues")]) {
     if (!existsSync(dir)) {
       continue;
     }
@@ -337,9 +340,6 @@ function blockingErrors(entry) {
   }
   if (blocks.includes(ownerOf(entry) ?? "")) {
     errors.push("an entry cannot block the ticket that owns its fix");
-  }
-  if (isUnresolved(entry) && blocks.length > 0 && !isTriaged(entry)) {
-    errors.push("only a triaged entry may block tickets");
   }
   return errors;
 }
@@ -560,7 +560,13 @@ export function debtGate(register, tickets) {
   const blocking = open.filter(isTriaged);
   const verdicts = new Map();
   for (const ticket of [...tickets.values()].filter((t) => t.status !== "done")) {
-    const triage = [...everywhere, ...lowTriageReasons(untriagedLow, tickets, ticket.number)];
+    const triage = [
+      ...everywhere,
+      ...lowTriageReasons(untriagedLow, tickets, ticket.number),
+      ...open
+        .filter((entry) => !isTriaged(entry) && blocksOf(entry).includes(ticket.number))
+        .map((entry) => `${entry.id} blocks ticket ${ticket.number} and is back in triage`),
+    ];
     const waits = blocking
       .filter((entry) => blocksOf(entry).includes(ticket.number))
       .map(
@@ -628,12 +634,7 @@ function changedEntryErrors(before, after) {
   if (changed("Status") && !(resolving || reopened)) {
     errors.push(`Status ${was} -> ${now} is a triage decision; a slice may only resolve an entry`);
   }
-  if (changed("Triage") && fieldOf(after, "Triage") !== PENDING) {
-    errors.push("Triage changed; only a human triages an entry");
-  }
-  if (reopened && isTriaged(after)) {
-    errors.push("a reopened entry must be untriaged");
-  }
+  errors.push(...triageChangeErrors(before, after, reopened));
   for (const name of ["Target", "Blocks", "Acceptance"].filter(changed)) {
     if (!(reopened && fieldOf(after, name) === NONE)) {
       errors.push(`${name} changed; only a human-reviewed commit may change it`);
@@ -643,6 +644,22 @@ function changedEntryErrors(before, after) {
     errors.push("Justification changed; only a human-reviewed commit may change it");
   }
   return [...errors, ...evidenceErrors(before, after, { resolving, reopened })];
+}
+
+function triageChangeErrors(before, after, reopened) {
+  if (fieldOf(before, "Triage") === fieldOf(after, "Triage")) {
+    return reopened && isTriaged(after) ? ["a reopened entry must be untriaged"] : [];
+  }
+  if (fieldOf(after, "Triage") !== PENDING) {
+    return ["Triage changed; only a human triages an entry"];
+  }
+  // The recorder sends an entry back to triage only on a higher-severity sighting, and says so.
+  const sentBack = after.history
+    .slice(before.history.length)
+    .some((line) => line.includes("higher severity than recorded"));
+  return reopened || sentBack
+    ? []
+    : ["Triage was reset without a higher-severity sighting in the history"];
 }
 
 function evidenceErrors(before, after, { resolving, reopened }) {

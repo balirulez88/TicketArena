@@ -260,6 +260,24 @@ function selectNext() {
   return { next: { number: slug.slice(0, 2), slug }, waiting, triage: null };
 }
 
+// A ticket chosen earlier (a paused one, resumed now) starts only if the debt gate still clears
+// it on today's base: triage committed since then may have made it wait.
+function assertDebtClears(number) {
+  const debt = debtVerdict(number);
+  if (debt.state === "waiting") {
+    throw new Stop(
+      "unresolved-dependency",
+      `ticket ${number} waits on unresolved debt: ${debt.reasons.join("; ")}`,
+    );
+  }
+  if (debt.state !== "clear") {
+    throw new Stop(
+      "needs-triage",
+      `ticket ${number} is ${debt.state} on unresolved debt: ${debt.reasons.join("; ")}; triage it in a reviewed commit on ${BASE}, push it, then rerun`,
+    );
+  }
+}
+
 // The debt gate's verdict for one ticket on the checked-out base (scripts/ralph-debt.mjs). An
 // invalid register clears nothing.
 function debtVerdict(number) {
@@ -322,15 +340,7 @@ function runTicket(state, entry) {
       `ticket ${entry.number} is half-merged on ${BASE} (archive and merge commit disagree)`,
     );
   }
-  // A ticket chosen earlier (a paused one, resumed now) starts only if the debt gate still clears
-  // it on today's base: triage committed since then may have made it wait.
-  const debt = debtVerdict(entry.number);
-  if (debt.state !== "clear") {
-    throw new Stop(
-      "needs-triage",
-      `ticket ${entry.number} is ${debt.state} on unresolved debt: ${debt.reasons.join("; ")}; triage it in a reviewed commit on ${BASE}, push it, then rerun`,
-    );
-  }
+  assertDebtClears(entry.number);
   log(`ticket ${entry.number}: running ${entry.slug} in a fresh sandbox`);
   const quarantined = new Set(rejectedRefs(entry.slug));
   const [command, ...args] = words(RUNNER);

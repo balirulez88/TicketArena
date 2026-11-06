@@ -1780,6 +1780,11 @@ describe("ralph-accept: the debt gate (ADR 0016)", () => {
     ["lowers or raises its severity", { Severity: "MEDIUM" }, /TD-001: Severity changed/],
     ["reclassifies its risk", { Risk: "MAINTAINABILITY" }, /TD-001: Risk changed/],
     ["triages it", { Triage: "2026-11-07: the agent" }, /TD-001: Triage changed/],
+    [
+      "sends it back to triage without a higher-severity sighting",
+      { Triage: "pending" },
+      /TD-001: Triage was reset without a higher-severity sighting/,
+    ],
     ["re-targets it", { Target: "ticket 02" }, /TD-001: Target changed/],
     ["makes it block a ticket", { Target: "ticket 02", Blocks: "01" }, /TD-001: Blocks changed/],
     [
@@ -1802,6 +1807,20 @@ describe("ralph-accept: the debt gate (ADR 0016)", () => {
       assert.match(result.output, refusal);
     });
   }
+
+  it("refuses a slice that leaves the register valid but not in canonical form", () => {
+    const host = hostWithDebt();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "01-demo", {
+      change: (dir) => {
+        const path = join(dir, "docs", "technical-debt.md");
+        writeFileSync(path, readFileSync(path, "utf8").replace("| OPEN ", "|   OPEN "));
+      },
+    });
+    const result = assertRefused(host, finish(host, ws), { base });
+    assert.match(result.output, /not in canonical form/);
+  });
 
   it("refuses a ticket that merges with an entry it owns still unresolved", () => {
     const host = hostWithDebt();

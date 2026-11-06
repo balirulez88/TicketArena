@@ -11,7 +11,7 @@ candidate's own tree, and refuses any change a slice makes to triage. ADR 0016.
 
 **Status:** done
 
-**Completed:** 2026-11-06 by harness/53-risk-based-debt-gate (reviewed by independent host-side Standards and Spec reviewers and merged outside Ralph: a sandboxed agent must not author its own trust boundary)
+**Completed:** by harness/53-risk-based-debt-gate, merged outside Ralph by a human (a sandboxed agent must not author its own trust boundary); the open items below are ticked only once they pass
 
 - [x] Risk class, triage, owner and blocking are separate fields; validation rules for each,
   including `ACCEPTED_RISK` acceptance criteria and test-file-only verification evidence.
@@ -22,3 +22,8 @@ candidate's own tree, and refuses any change a slice makes to triage. ADR 0016.
 - [x] Maintainer changes are audited in CI (`ralph-debt.mjs audit`).
 - [x] Initial triage of every unresolved entry; tickets 49–52 created for unowned debt; ticket 12
   owns TD-016, TD-018, TD-020, TD-067 and TD-071.
+- [x] Independent host-side Standards and Spec reviews (round 1); findings fixed.
+- [ ] Confirmation review round.
+- [ ] Full quality gate (`pnpm run check`).
+- [ ] Real-Docker sandbox trust-boundary tests (`pnpm test:sandbox`).
+- [ ] Merged into `main`; GitHub CI green.

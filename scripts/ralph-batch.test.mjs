@@ -517,7 +517,7 @@ describe("entry points", () => {
 });
 
 describe("bounded batch: the debt gate (ADR 0016)", () => {
-  it("stops with needs-triage when the next ticket builds on an untriaged finding, and resumes after triage", () => {
+  it("runs independent tickets first, stops needs-triage before one that builds on an untriaged finding, and resumes", () => {
     const fx = fixture([
       ["01", "None"],
       ["02", "01"],
@@ -532,15 +532,15 @@ describe("bounded batch: the debt gate (ADR 0016)", () => {
       first.out,
       /STOPPED \(resumable\): needs-triage: .*02-t02\.md: TD-001 is untriaged and ticket 02 builds on ticket 01/,
     );
-    // The independent ticket 03 does not jump the queue past risk nobody has judged.
-    assert.deepEqual(runnerCalls(fx), ["01"]);
+    // The independent ticket 03 proceeds; ticket 02 never runs on risk nobody has judged.
+    assert.deepEqual(runnerCalls(fx), ["01", "03"]);
     assert.equal(state(fx).status, "running");
     // A human triages it as deferred; the same batch resumes with its own limit.
     triage(fx, "TD-001", TRIAGED);
     const again = batch(fx, []);
     assert.equal(again.code, 0, again.out);
     assert.match(again.out, /FINISHED: batch-limit/);
-    assert.deepEqual(runnerCalls(fx), ["01", "02", "03"]);
+    assert.deepEqual(runnerCalls(fx), ["01", "03", "02"]);
   });
 
   it("lets an independent ticket proceed past an untriaged LOW finding it does not build on", () => {
@@ -600,6 +600,33 @@ describe("bounded batch: the debt gate (ADR 0016)", () => {
     assert.equal(code, 4, out);
     assert.match(out, /needs-triage: .*01-t01\.md: TD-001 \(MEDIUM\) is untriaged/);
     assert.deepEqual(runnerCalls(fx), []);
+  });
+
+  it("stops a paused ticket that triaged debt now blocks as a dependency, not as triage", () => {
+    const fx = fixture([
+      ["01", "None"],
+      ["02", "None", "blocked"],
+    ]);
+    const first = batch(fx, ["--max-tickets", "1"], { plan: { "01": ["pause"] } });
+    assert.equal(first.code, 75, first.out);
+    // Meanwhile a maintainer decides ticket 01 relies on a fix ticket 02 owns.
+    writeFileSync(
+      join(fx.host, "docs", "technical-debt.md"),
+      debtRegister(
+        finding("TD-001", "01", {
+          ...TRIAGED,
+          Status: "PLANNED",
+          Target: "ticket 02",
+          Blocks: "01",
+        }),
+      ),
+    );
+    git(fx.host, "commit", "--quiet", "-am", "chore(debt): TD-001 blocks ticket 01");
+    git(fx.host, "push", "--quiet", "origin", "main");
+    const held = batch(fx, []);
+    assert.equal(held.code, 2, held.out);
+    assert.match(held.out, /unresolved-dependency: ticket 01 waits on unresolved debt: TD-001/);
+    assert.deepEqual(runnerCalls(fx), ["01"]);
   });
 
   it("does not resume a paused ticket that new debt now holds up, until it is triaged", () => {

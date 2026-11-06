@@ -44,7 +44,7 @@ triages.
 
 - A triaged entry has a risk class other than `UNTRIAGED`.
 - A triaged unresolved `CRITICAL`, `HIGH` or `MEDIUM` entry has an owner ticket.
-- Only a triaged entry with an owner may block tickets, and never its own owner.
+- Only an entry with an owner may block tickets, and never its own owner; a new entry blocks nothing until it is triaged.
 - `ACCEPTED_RISK` is a deliberate human decision: triaged, blocking nothing, with all three
   `Acceptance` parts. It is never a default.
 - Unresolved debt may not name a ticket that does not exist, or that is done (reconcile it), in
@@ -57,11 +57,11 @@ triages.
 
 For every unfinished ticket the host computes one verdict from the base's register and tickets:
 
-| Verdict        | When                                                                                                                                                                                                                                                 |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `needs-triage` | an unresolved `MEDIUM` or worse entry is untriaged or unowned (every ticket); or an untriaged `LOW` entry was found by a ticket this one builds on (transitively, `Blocked by`), or this ticket owns it, or it came from outside any ticket's review |
-| `waiting`      | a triaged unresolved entry lists this ticket in `Blocks`                                                                                                                                                                                             |
-| `clear`        | otherwise                                                                                                                                                                                                                                            |
+| Verdict        | When                                                                                                                                                                                                                                                                                                                                     |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `needs-triage` | an unresolved `MEDIUM` or worse entry is untriaged or unowned (every ticket); or an untriaged `LOW` entry was found by a ticket this one builds on (transitively, `Blocked by`), or this ticket owns it, or it came from outside any ticket's review (every ticket); or an entry sent back to triage still lists this ticket in `Blocks` |
+| `waiting`      | a triaged unresolved entry lists this ticket in `Blocks`                                                                                                                                                                                                                                                                                 |
+| `clear`        | otherwise                                                                                                                                                                                                                                                                                                                                |
 
 So: `CRITICAL` and `HIGH` still block the merge itself, unchanged. An untriaged `MEDIUM` holds all
 work until someone classifies it and names an owner, because nobody yet knows what it affects. An
@@ -73,19 +73,23 @@ a ticket that depends on it.
 
 ### Enforcement
 
-- **Selection** (`ralph-loop.sh` `next_ticket`): skips `waiting` tickets and stops at the first
-  `needs-triage` one, reported by `triage_ticket`; work never skips past risk nobody has judged.
-- **Batch** (`scripts/ralph-batch.mjs`): stops `needs-triage` (resumable, exit 4) when the next
-  ticket needs triage, and re-checks a paused ticket's verdict before resuming it. An invalid
+- **Selection** (`ralph-loop.sh` `next_ticket`): picks the first ticket the gate clears. A
+  `waiting` or `needs-triage` ticket never runs; independent, cleared tickets after it still do.
+  `triage_ticket` reports the first ticket that needs triage.
+- **Batch** (`scripts/ralph-batch.mjs`): stops `needs-triage` (resumable, exit 4) when no cleared
+  ticket is left and one needs triage, and re-checks a paused ticket's verdict before resuming it
+  (`waiting` stops it as `unresolved-dependency`, untriaged risk as `needs-triage`). An invalid
   register clears nothing.
 - **Importer** (`scripts/ralph-accept.mjs`, the trust boundary): refuses (exit 3) a ticket whose
   verdict on the base is not `clear`, and a slice whose register breaks the slice rules:
   - a slice may resolve entries (with evidence in its own tree) and the host's recorder may add
     `OPEN`/`pending` entries, reopen a reported-again entry (discarding its triage), or send an
-    entry back to triage on a higher-severity sighting;
+    entry back to triage on a higher-severity sighting, with that history line (it keeps its
+    owner and `Blocks`, so the tickets it blocked now need triage);
   - nothing else may change: the rules preamble, entries' titles, history prefixes, fingerprints,
     severity, risk, triage, target, blocks, acceptance, justification, descriptions;
-  - every entry the base says the ticket owns must be `RESOLVED` by the slice.
+  - every entry the base says the ticket owns must be `RESOLVED` by the slice;
+  - the register must be in canonical form, as `check:debt` requires.
 - **Maintainers** change triage in ordinary reviewed commits on `main`. `ralph-debt.mjs audit`
   (run by CI against the push's or pull request's base) requires a new history line for every
   changed governed field, and refuses removed entries or rewritten history.

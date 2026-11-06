@@ -320,8 +320,9 @@ debt_field() {
 }
 
 # The tickets in order whose blockers are done, each with its debt verdict: "<file> <state>".
-# Debt that blocks a ticket makes it wait like a blocker does. The first one that needs triage
-# ends the scan: work does not skip past risk nobody has judged.
+# Debt that blocks a ticket makes it wait like a blocker does; a ticket that relies on debt
+# nobody has triaged never runs before it is triaged, but tickets the host's gate clears
+# (independent of that debt) still may (ADR 0016).
 candidate_tickets() {
   local file gate state
   gate="$(debt_gate)" || return 1
@@ -334,30 +335,28 @@ candidate_tickets() {
     blockers_done "${file}" || continue
     state="$(debt_field "${gate}" 2 "${file}")"
     printf '%s %s\n' "${file}" "${state:-needs-triage}"
-    [[ "${state}" == clear || "${state}" == waiting ]] || return 0
   done
 }
 
 next_ticket() {
   local candidates
   candidates="$(candidate_tickets)" || return 1
-  awk '$2 == "clear" { print $1; found = 1; exit } $2 != "waiting" { exit } END { exit !found }' \
-    <<<"${candidates}"
+  awk '$2 == "clear" { print $1; found = 1; exit } END { exit !found }' <<<"${candidates}"
 }
 
-# The ticket the scan stopped at because unresolved debt affecting it needs a human's triage,
-# with the reasons (scripts/ralph-batch.mjs stops on it as needs-triage). Prints nothing when the
-# scan did not stop on one.
+# The first ready ticket that unresolved debt holds until a human triages it, with the reasons
+# (scripts/ralph-batch.mjs stops on it as needs-triage once no cleared ticket is left). Prints
+# nothing when no ticket needs triage.
 triage_ticket() {
   local candidates file gate
   if ! candidates="$(candidate_tickets)"; then
     printf 'the debt gate failed: the register is invalid (pnpm run check:debt)\n'
     return 0
   fi
-  file="$(awk '$2 == "clear" { exit } $2 != "waiting" { print $1; exit }' <<<"${candidates}")"
+  file="$(awk '$2 != "clear" && $2 != "waiting" { print $1; exit }' <<<"${candidates}")"
   [[ -n "${file}" ]] || return 0
   gate="$(debt_gate)" || return 0
-  printf '%s: %s\n' "${file}" "$(debt_field "${gate}" 3 "${file}")"
+  printf '%s: %s\n' "${file}" "$(debt_field "${gate}" 3 "${file}" | grep . || echo "the debt gate has no verdict for it")"
 }
 
 # Ready tickets that cannot start because a blocker is not done, or because a triaged debt entry

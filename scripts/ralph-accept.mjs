@@ -276,7 +276,8 @@ function ticketFileAt(sha, number) {
 /** Every ticket on `sha`, active and archived, as the debt gate reads them. */
 function ticketsAt(sha) {
   const tickets = new Map();
-  for (const path of [...lsTree(sha, "issues"), ...lsTree(sha, "issues/done")]) {
+  // As loadTickets: an active ticket file wins over an archived one with the same number.
+  for (const path of [...lsTree(sha, "issues/done"), ...lsTree(sha, "issues")]) {
     const name = basename(path);
     if (/^\d{2}-.*\.md$/.test(name)) {
       tickets.set(name.slice(0, 2), parseTicket(name, show(sha, path) ?? ""));
@@ -300,8 +301,9 @@ function registerAt(sha) {
   }
 }
 
-// The debt gate decides on the base's register, which only accepted slices and human-reviewed
-// commits wrote: nothing the run produced has a say in whether its ticket could start.
+// The debt gate decides on the register of the commit the slice was merged onto: the verified
+// base, or an earlier slice of the same run that this importer already accepted under the same
+// slice rules. Nothing the slice itself wrote has a say in whether its ticket could start.
 function assertDebtCleared(sha, slug) {
   const verdict = debtGate(registerAt(sha), ticketsAt(sha)).get(slug.slice(0, 2));
   if (verdict?.state !== "clear") {
@@ -322,6 +324,10 @@ function assertDebtChanges(prev, slice, slug) {
     ...sliceErrors(registerAt(prev), next, { ticket: slug.slice(0, 2) }),
     ...validateRegister(next, { exists: fileInTree(slice), tickets: ticketsAt(slice) }),
   ];
+  // As check:debt: a register the batch and the loop would refuse to read must not reach main.
+  if (renderRegister(next) !== show(slice, REGISTER)) {
+    errors.push(`${REGISTER} is not in canonical form (pnpm run format:debt)`);
+  }
   if (errors.length > 0) {
     refuse(`slice ${slug} breaks the debt register's rules: ${errors.join("; ")}`);
   }
@@ -336,17 +342,15 @@ function eligibleTicket(sha, slug) {
   if (field(text, "Status") !== "ready-for-agent") {
     refuse(`ticket ${slug} was not ready-for-agent on ${short(sha)}`);
   }
-  const blockers = field(text, "Blocked by");
-  if (blockers === "") {
+  if (field(text, "Blocked by") === "") {
     refuse(`ticket ${slug} has no Blocked by line`);
   }
-  if (!blockers.startsWith("None")) {
-    for (const number of blockers.replace(/\([^)]*\)/g, "").match(/\b\d{2}\b/g) ?? []) {
-      const file = ticketFileAt(sha, number);
-      const done = file !== null && field(show(sha, file) ?? "", "Status") === "done";
-      if (!done) {
-        refuse(`ticket ${slug} is blocked by ${number}, which is not done on ${short(sha)}`);
-      }
+  // One reading of the blockers for eligibility and for the debt gate's dependency graph.
+  for (const number of parseTicket(`${slug}.md`, text).blockedBy) {
+    const file = ticketFileAt(sha, number);
+    const done = file !== null && field(show(sha, file) ?? "", "Status") === "done";
+    if (!done) {
+      refuse(`ticket ${slug} is blocked by ${number}, which is not done on ${short(sha)}`);
     }
   }
   assertDebtCleared(sha, slug);

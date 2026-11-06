@@ -374,7 +374,8 @@ function resolveDebt(dir, verification) {
     .replace("- **Status:** OPEN", "- **Status:** RESOLVED")
     .replace("- **Resolution:** none", "- **Resolution:** fixed in this slice")
     .replace("- **Verification:** none", `- **Verification:** ${verification}`);
-  writeFileSync(path, text);
+  // As `pnpm run format:debt` leaves it: the host refuses a register that is not canonical.
+  writeFileSync(path, renderRegister(parseRegister(text)));
 }
 
 /** Runs a forged result and checks it was refused without any trace on the host. */

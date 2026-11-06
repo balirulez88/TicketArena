@@ -465,8 +465,8 @@ function runBatch(state) {
     ensureBaseVerified(state);
     const { next, waiting, triage } = selectNext();
     if (!next) {
-      // Unresolved or untriaged debt that the next ticket relies on is never assumed safe, and
-      // work does not skip past it: a human triages it, then the same batch resumes.
+      // No cleared ticket is left. One that relies on untriaged or unowned debt is never assumed
+      // safe: it waits for a human's triage, then the same batch resumes.
       if (triage) {
         throw new Stop(
           "needs-triage",

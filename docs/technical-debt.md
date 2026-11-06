@@ -52,7 +52,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 0      | 42  | 42    |
+| OPEN          | 0        | 0    | 0      | 45  | 45    |
 | PLANNED       | 0        | 0    | 12     | 12  | 24    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 2    | 7      | 5   | 14    |
@@ -62,9 +62,9 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 | --------------- | ---- | ------- | ----------- | -------- | ------------- | ----- |
 | CORRECTNESS     | 2    | 4       | 0           | 4        | 0             | 10    |
 | CONCURRENCY     | 0    | 2       | 0           | 2        | 0             | 4     |
-| SECURITY        | 0    | 2       | 0           | 2        | 0             | 4     |
+| SECURITY        | 1    | 2       | 0           | 2        | 0             | 5     |
 | VERIFICATION    | 10   | 9       | 0           | 4        | 0             | 23    |
-| OPERABILITY     | 5    | 6       | 0           | 2        | 0             | 13    |
+| OPERABILITY     | 7    | 6       | 0           | 2        | 0             | 15    |
 | MAINTAINABILITY | 25   | 1       | 0           | 0        | 0             | 26    |
 | UNTRIAGED       | 0    | 0       | 0           | 0        | 0             | 0     |
 
@@ -2031,4 +2031,76 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-06: recorded: LOW style at `packages/booking/src/hold-buyer-limit.test.ts:283`, spec axis (fix/buyer-lock-order-tests confirmation review spec, run a2ba22b)
   - 2026-11-06: triaged: MAINTAINABILITY, no owner: deferred, blocks no ticket (initial triage, ticket 53)
+
+### TD-081: A resumed ticket that debt now blocks ends the batch instead of pausing it
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Risk:** OPERABILITY
+- **Triage:** 2026-11-06: triaged by the maintainer of ticket 53 with the confirmation review (harness/53-risk-based-debt-gate)
+- **Escalation:** none
+- **Source:** ticket 53 (`harness/53-risk-based-debt-gate`)
+- **Evidence:** host-side confirmation review (Spec axis) of `4d0a7cb`, recorded in `issues/done/53-risk-based-debt-gate.md`
+- **Components:** `scripts/ralph-batch.mjs:267`
+- **Problem:** When a paused ticket is resumed and the debt gate now says `waiting`, the batch stops `unresolved-dependency` (exit 2) and is marked finished; the paused entry stays `running` and the remaining `--max-tickets` budget is dropped.
+- **Impact:** Safe (nothing runs), but the operator loses the resume semantics: a rerun without `--max-tickets` errors and a new batch must be started.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when both independent host-side reviewers approved ticket 53's confirmation round. Triage 2026-11-06: fails safe (it can only hold work, never clear it); no unfinished ticket relies on it.
+- **Remediation:** Make the stop resumable (keep the batch `running`), or document it in the workflow stop table, with a test that the ticket is picked up again once its debt is resolved.
+- **Target:** none
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-batch.mjs#a-resumed-ticket-that-debt-now-blocks-ends-the-batch`
+- **History:**
+  - 2026-11-06: recorded: LOW at `scripts/ralph-batch.mjs:267`, spec axis (ticket 53 confirmation review, host-side)
+  - 2026-11-06: triaged: OPERABILITY, no owner: deferred, blocks no ticket (ticket 53 maintainer)
+
+### TD-082: The batch report does not name tickets skipped for triage
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Risk:** OPERABILITY
+- **Triage:** 2026-11-06: triaged by the maintainer of ticket 53 with the confirmation review (harness/53-risk-based-debt-gate)
+- **Escalation:** none
+- **Source:** ticket 53 (`harness/53-risk-based-debt-gate`)
+- **Evidence:** host-side confirmation review (Spec axis) of `4d0a7cb`, recorded in `issues/done/53-risk-based-debt-gate.md`
+- **Components:** `scripts/ralph-batch.mjs:458`
+- **Problem:** When a batch reaches `batch-limit` or `no-eligible-ticket` after skipping a `needs-triage` ticket, the FINISHED report does not mention it (only ralph-loop.sh logs it).
+- **Impact:** A maintainer may not notice that a ticket waits for triage until the next batch stops on it.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when both independent host-side reviewers approved ticket 53's confirmation round. Triage 2026-11-06: fails safe (it can only hold work, never clear it); no unfinished ticket relies on it.
+- **Remediation:** Append the `triage_ticket` line to the batch-limit and no-eligible-ticket stop details, with a test.
+- **Target:** none
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-batch.mjs#the-batch-report-does-not-name-tickets-skipped-for-triage`
+- **History:**
+  - 2026-11-06: recorded: LOW at `scripts/ralph-batch.mjs:458`, spec axis (ticket 53 confirmation review, host-side)
+  - 2026-11-06: triaged: OPERABILITY, no owner: deferred, blocks no ticket (ticket 53 maintainer)
+
+### TD-083: A slice can send an entry back to triage with a forged sighting line
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Risk:** SECURITY
+- **Triage:** 2026-11-06: triaged by the maintainer of ticket 53 with the confirmation review (harness/53-risk-based-debt-gate)
+- **Escalation:** none
+- **Source:** ticket 53 (`harness/53-risk-based-debt-gate`)
+- **Evidence:** host-side confirmation review (Spec axis) of `4d0a7cb`, recorded in `issues/done/53-risk-based-debt-gate.md`
+- **Components:** `scripts/ralph-debt.mjs:657`
+- **Problem:** `triageChangeErrors` accepts a Triage reset when any new history line contains `higher severity than recorded`; it does not check the recorder's exact line format or that a higher severity was reported.
+- **Impact:** Only in the safe direction: a malicious slice could put tickets back into `needs-triage` (a stall that a maintainer re-triages), never clear one.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when both independent host-side reviewers approved ticket 53's confirmation round. Triage 2026-11-06: fails safe (it can only hold work, never clear it); no unfinished ticket relies on it.
+- **Remediation:** Match the recorder's exact line format and the sighting's severity against the entry's Severity, with a test of a forged line.
+- **Target:** none
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-debt.mjs#a-slice-can-send-an-entry-back-to-triage-with-a-forged-sighting-line`
+- **History:**
+  - 2026-11-06: recorded: LOW at `scripts/ralph-debt.mjs:657`, spec axis (ticket 53 confirmation review, host-side)
+  - 2026-11-06: triaged: SECURITY, no owner: deferred, blocks no ticket (ticket 53 maintainer)
 <!-- ralph-debt:end -->

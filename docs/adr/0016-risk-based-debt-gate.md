@@ -44,7 +44,8 @@ triages.
 
 - A triaged entry has a risk class other than `UNTRIAGED`.
 - A triaged unresolved `CRITICAL`, `HIGH` or `MEDIUM` entry has an owner ticket.
-- Only an entry with an owner may block tickets, and never its own owner; a new entry blocks nothing until it is triaged.
+- Only an entry with an owner may block tickets, and never its own owner. A new entry blocks
+  nothing; an entry sent back to triage keeps its `Blocks`, and those tickets need triage.
 - `ACCEPTED_RISK` is a deliberate human decision: triaged, blocking nothing, with all three
   `Acceptance` parts. It is never a default.
 - Unresolved debt may not name a ticket that does not exist, or that is done (reconcile it), in
@@ -65,8 +66,8 @@ For every unfinished ticket the host computes one verdict from the base's regist
 
 So: `CRITICAL` and `HIGH` still block the merge itself, unchanged. An untriaged `MEDIUM` holds all
 work until someone classifies it and names an owner, because nobody yet knows what it affects. An
-untriaged `LOW` holds only the tickets that build on the work it was found in; an independent
-ticket proceeds. A triaged `LOW` holds nothing unless a human listed tickets in `Blocks`, which
+untriaged `LOW` holds only the tickets that build on the work it was found in (every ticket, if
+no ticket's review found it); an independent ticket proceeds. A triaged `LOW` holds nothing unless a human listed tickets in `Blocks`, which
 is how a `LOW` in a correctness, concurrency, security or verification guarantee becomes a
 dependency of exactly the tickets that rely on it. An untriaged finding is never assumed safe for
 a ticket that depends on it.

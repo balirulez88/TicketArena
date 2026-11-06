@@ -23,7 +23,7 @@ candidate's own tree, and refuses any change a slice makes to triage. ADR 0016.
 - [x] Initial triage of every unresolved entry; tickets 49–52 created for unowned debt; ticket 12
   owns TD-016, TD-018, TD-020, TD-067 and TD-071.
 - [x] Independent host-side Standards and Spec reviews (round 1); findings fixed.
-- [ ] Confirmation review round.
+- [x] Confirmation review round: both axes approved (no CRITICAL, HIGH or MEDIUM); one stale comment fixed, TD-081, TD-082 and TD-083 recorded as triaged LOW debt.
 - [ ] Full quality gate (`pnpm run check`).
 - [ ] Real-Docker sandbox trust-boundary tests (`pnpm test:sandbox`).
 - [ ] Merged into `main`; GitHub CI green.

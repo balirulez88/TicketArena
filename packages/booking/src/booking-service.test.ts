@@ -8,6 +8,7 @@ import {
   InvalidSeatSelectionError,
   SeatUnavailableError,
 } from "./booking-service";
+import { backendPid, inTransaction, latch, waitUntilBlockedBy } from "./pg-blocking";
 
 const database = setupTestDatabase();
 let prisma: PrismaClient | undefined;
@@ -142,29 +143,43 @@ describe("holdSeats", () => {
   test("reads the clock after taking the seat lock", async () => {
     const { eventId, seatIds } = await freshSeats(1);
     const seatId = seatIds[0] ?? "";
-    let readAfterLockRelease = false;
-    let lockHeld = true;
+    const locked = latch();
+    const commit = latch();
+    let blockerPid = 0;
+    const blocker = db().$transaction(async (tx) => {
+      blockerPid = await backendPid(tx);
+      await tx.$queryRaw`SELECT id FROM seats WHERE id = ${seatId}::uuid FOR UPDATE`;
+      locked.open();
+      await commit.promise;
+    });
+    await locked.promise;
+    // The clock is synchronous, so each read starts a probe of whether the blocker's transaction
+    // is still open; a read taken before the lock was granted can only see it open.
+    // A separate pool: on the blocker's own, a probe could reuse its released backend and see itself.
+    const observer = createPrismaClient({ connectionString: database.url, driver: "pg" });
+    const probes: Promise<boolean>[] = [];
     const clock = {
       now: () => {
-        readAfterLockRelease = !lockHeld;
+        probes.push(inTransaction(observer, blockerPid));
         return NOW;
       },
     };
-    const blocker = db().$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM seats WHERE id = ${seatId}::uuid FOR UPDATE`;
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      lockHeld = false;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 100));
 
-    await createBookingService({ db: db(), clock, newId: randomUUID }).holdSeats(
+    const held = createBookingService({ db: db(), clock, newId: randomUUID }).holdSeats(
       alice,
       eventId,
       seatIds,
     );
+    await waitUntilBlockedBy(observer, blockerPid);
+    commit.open();
     await blocker;
+    await held;
 
-    expect(readAfterLockRelease).toBe(true);
+    const stillOpenAtRead = await Promise.all(probes);
+    await observer.$disconnect();
+    // The last read is the decision time: it must come after the blocker committed.
+    expect(stillOpenAtRead.length).toBeGreaterThan(0);
+    expect(stillOpenAtRead.at(-1)).toBe(false);
   });
 });
 

@@ -53,17 +53,17 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
 | OPEN          | 0        | 0    | 0      | 45  | 45    |
-| PLANNED       | 0        | 0    | 12     | 12  | 24    |
+| PLANNED       | 0        | 0    | 11     | 8   | 19    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
-| RESOLVED      | 0        | 2    | 7      | 5   | 14    |
+| RESOLVED      | 0        | 2    | 8      | 9   | 19    |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 | Risk            | OPEN | PLANNED | IN_PROGRESS | RESOLVED | ACCEPTED_RISK | Total |
 | --------------- | ---- | ------- | ----------- | -------- | ------------- | ----- |
-| CORRECTNESS     | 2    | 4       | 0           | 4        | 0             | 10    |
-| CONCURRENCY     | 0    | 2       | 0           | 2        | 0             | 4     |
+| CORRECTNESS     | 2    | 3       | 0           | 5        | 0             | 10    |
+| CONCURRENCY     | 0    | 1       | 0           | 3        | 0             | 4     |
 | SECURITY        | 1    | 2       | 0           | 2        | 0             | 5     |
-| VERIFICATION    | 10   | 9       | 0           | 4        | 0             | 23    |
+| VERIFICATION    | 10   | 6       | 0           | 7        | 0             | 23    |
 | OPERABILITY     | 7    | 6       | 0           | 2        | 0             | 15    |
 | MAINTAINABILITY | 25   | 1       | 0           | 0        | 0             | 26    |
 | UNTRIAGED       | 0    | 0       | 0           | 0        | 0             | 0     |
@@ -443,7 +443,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-016: Clock-after-lock test depends on sleeps
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -458,8 +458,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** ticket 12 (`issues/12-lock-timeout-and-deadlock-retry.md`)
 - **Blocks:** none
 - **Acceptance:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** The test blocks the seat lock from a second connection and waits on `pg_stat_activity`/`pg_blocking_pids` until the hold is blocked, then commits. Each clock read probes whether the blocker's transaction is still open, so a read before the lock was granted can only see it open; the decision-time read must see it closed.
+- **Verification:** `packages/booking/src/booking-service.test.ts::holdSeats reads the clock after taking the seat lock`
 - **Fingerprints:** `packages/booking/src/booking-service.test.ts#clock-after-lock-test-depends-on-sleeps`
 - **History:**
   - 2026-10-30: recorded: LOW missing_test at `packages/booking/src/booking-service.test.ts:130`, standards axis (ticket 04 review-1 standards, run 20261030-134316)
@@ -491,7 +491,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-018: Atomicity not tested on a failure after the writes begin
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -506,8 +506,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** ticket 12 (`issues/12-lock-timeout-and-deadlock-retry.md`)
 - **Blocks:** none
 - **Acceptance:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** A failing outbox insert (a duplicate envelope id from a fixed `newId`) rolls the whole hold back, on a first attempt and on a retry after a deadlock.
+- **Verification:** `packages/booking/src/hold-retry.test.ts::atomicity (TD-018) a failing outbox insert leaves no hold, no claim and the seat AVAILABLE`; `packages/booking/src/hold-retry.test.ts::atomicity (TD-018) the same failure after a deadlock retry also leaves nothing behind`
 - **Fingerprints:** `packages/booking/src/booking-service.test.ts#atomicity-not-tested-on-a-failure-after-the-writes-begin`
 - **History:**
   - 2026-10-30: recorded: LOW missing_test at `packages/booking/src/booking-service.test.ts:91`, spec axis (ticket 04 review-1 spec, run 20261030-134316)
@@ -541,7 +541,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-020: placeOrder has no lock timeout, retry or BOOKING_BUSY mapping
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** MEDIUM
 - **Risk:** CONCURRENCY
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -556,8 +556,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** ticket 12 (`issues/12-lock-timeout-and-deadlock-retry.md`)
 - **Blocks:** 39
 - **Acceptance:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** `holdSeats` and `placeOrder` both run in `bookingTransaction`: `lock_timeout` 3s, `statement_timeout` 5s, up to 3 retries with jitter on 40P01/55P03/40001 (counting `deadlock_retry`), then `BOOKING_BUSY` (counted). The router maps `BookingBusyError` to `TOO_MANY_REQUESTS` for both.
+- **Verification:** `packages/booking/src/hold-busy.test.ts::BOOKING_BUSY a hold blocked on a seat row lock past lock_timeout gives up and is BOOKING_BUSY`; `packages/booking/src/hold-busy.test.ts::BOOKING_BUSY a placeOrder blocked on a seat row lock past lock_timeout is BOOKING_BUSY, counted`; `packages/booking/src/hold-retry.test.ts::deadlock retry a hold aborted by a deadlock is retried and succeeds, counting deadlock_retry`; `apps/web/src/server/routers/booking.test.ts::booking saturation placeOrder on a database that cannot take the request in time is TOO_MANY_REQUESTS (BOOKING_BUSY)`
 - **Fingerprints:** `packages/booking/src/booking-service.ts#placeorder-has-no-lock-timeout-retry-or-booking-busy-mapping`
 - **History:**
   - 2026-10-30: recorded: MEDIUM regression_risk at `packages/booking/src/booking-service.ts:351`, standards axis (ticket 05 review-2 standards, run 20261030-135423)
@@ -1691,7 +1691,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-067: Saturation detection matches a pg-pool error message string, and P2028 also covers non-saturation timeouts
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** LOW
 - **Risk:** CORRECTNESS
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -1706,8 +1706,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** ticket 12 (`issues/12-lock-timeout-and-deadlock-retry.md`)
 - **Blocks:** none
 - **Acceptance:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** Saturation is the pg-pool acquire message (exported as `POOL_ACQUIRE_TIMEOUT_MESSAGE` with the coupling noted beside it and pinned against the real driver) or a P2028 whose message says the transaction could not start; a P2028 for a transaction past its own runtime timeout or already closed is no longer `BOOKING_BUSY`.
+- **Verification:** `packages/booking/src/hold-busy.test.ts::BOOKING_BUSY pool saturation surfaces the pg-pool message the service matches (pinned against the driver)`; `packages/booking/src/hold-busy.test.ts::BOOKING_BUSY a transaction that outlives its own runtime timeout is not a retryable BOOKING_BUSY`
 - **Fingerprints:** `packages/booking/src/booking-service.ts#saturation-detection-matches-a-pg-pool-error-message-string-`
 - **History:**
   - 2026-11-05: recorded: LOW maintainability at `packages/booking/src/booking-service.ts:286`, standards axis (ticket 10 review-3 standards, run 20261105-143619)
@@ -1790,7 +1790,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-071: Saturation tests assume the occupier holds the only connection after a fixed 50 ms sleep
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -1805,8 +1805,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** ticket 12 (`issues/12-lock-timeout-and-deadlock-retry.md`)
 - **Blocks:** none
 - **Acceptance:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** The occupying transaction resolves a latch after its `SELECT 1`; the tests await it instead of sleeping 50 ms.
+- **Verification:** `packages/booking/src/hold-busy.test.ts::BOOKING_BUSY a hold that cannot get a connection or start its transaction in time is retryable BOOKING_BUSY`; `apps/web/src/server/routers/booking.test.ts::booking saturation holdSeats on a database that cannot take the request in time is TOO_MANY_REQUESTS (BOOKING_BUSY)`
 - **Fingerprints:** `packages/booking/src/hold-busy.test.ts#saturation-tests-assume-the-occupier-holds-the-only-connecti`
 - **History:**
   - 2026-11-05: recorded: LOW missing_test at `packages/booking/src/hold-busy.test.ts:70`, standards axis (ticket 10 host review standards, run 20261105-153541-378)

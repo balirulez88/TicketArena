@@ -36,6 +36,7 @@ export type BookingMetric =
   | "seat_unavailable"
   | "race_lost"
   | "booking_busy"
+  | "deadlock_retry"
   | "limit_exceeded";
 
 /** Per-event counters. Implementations may reject; the service logs and moves on. */
@@ -203,6 +204,8 @@ const ORDER_PLACED_EVENT = "order.placed";
 const placedEnvelope = envelopeSchema(orderPlacedPayloadSchema);
 const PG_UNIQUE_VIOLATION = "P2002";
 
+type Tx = Parameters<Parameters<PrismaClient["$transaction"]>[0]>[0];
+
 interface LockedHold {
   readonly buyerKey: string;
   readonly status: string;
@@ -301,19 +304,71 @@ function requestHash(holdId: string, contact: Contact): string {
     .digest("hex");
 }
 
-const PRISMA_TRANSACTION_START_TIMEOUT = "P2028";
-const POOL_ACQUIRE_TIMEOUT_MESSAGE = "timeout exceeded when trying to connect";
+const PRISMA_TRANSACTION_TIMEOUT = "P2028";
+const PRISMA_START_TIMEOUT_MESSAGE = "Unable to start a transaction in the given time";
+/**
+ * Coupled to pg-pool's wording (it has no error code); hold-busy.test.ts pins it against the real
+ * driver, so an upgrade that rewords it fails that test instead of turning saturation into a 500.
+ */
+export const POOL_ACQUIRE_TIMEOUT_MESSAGE = "timeout exceeded when trying to connect";
 
-/** Pool-acquire (pg-pool) and transaction-start (Prisma) timeouts mean saturation, not a bug. */
+/** ADR 0005: a blocked transaction gives up after the lock timeout instead of hanging. */
+const LOCK_TIMEOUT = "3s";
+const STATEMENT_TIMEOUT = "5s";
+const MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 25;
+/** deadlock_detected, lock_not_available (lock_timeout) and serialization_failure. */
+const RETRYABLE_SQLSTATES: ReadonlySet<string> = new Set(["40P01", "55P03", "40001"]);
+
+function messageOf(error: object): string {
+  return "message" in error ? String(error.message) : "";
+}
+
+/**
+ * Prisma wraps the driver error and its nesting differs by query kind, so the SQLSTATE is looked
+ * for in any `code`/`originalCode`/`sqlState` field of the error, its `cause` and its `meta`.
+ */
+function sqlStates(error: unknown, depth = 0): string[] {
+  if (typeof error !== "object" || error === null || depth > 8) {
+    return [];
+  }
+  const found: string[] = [];
+  const entries = Object.entries(error);
+  if ("cause" in error) {
+    entries.push(["cause", error.cause]);
+  }
+  for (const [key, value] of entries) {
+    if (
+      (key === "code" || key === "originalCode" || key === "sqlState") &&
+      typeof value === "string"
+    ) {
+      found.push(value);
+    } else {
+      found.push(...sqlStates(value, depth + 1));
+    }
+  }
+  return found;
+}
+
+function isRetryable(error: unknown): boolean {
+  return sqlStates(error).some((state) => RETRYABLE_SQLSTATES.has(state));
+}
+
+/**
+ * Pool-acquire (pg-pool) and transaction-start (Prisma) timeouts mean saturation, not a bug.
+ * A P2028 for a transaction that outlived its own timeout or was already closed is ambiguous
+ * (the work may have committed), so it is not reported as a retryable BOOKING_BUSY.
+ */
 function isSaturation(error: unknown): boolean {
   if (typeof error !== "object" || error === null) {
     return false;
   }
+  const message = messageOf(error);
   return (
-    ("code" in error && error.code === PRISMA_TRANSACTION_START_TIMEOUT) ||
-    ("message" in error &&
-      typeof error.message === "string" &&
-      error.message.includes(POOL_ACQUIRE_TIMEOUT_MESSAGE))
+    ("code" in error &&
+      error.code === PRISMA_TRANSACTION_TIMEOUT &&
+      message.includes(PRISMA_START_TIMEOUT_MESSAGE)) ||
+    message.includes(POOL_ACQUIRE_TIMEOUT_MESSAGE)
   );
 }
 
@@ -439,6 +494,45 @@ export function createBookingService({
     }
   }
 
+  /**
+   * Runs the whole transaction under the ADR 0005 timeouts, re-running it from the start when
+   * Postgres aborts it with a deadlock, lock timeout or serialization failure. Retrying is safe
+   * only because a failed attempt rolls back completely; exhausted retries are BOOKING_BUSY.
+   */
+  async function bookingTransaction<T>(eventId: string, work: (tx: Tx) => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await db.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT set_config('lock_timeout', ${LOCK_TIMEOUT}, true), set_config('statement_timeout', ${STATEMENT_TIMEOUT}, true)`;
+          return work(tx);
+        });
+      } catch (error) {
+        if (!isRetryable(error)) {
+          throw error;
+        }
+        if (attempt >= MAX_RETRIES) {
+          throw new BookingBusyError({ cause: error });
+        }
+        count("deadlock_retry", eventId);
+        // Jitter keeps two deadlocked buyers from colliding again in lockstep.
+        const delay = RETRY_BASE_DELAY_MS * (attempt + 1) * (1 + Math.random());
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  /** Turns saturation and exhausted retries into the one retryable public error, counted. */
+  function asBusy(eventId: string | undefined, error: unknown): never {
+    if (!(error instanceof BookingBusyError || isSaturation(error))) {
+      throw error;
+    }
+    // placeOrder can be busy before it has read the hold, i.e. before the event is known.
+    if (eventId !== undefined) {
+      count("booking_busy", eventId);
+    }
+    throw error instanceof BookingBusyError ? error : new BookingBusyError({ cause: error });
+  }
+
   /** Lock-free read of the requested seats: which are visibly not holdable now. Advisory only. */
   async function snapshot(
     eventId: string,
@@ -517,104 +611,102 @@ export function createBookingService({
       count("seat_unavailable", eventId);
       throw new SeatUnavailableError(taken);
     }
-    const hold = await db
-      .$transaction(async (tx) => {
-        await lockBuyer(tx, eventId, buyer.buyerKey);
-        // Waiting (not NOWAIT) lock in id order: a loser sees the winner's committed state
-        // instead of a spurious "taken" while the winner might still roll back (ADR 0005).
-        const locked = await tx.$queryRaw<SeatState[]>`
+    const hold = await bookingTransaction(eventId, async (tx) => {
+      await lockBuyer(tx, eventId, buyer.buyerKey);
+      // Waiting (not NOWAIT) lock in id order: a loser sees the winner's committed state
+      // instead of a spurious "taken" while the winner might still roll back (ADR 0005).
+      const locked = await tx.$queryRaw<SeatState[]>`
           SELECT id::text AS id, status::text AS status, "holdId"::text AS "holdId"
           FROM seats
           WHERE id = ANY(${[...seatIds]}::uuid[]) AND "eventId" = ${eventId}::uuid
           ORDER BY id
           FOR UPDATE`;
 
-        // Decision time is read only after the locks are held: it is the linearization point.
-        const decidedAt = clock.now();
+      // Decision time is read only after the locks are held: it is the linearization point.
+      const decidedAt = clock.now();
 
-        const free = new Set(locked.filter((seat) => seat.status === "AVAILABLE").map((s) => s.id));
-        const unavailable = seatIds.filter((id) => !free.has(id));
-        if (unavailable.length > 0) {
-          throw new LockedRefusal(
-            unavailable,
-            lostRace(seen, locked, unavailable) ? "race_lost" : "seat_unavailable",
-          );
-        }
+      const free = new Set(locked.filter((seat) => seat.status === "AVAILABLE").map((s) => s.id));
+      const unavailable = seatIds.filter((id) => !free.has(id));
+      if (unavailable.length > 0) {
+        throw new LockedRefusal(
+          unavailable,
+          lostRace(seen, locked, unavailable) ? "race_lost" : "seat_unavailable",
+        );
+      }
 
-        // Expired holds do not count: they are unswept but already released in effect (TD-013).
-        const [usage] = await tx.$queryRaw<{ used: bigint }[]>`
+      // Expired holds do not count: they are unswept but already released in effect (TD-013).
+      const [usage] = await tx.$queryRaw<{ used: bigint }[]>`
           SELECT count(*) AS used
           FROM seats s
           LEFT JOIN holds h ON h.id = s."holdId"
           WHERE s."eventId" = ${eventId}::uuid AND s."claimBuyerKey" = ${buyer.buyerKey}
             AND (s.status::text IN ('IN_CHECKOUT', 'SOLD')
                  OR (s.status::text = 'HELD' AND h."holdExpiresAt" > ${decidedAt}))`;
-        const used = Number(usage?.used ?? 0);
-        if (used + seatIds.length > MAX_SEATS_PER_BUYER) {
-          throw new LimitExceeded(used, seatIds.length);
-        }
+      const used = Number(usage?.used ?? 0);
+      if (used + seatIds.length > MAX_SEATS_PER_BUYER) {
+        throw new LimitExceeded(used, seatIds.length);
+      }
 
-        const holdId = newId();
-        const correlationId = newId();
-        const holdExpiresAt = new Date(decidedAt.getTime() + HOLD_DURATION_MS);
+      const holdId = newId();
+      const correlationId = newId();
+      const holdExpiresAt = new Date(decidedAt.getTime() + HOLD_DURATION_MS);
 
-        await tx.hold.create({
-          data: {
-            id: holdId,
-            eventId,
-            sessionId: buyer.sessionId,
-            ...(buyer.userId === undefined ? {} : { userId: buyer.userId }),
-            buyerKey: buyer.buyerKey,
-            holdExpiresAt,
-            correlationId,
-          },
-        });
-        await tx.seat.updateMany({
-          where: { id: { in: [...seatIds] } },
-          data: { status: "HELD", holdId, claimBuyerKey: buyer.buyerKey },
-        });
-
-        // Same transaction as the state change: the event exists iff the hold committed.
-        const envelope = heldEnvelope.parse({
-          id: newId(),
-          type: SEAT_HELD_EVENT,
-          version: 1,
-          occurredAt: decidedAt.toISOString(),
-          correlationId,
-          causationId: null,
-          holdId,
-          payload: { holdId, eventId, seatIds, holdExpiresAt: holdExpiresAt.toISOString() },
-        });
-        await tx.outboxEvent.create({
-          data: {
-            id: envelope.id,
-            aggregateType: "hold",
-            aggregateId: holdId,
-            eventType: SEAT_HELD_EVENT,
-            payload: envelope,
-          },
-        });
-
-        return {
+      await tx.hold.create({
+        data: {
           id: holdId,
           eventId,
-          seatIds: [...seatIds],
-          status: "HELD" as const,
+          sessionId: buyer.sessionId,
+          ...(buyer.userId === undefined ? {} : { userId: buyer.userId }),
+          buyerKey: buyer.buyerKey,
           holdExpiresAt,
           correlationId,
-        };
-      })
-      .catch((error: unknown) => {
-        if (error instanceof LimitExceeded) {
-          count("limit_exceeded", eventId);
-          throw new LimitExceededError(error.used, error.requested);
-        }
-        if (error instanceof LockedRefusal) {
-          count(error.metric, eventId);
-          throw new SeatUnavailableError(error.seatIds);
-        }
-        throw error;
+        },
       });
+      await tx.seat.updateMany({
+        where: { id: { in: [...seatIds] } },
+        data: { status: "HELD", holdId, claimBuyerKey: buyer.buyerKey },
+      });
+
+      // Same transaction as the state change: the event exists iff the hold committed.
+      const envelope = heldEnvelope.parse({
+        id: newId(),
+        type: SEAT_HELD_EVENT,
+        version: 1,
+        occurredAt: decidedAt.toISOString(),
+        correlationId,
+        causationId: null,
+        holdId,
+        payload: { holdId, eventId, seatIds, holdExpiresAt: holdExpiresAt.toISOString() },
+      });
+      await tx.outboxEvent.create({
+        data: {
+          id: envelope.id,
+          aggregateType: "hold",
+          aggregateId: holdId,
+          eventType: SEAT_HELD_EVENT,
+          payload: envelope,
+        },
+      });
+
+      return {
+        id: holdId,
+        eventId,
+        seatIds: [...seatIds],
+        status: "HELD" as const,
+        holdExpiresAt,
+        correlationId,
+      };
+    }).catch((error: unknown) => {
+      if (error instanceof LimitExceeded) {
+        count("limit_exceeded", eventId);
+        throw new LimitExceededError(error.used, error.requested);
+      }
+      if (error instanceof LockedRefusal) {
+        count(error.metric, eventId);
+        throw new SeatUnavailableError(error.seatIds);
+      }
+      throw error;
+    });
     // After commit, so a rolled-back hold never claims to have happened.
     count("hold_ok", eventId);
     logger
@@ -634,26 +726,23 @@ export function createBookingService({
       try {
         return await holdOnce(buyer, eventId, seatIds);
       } catch (error) {
-        if (!isSaturation(error)) {
-          throw error;
-        }
-        count("booking_busy", eventId);
-        throw new BookingBusyError({ cause: error });
+        asBusy(eventId, error);
       }
     },
 
     async placeOrder(buyer, holdId, contact, idempotencyKey) {
       const hash = requestHash(holdId, contact);
-      // A replay must win even after the hold expired, so it is checked before any hold logic.
-      const replay = await findByIdempotencyKey(db, buyer, idempotencyKey, hash);
-      if (replay !== null) {
-        return replay;
-      }
-
+      let eventId: string | undefined;
       try {
+        // A replay must win even after the hold expired, so it is checked before any hold logic.
+        const replay = await findByIdempotencyKey(db, buyer, idempotencyKey, hash);
+        if (replay !== null) {
+          return replay;
+        }
         // Unlocked read only to learn which buyer lock to take; the locked read below decides.
         const owned = await ownedHold(buyer, holdId);
-        const placed = await db.$transaction(async (tx) => {
+        eventId = owned.eventId;
+        const placed = await bookingTransaction(owned.eventId, async (tx) => {
           // Lock order is buyer, hold, then seats by id, matching holdSeats (ADR 0005).
           await lockBuyer(tx, owned.eventId, buyer.buyerKey);
           const holds = await tx.$queryRaw<LockedHold[]>`
@@ -771,7 +860,7 @@ export function createBookingService({
             return winner;
           }
         }
-        throw error;
+        asBusy(eventId, error);
       }
     },
 

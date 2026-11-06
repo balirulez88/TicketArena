@@ -90,11 +90,18 @@ after the outcome is decided, fire-and-forget; a failure is logged and never fai
 Redis adapter (`createRedisBookingMetrics`) keeps one hash per event,
 `booking:metrics:<eventId>`, with the metric as field. Seat state is never decided by Redis.
 
-Saturation: a `holdSeats` whose pool acquire (`pg` `connectionTimeoutMillis`) or transaction start
-(Prisma `maxWait`, `P2028`) times out fails with `BookingBusyError` (`BOOKING_BUSY`, tRPC
-`TOO_MANY_REQUESTS`) and counts `booking_busy`. `createPrismaClient` takes `poolMax`,
-`acquireTimeoutMs` and `transaction` so callers size pool and timeouts. Lock-timeout and deadlock
-retry, and the same mapping for `placeOrder`, remain ticket 12 (TD-020).
+Timeouts and retry (ADR 0005): `holdSeats` and `placeOrder` run every transaction through one
+helper that sets `lock_timeout` 3s and `statement_timeout` 5s (`set_config(..., true)`, local to the
+transaction). A transaction Postgres aborts with `40P01`, `55P03` or `40001` is retried whole, up to 3 times,
+with jitter, each retry counting `deadlock_retry`; a failed attempt has rolled back completely, so
+a retry never sees partial state. Exhausted retries fail with `BookingBusyError` (`BOOKING_BUSY`,
+tRPC `TOO_MANY_REQUESTS`, router-mapped for both procedures) and count `booking_busy`.
+
+Saturation: a pool acquire timeout (the `pg-pool` message, pinned against the real driver) or a
+Prisma `P2028` saying the transaction could not start in time is also `BOOKING_BUSY`. A `P2028`
+for a transaction that outlived its own runtime timeout, or was already closed, is not: the work
+may have committed, so it is not reported as retryable. `createPrismaClient` takes `poolMax`,
+`acquireTimeoutMs` and `transaction` so callers size pool and timeouts.
 
 Orders: `booking.placeOrder` (no admission required) and `booking.getOrder` (owner only, else
 `NOT_FOUND`). `placeOrder` runs one transaction with the lock order buyer lock (same key as `holdSeats`, taken after an unlocked read of the hold's event), hold `FOR UPDATE`, seats

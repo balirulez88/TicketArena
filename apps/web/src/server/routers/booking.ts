@@ -124,6 +124,9 @@ export const bookingRouter = createTRPCRouter({
           input.idempotencyKey,
         );
       } catch (error) {
+        if (error instanceof BookingBusyError) {
+          throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: error.message, cause: error });
+        }
         if (error instanceof HoldNotFoundError) {
           throw new TRPCError({ code: "NOT_FOUND", message: error.message, cause: error });
         }

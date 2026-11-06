@@ -267,8 +267,27 @@ describe("booking.placeOrder / getOrder", () => {
   });
 });
 
-describe("booking.holdSeats saturation", () => {
-  test("a database that cannot take the request in time is TOO_MANY_REQUESTS (BOOKING_BUSY)", async () => {
+/** Holds the client's only connection; resolves once the occupier's own statement has run. */
+async function occupy(client: PrismaClient) {
+  let occupied: () => void = () => undefined;
+  const occupiedSignal = new Promise<void>((resolve) => {
+    occupied = resolve;
+  });
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const occupier = client.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1`;
+    occupied();
+    await gate;
+  });
+  await occupiedSignal;
+  return { release, occupier };
+}
+
+describe("booking saturation", () => {
+  test("holdSeats on a database that cannot take the request in time is TOO_MANY_REQUESTS (BOOKING_BUSY)", async () => {
     const { eventId, seatId } = await availableSeat();
     const tight = createPrismaClient({
       connectionString: database.url,
@@ -276,15 +295,7 @@ describe("booking.holdSeats saturation", () => {
       poolMax: 1,
       acquireTimeoutMs: 100,
     });
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const occupier = tight.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT 1`;
-      await gate;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const { release, occupier } = await occupy(tight);
     try {
       await expect(
         createCaller({
@@ -293,6 +304,36 @@ describe("booking.holdSeats saturation", () => {
           db: tight,
           logger: silentLogger,
         }).booking.holdSeats({ eventId, seatIds: [seatId] }),
+      ).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS", message: /BOOKING_BUSY/ });
+    } finally {
+      release();
+      await occupier;
+      await tight.$disconnect();
+    }
+  });
+
+  test("placeOrder on a database that cannot take the request in time is TOO_MANY_REQUESTS (BOOKING_BUSY)", async () => {
+    const { eventId, seatId } = await availableSeat();
+    const hold = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatId] });
+    const tight = createPrismaClient({
+      connectionString: database.url,
+      driver: "pg",
+      poolMax: 1,
+      acquireTimeoutMs: 100,
+    });
+    const { release, occupier } = await occupy(tight);
+    try {
+      await expect(
+        createCaller({
+          now: () => NOW,
+          principal: alice,
+          db: tight,
+          logger: silentLogger,
+        }).booking.placeOrder({
+          holdId: hold.id,
+          contact: { email: "alice@example.com" },
+          idempotencyKey: randomUUID(),
+        }),
       ).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS", message: /BOOKING_BUSY/ });
     } finally {
       release();

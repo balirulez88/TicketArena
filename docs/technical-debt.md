@@ -36,7 +36,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 3      | 52  | 55    |
+| OPEN          | 0        | 0    | 3      | 53  | 56    |
 | PLANNED       | 0        | 0    | 9      | 2   | 11    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 2    | 7      | 2   | 11    |
@@ -1554,4 +1554,24 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `docs/index.md#index-summary-omits-the-new-limit-exceeded-counter`
 - **History:**
   - 2026-11-06: recorded: LOW maintainability at `docs/index.md:67`, standards axis (ticket 11 review-2 standards, run 20261106-073411)
+
+### TD-078: LIMIT_EXCEEDED to CONFLICT mapping has no router test
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** ticket 11 (`11-multi-seat-holds-and-buyer-limit`)
+- **Evidence:** `.ralph/host-review/20261106-083344-25819/11-multi-seat-holds-and-buyer-limit.standards.json`
+- **Components:** `apps/web/src/server/routers/booking.ts:89`
+- **Problem:** The router now maps LimitExceededError to CONFLICT alongside SeatUnavailableError. The new router tests cover the seat-count bounds and a foreign-event CONFLICT, but none drives a buyer over the limit through tRPC.
+- **Impact:** If the instanceof branch were dropped or reordered, the limit would surface as INTERNAL_SERVER_ERROR and only the router layer would break. Service tests would still pass.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows.
+- **Remediation:** Add a booking.test.ts case that holds 4 seats, then requests 3 more and expects code CONFLICT.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/web/src/server/routers/booking.ts#limit-exceeded-to-conflict-mapping-has-no-router-test`; `apps/web/src/server/routers/booking.ts#router-mapping-of-limitexceedederror-to-conflict-is-untested`
+- **History:**
+  - 2026-11-06: recorded: LOW missing_test at `apps/web/src/server/routers/booking.ts:89`, standards axis (ticket 11 host review standards, run 20261106-083344-25819)
+  - 2026-11-06: seen again: LOW missing_test at `apps/web/src/server/routers/booking.ts:89`, spec axis (ticket 11 host review spec, run 20261106-083344-25819)
 <!-- ralph-debt:end -->

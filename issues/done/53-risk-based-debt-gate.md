@@ -26,4 +26,4 @@ candidate's own tree, and refuses any change a slice makes to triage. ADR 0016.
 - [x] Confirmation review round: both axes approved (no CRITICAL, HIGH or MEDIUM); one stale comment fixed, TD-081, TD-082 and TD-083 recorded as triaged LOW debt.
 - [x] Full quality gate (`pnpm run check`): 388 node tests and the loop, session and resume scenarios pass.
 - [x] Real-Docker sandbox trust-boundary tests (`pnpm test:sandbox`): all passed.
-- [ ] Merged into `main`; GitHub CI green.
+- [x] Merged into `main` (`fac9149`); GitHub CI run 42218828274 green (quality gate with the debt register audit, sandbox trust boundary).

@@ -2,9 +2,11 @@
 
 **What to build:** under heavy contention a booking request never hangs or fails with an internal error: blocked transactions time out and retry, and if retries are exhausted the buyer gets a retryable `BOOKING_BUSY`. Spec: Holding seats (step 3); ADR 0005. Owns TD-020 (MEDIUM), TD-067, TD-071, TD-016 and TD-018 in `docs/technical-debt.md`: locking, retry, timeout and transaction-correctness guarantees the retry relies on.
 
+**Superseded:** this ticket is a tracking item. After two rejected runs (20261106-132615 and 20261106-165157; branches `rejected/12-lock-timeout-and-deadlock-retry-*`, kept locally) it was split on 2026-11-06 (user decision) into 54 (transaction timeouts and retries), 55 (deterministic transaction tests), 56 (metrics configuration bootstrap) and 57 (production booking metrics), which own its debt (TD-020, TD-067 to 54; TD-016, TD-018, TD-071 to 55). Ralph never picks it (`blocked`). It is not complete because its replacements exist: a human archives it as done only after 54, 55, 56 and 57 are all done. The criteria below are the record of the second attempt, not work for this ticket.
+
 **Previous attempt:** run 20261106-132615 was rejected after three review rounds (branch `rejected/12-lock-timeout-and-deadlock-retry-20261106-132615`, logs `.ralph/logs/20261106-132615/`). It may be read as reference material only; its code and its reviews count for nothing here. The criteria below name every gap its reviews found.
 
-**Blocked by:** 10
+**Blocked by:** 54, 55, 56, 57 (its replacements)
 
 **Status:** blocked
 

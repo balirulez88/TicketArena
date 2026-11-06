@@ -446,16 +446,16 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
-- **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
+- **Triage:** 2026-11-06: user decision to split ticket 12 after two rejected runs; owner moved to ticket 55
 - **Escalation:** none
 - **Source:** ticket 04 (`04-hold-one-seat`)
 - **Evidence:** `.ralph/logs/20261030-134316/04-hold-one-seat.review-1.standards.json`
 - **Components:** `packages/booking/src/booking-service.test.ts:130`
 - **Problem:** The test sleeps 100 ms and then 300 ms to order a blocker transaction against the service call. If holdSeats starts before the blocker locks, or the blocker commits before the clock is read, the result depends on timing. lockHeld is also cleared just before the transaction commits, not after.
 - **Impact:** The test can flake on a slow CI machine. It can also pass in the window between the flag flip and the commit, even if the clock were read before the lock was acquired.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. No correctness impact found in the 2026-10-30 correctness review. Triage 2026-11-06: the clock-after-lock test relies on sleeps; ticket 12 changes the locking transactions it guards, so it owns this.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. No correctness impact found in the 2026-10-30 correctness review. Triage 2026-11-06: the clock-after-lock test relies on sleeps; ticket 12 (now ticket 55) changes the locking transactions it guards, so it owns this.
 - **Remediation:** Synchronise on events instead of timers, for example poll pg_locks or pg_stat_activity until the service is waiting. Record the clock read order against a flag that is set only after the blocker has committed.
-- **Target:** ticket 12 (`issues/12-lock-timeout-and-deadlock-retry.md`)
+- **Target:** ticket 55 (`issues/55-deterministic-transaction-tests.md`)
 - **Blocks:** none
 - **Acceptance:** none
 - **Resolution:** none
@@ -464,6 +464,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-10-30: recorded: LOW missing_test at `packages/booking/src/booking-service.test.ts:130`, standards axis (ticket 04 review-1 standards, run 20261030-134316)
   - 2026-11-06: triaged: VERIFICATION, owned by ticket 12, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-06: re-planned for ticket 55 (`issues/55-deterministic-transaction-tests.md`): ticket 12 was split into tickets 54-57 after rejected runs 20261106-132615 and 20261106-165157 (user decision, 2026-11-06)
 
 ### TD-017: HoldStatus and the status enum are duplicated across layers
 
@@ -494,16 +495,16 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
-- **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
+- **Triage:** 2026-11-06: user decision to split ticket 12 after two rejected runs; owner moved to ticket 55
 - **Escalation:** none
 - **Source:** ticket 04 (`04-hold-one-seat`)
 - **Evidence:** `.ralph/logs/20261030-134316/04-hold-one-seat.review-1.spec.json`
 - **Components:** `packages/booking/src/booking-service.test.ts:91`
 - **Problem:** The only rollback-style test fails at the availability check, before any write. No test shows that a failure after the hold or seat update (for example an outbox write failure) leaves nothing behind.
 - **Impact:** A refactor that moved the outbox write outside the transaction would still pass the suite, losing the "event exists iff the hold committed" guarantee.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. No correctness impact found in the 2026-10-30 correctness review. Triage 2026-11-06: nothing proves a failure after the writes begin leaves no partial hold; ticket 12 retries whole transactions, which relies on that atomicity, so it owns this.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. No correctness impact found in the 2026-10-30 correctness review. Triage 2026-11-06: nothing proves a failure after the writes begin leaves no partial hold; ticket 12 (now ticket 55) retries whole transactions, which relies on that atomicity, so it owns this.
 - **Remediation:** Add a test that makes the outbox insert fail (for example a duplicate envelope id from a fixed newId) and asserts that no hold exists and the seat is still AVAILABLE.
-- **Target:** ticket 12 (`issues/12-lock-timeout-and-deadlock-retry.md`)
+- **Target:** ticket 55 (`issues/55-deterministic-transaction-tests.md`)
 - **Blocks:** none
 - **Acceptance:** none
 - **Resolution:** none
@@ -512,6 +513,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-10-30: recorded: LOW missing_test at `packages/booking/src/booking-service.test.ts:91`, spec axis (ticket 04 review-1 spec, run 20261030-134316)
   - 2026-11-06: triaged: VERIFICATION, owned by ticket 12, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-06: re-planned for ticket 55 (`issues/55-deterministic-transaction-tests.md`): ticket 12 was split into tickets 54-57 after rejected runs 20261106-132615 and 20261106-165157 (user decision, 2026-11-06)
 
 ### TD-019: Order lines priced from a different seat set than the one validated
 
@@ -544,7 +546,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Status:** PLANNED
 - **Severity:** MEDIUM
 - **Risk:** CONCURRENCY
-- **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
+- **Triage:** 2026-11-06: user decision to split ticket 12 after two rejected runs; owner moved to ticket 54
 - **Escalation:** none
 - **Source:** ticket 05 (`05-place-order`)
 - **Evidence:** `.ralph/logs/20261030-135423/05-place-order.review-2.standards.json`
@@ -553,7 +555,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Impact:** When the seats are contended, a buyer gets an opaque INTERNAL_SERVER_ERROR after the transaction times out. A deadlock or timeout is never retried. This extends a gap that already exists in holdSeats.
 - **Justification:** Ticket 12 implements ADR 0005's timeouts, retry and BOOKING_BUSY for every booking transaction; contention only occurs under load, which ticket 10 introduces first. Triage 2026-11-06: contended booking transactions fail opaquely and never retry; the load tests (39) measure exactly that path.
 - **Remediation:** Apply the ADR 0005 timeouts and bounded retry to the booking transactions. If that is deferred to another ticket, record it as a known limitation in docs/database/index.md.
-- **Target:** ticket 12 (`issues/12-lock-timeout-and-deadlock-retry.md`)
+- **Target:** ticket 54 (`issues/54-transaction-timeouts-and-retries.md`)
 - **Blocks:** 39
 - **Acceptance:** none
 - **Resolution:** none
@@ -563,6 +565,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-10-30: recorded: MEDIUM regression_risk at `packages/booking/src/booking-service.ts:351`, standards axis (ticket 05 review-2 standards, run 20261030-135423)
   - 2026-10-30: planned for ticket 12 (`issues/12-lock-timeout-and-deadlock-retry.md`) (correctness review of tickets 03-05, 2026-10-30)
   - 2026-11-06: triaged: CONCURRENCY, owned by ticket 12, blocks ticket(s) 39 until it is resolved (initial triage, ticket 53)
+  - 2026-11-06: re-planned for ticket 54 (`issues/54-transaction-timeouts-and-retries.md`): ticket 12 was split into tickets 54-57 after rejected runs 20261106-132615 and 20261106-165157 (user decision, 2026-11-06)
 
 ### TD-021: PG_UNIQUE_VIOLATION holds a Prisma error code
 
@@ -1694,16 +1697,16 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** CORRECTNESS
-- **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
+- **Triage:** 2026-11-06: user decision to split ticket 12 after two rejected runs; owner moved to ticket 54
 - **Escalation:** none
 - **Source:** ticket 10 (`10-hot-seat-race-and-fast-path`)
 - **Evidence:** `.ralph/logs/20261105-143619/10-hot-seat-race-and-fast-path.review-3.standards.json`
 - **Components:** `packages/booking/src/booking-service.ts:286`
 - **Problem:** isSaturation matches the substring 'timeout exceeded when trying to connect' in error.message. This couples the code to pg-pool wording. P2028 is also raised when an interactive transaction exceeds its own runtime timeout, or when it is already closed, so a slow transaction can be reported as BOOKING_BUSY ('retryable').
 - **Impact:** A pg-pool upgrade that rewords the message silently turns saturation into a generic 500. A P2028 raised at commit time is ambiguous, so a client retry could repeat a hold that actually committed. The retry would then get SEAT_UNAVAILABLE, which is confusing but not unsafe.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: a P2028 raised for a transaction's own timeout is reported as a retryable BOOKING_BUSY, and saturation is detected by a pg-pool message string; ticket 12 defines BOOKING_BUSY and its retry, so it owns this.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: a P2028 raised for a transaction's own timeout is reported as a retryable BOOKING_BUSY, and saturation is detected by a pg-pool message string; ticket 12 (now ticket 54) defines BOOKING_BUSY and its retry, so it owns this.
 - **Remediation:** Pin the message in a test against the real driver (hold-busy.test.ts partly does this) and note the coupling next to the constant. Consider limiting P2028 to the start-wait case if the error meta allows.
-- **Target:** ticket 12 (`issues/12-lock-timeout-and-deadlock-retry.md`)
+- **Target:** ticket 54 (`issues/54-transaction-timeouts-and-retries.md`)
 - **Blocks:** none
 - **Acceptance:** none
 - **Resolution:** none
@@ -1712,6 +1715,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-05: recorded: LOW maintainability at `packages/booking/src/booking-service.ts:286`, standards axis (ticket 10 review-3 standards, run 20261105-143619)
   - 2026-11-06: triaged: CORRECTNESS, owned by ticket 12, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-06: re-planned for ticket 54 (`issues/54-transaction-timeouts-and-retries.md`): ticket 12 was split into tickets 54-57 after rejected runs 20261106-132615 and 20261106-165157 (user decision, 2026-11-06)
 
 ### TD-068: SOLD/IN_CHECKOUT test re-implements settleWithin inline
 
@@ -1793,16 +1797,16 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
-- **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
+- **Triage:** 2026-11-06: user decision to split ticket 12 after two rejected runs; owner moved to ticket 55
 - **Escalation:** none
 - **Source:** ticket 10 (`10-hot-seat-race-and-fast-path`)
 - **Evidence:** `.ralph/host-review/20261105-153541-378/10-hot-seat-race-and-fast-path.standards.json`
 - **Components:** `packages/booking/src/hold-busy.test.ts:70`
 - **Problem:** Both saturation tests start an occupying transaction and then sleep 50 ms, assuming it has taken the pool's only connection. Nothing signals that the occupier's SELECT 1 has run. The same pattern is in apps/web/src/server/routers/booking.test.ts at lines 207-211.
 - **Impact:** On a slow or loaded CI machine a holdSeats call can get the connection before the occupier does. The call then succeeds or fails differently, and the BOOKING_BUSY assertion fails intermittently.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows. Triage 2026-11-06: the saturation tests rely on a 50 ms sleep to occupy the pool; ticket 12 extends exactly these BOOKING_BUSY tests, so it owns this.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows. Triage 2026-11-06: the saturation tests rely on a 50 ms sleep to occupy the pool; ticket 12 (now ticket 55) extends exactly these BOOKING_BUSY tests, so it owns this.
 - **Remediation:** Resolve a promise from inside the occupier transaction after SELECT 1 and await it, as lockSeatElsewhere does with lockTaken, instead of sleeping.
-- **Target:** ticket 12 (`issues/12-lock-timeout-and-deadlock-retry.md`)
+- **Target:** ticket 55 (`issues/55-deterministic-transaction-tests.md`)
 - **Blocks:** none
 - **Acceptance:** none
 - **Resolution:** none
@@ -1811,6 +1815,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-05: recorded: LOW missing_test at `packages/booking/src/hold-busy.test.ts:70`, standards axis (ticket 10 host review standards, run 20261105-153541-378)
   - 2026-11-06: triaged: VERIFICATION, owned by ticket 12, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-06: re-planned for ticket 55 (`issues/55-deterministic-transaction-tests.md`): ticket 12 was split into tickets 54-57 after rejected runs 20261106-132615 and 20261106-165157 (user decision, 2026-11-06)
 
 ### TD-072: payment-flow tests share one durable consumer, so a test can receive an earlier test's unacked event
 

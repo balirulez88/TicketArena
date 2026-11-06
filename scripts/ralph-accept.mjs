@@ -217,6 +217,21 @@ function lsTree(sha, dir) {
   return gitOut("ls-tree", "--name-only", sha, `${dir}/`).split("\n").filter(Boolean);
 }
 
+/**
+ * Whether `sha`'s own tree holds a regular file at exactly `path`: what a RESOLVED debt entry's
+ * Verification must name. Judged in the candidate, not the host's checkout, because the slice may
+ * add the test itself and an ignored host file must never vouch for it. A read-only object lookup
+ * with literal pathspecs, so `*` or `:(glob)` match nothing; directories and symlinks do not count.
+ */
+function fileInTree(sha) {
+  return (path) => {
+    const result = git(["--literal-pathspecs", "ls-tree", "-z", sha, "--", path]);
+    const [entry = ""] = result.stdout.split("\0");
+    const match = /^(100644|100755) blob [0-9a-f]+\t(.*)$/s.exec(entry);
+    return result.status === 0 && match !== null && match[2] === path;
+  };
+}
+
 // Raw diff without renames, textconv or external drivers: modes, status and path of every change.
 function changes(from, to) {
   const out = gitOut(
@@ -1222,7 +1237,9 @@ function reviewMerges(merges, { base, label }) {
       blocking: result.decision.blocking,
     });
   }
-  return { register: recordHostFindings(merges.at(-1).merge, base, findings, label) };
+  // The register's evidence is judged in this one commit, here and again before the host commits it.
+  const evidence = merges.at(-1).merge;
+  return { register: recordHostFindings(evidence, base, findings, label), evidence };
 }
 
 /**
@@ -1256,7 +1273,7 @@ function recordHostFindings(tip, base, reviews, label) {
     errors.push(...result.errors);
     register = result.register;
   }
-  errors.push(...validateRegister(register));
+  errors.push(...validateRegister(register, { exists: fileInTree(tip) }));
   if (errors.length > 0) {
     refuse(`the debt register: ${errors.join("; ")}`);
   }
@@ -1395,7 +1412,7 @@ function apply({ tip, outcomes, pause, quarantines, review }, { base, namespace 
   if (review?.register) {
     // The host's review is the authoritative one, so its deferred findings reach the register in
     // the host's own commit, after the merge it approved.
-    const errors = checkRegisterText(review.register, { root });
+    const errors = checkRegisterText(review.register, { exists: fileInTree(review.evidence) });
     if (errors.length > 0) {
       throw new Error(`the host review's register is invalid: ${errors.join("; ")}`);
     }

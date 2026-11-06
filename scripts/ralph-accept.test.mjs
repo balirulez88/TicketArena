@@ -327,6 +327,54 @@ const snapshot = (host) => ({
     : "",
 });
 
+/** A host whose register holds one OPEN entry, TD-001, recorded from an approved review. */
+function hostWithDebt() {
+  const host = hostRepo();
+  const finding = {
+    axis: "standards",
+    severity: "MEDIUM",
+    kind: "defect",
+    file: "app.txt",
+    line: 1,
+    rule: "r",
+    title: "an old problem",
+    problem: "p",
+    impact: "i",
+    recommendation: "fix it",
+    debt: "",
+  };
+  const decision = { verdict: "approved", blocking: ["CRITICAL", "HIGH"], findings: [finding] };
+  write(host, ".ralph/decision.json", JSON.stringify(decision));
+  sh(host, process.execPath, [
+    "scripts/ralph-debt.mjs",
+    "record",
+    "--register",
+    "docs/technical-debt.md",
+    "--decision",
+    ".ralph/decision.json",
+    "--ticket",
+    "issues/01-demo.md",
+    "--run",
+    RUN,
+    "--round",
+    "1",
+    "--date",
+    "2026-11-04",
+  ]);
+  git(host, "commit", "--quiet", "-am", "record debt");
+  return host;
+}
+
+/** Marks TD-001 RESOLVED in a slice's register, naming `verification` as its evidence. */
+function resolveDebt(dir, verification) {
+  const path = join(dir, "docs", "technical-debt.md");
+  const text = readFileSync(path, "utf8")
+    .replace("- **Status:** OPEN", "- **Status:** RESOLVED")
+    .replace("- **Resolution:** none", "- **Resolution:** fixed in this slice")
+    .replace("- **Verification:** none", `- **Verification:** ${verification}`);
+  writeFileSync(path, text);
+}
+
 /** Runs a forged result and checks it was refused without any trace on the host. */
 function assertRefused(host, run, options) {
   const before = snapshot(host);
@@ -1231,6 +1279,105 @@ describe("ralph-accept: the host's own review of the exact candidate (TD-058)", 
     const register = readFileSync(join(host, "docs", "technical-debt.md"), "utf8");
     assert.match(register, /stub MEDIUM finding/);
     assert.match(register, /ticket 01 host review/);
+    assert.equal(git(host, "status", "--porcelain"), "");
+  });
+
+  // A slice may resolve a debt entry with a test it adds itself: the evidence is checked in the
+  // candidate's own tree, never in the host's checkout, which has neither its files nor its gaps.
+  it("accepts a RESOLVED entry whose verification test the slice itself adds", () => {
+    const host = hostWithDebt();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "01-demo", {
+      change: (dir) => {
+        write(dir, "packages/demo/src/fixed.test.ts", "test('fixed', () => {});\n");
+        resolveDebt(dir, "`packages/demo/src/fixed.test.ts::fixed`");
+      },
+    });
+    const result = accept(host, finish(host, ws), { base });
+    assert.equal(result.code, 0, result.output);
+    assert.match(
+      readFileSync(join(host, "docs", "technical-debt.md"), "utf8"),
+      /\*\*Status:\*\* RESOLVED/,
+    );
+  });
+
+  it("refuses a RESOLVED entry whose verification test is missing from the candidate", () => {
+    const host = hostWithDebt();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "01-demo", {
+      change: (dir) => resolveDebt(dir, "`packages/demo/src/missing.test.ts::fixed`"),
+    });
+    const result = assertRefused(host, finish(host, ws), { base });
+    assert.match(
+      result.output,
+      /TD-001: a RESOLVED entry needs Verification naming an existing test/,
+    );
+  });
+
+  it("refuses verification that exists only on the host, outside the candidate's tree", () => {
+    const host = hostWithDebt();
+    // Ignored, so the host's checkout stays clean: only the file system has it, Git does not.
+    write(host, "secrets/host-only.test.ts", "test('host', () => {});\n");
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "01-demo", {
+      change: (dir) => resolveDebt(dir, "`secrets/host-only.test.ts::host`"),
+    });
+    const result = assertRefused(host, finish(host, ws), { base });
+    assert.match(
+      result.output,
+      /TD-001: a RESOLVED entry needs Verification naming an existing test/,
+    );
+  });
+
+  // Only a file whose name is exactly the path counts: a directory, or a pattern that would match
+  // other files, is refused by that exact-name check whatever Git's pathspec matching does.
+  it("refuses verification naming a directory or a pattern instead of a test file", () => {
+    for (const verification of ["`packages/demo`", "`packages/demo/*.json`"]) {
+      const host = hostWithDebt();
+      const base = git(host, "rev-parse", "main");
+      const ws = container(host);
+      merge(ws, "01-demo", { change: (dir) => resolveDebt(dir, verification) });
+      const result = assertRefused(host, finish(host, ws), { base });
+      assert.match(result.output, /a RESOLVED entry needs Verification naming an existing test/);
+    }
+  });
+
+  // Paths are matched literally: `[x]` names the file `[x].test.ts`, not a pattern for `x.test.ts`.
+  // (ls-tree matches its paths literally already; `--literal-pathspecs` keeps it so if that changes.)
+  it("finds a verification test whose name contains pattern characters", () => {
+    const host = hostWithDebt();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "01-demo", {
+      change: (dir) => {
+        write(dir, "packages/demo/src/[x].test.ts", "test('x', () => {});\n");
+        resolveDebt(dir, "`packages/demo/src/[x].test.ts::x`");
+      },
+    });
+    const result = accept(host, finish(host, ws), { base });
+    assert.equal(result.code, 0, result.output);
+  });
+
+  // The host's own debt commit re-checks the register it writes, against the same candidate tree.
+  it("records deferred findings next to an entry the slice resolved with its own new test", () => {
+    const host = hostWithDebt();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    const { merge: tip } = merge(ws, "01-demo", {
+      change: (dir) => {
+        write(dir, "packages/demo/src/fixed.test.ts", "test('fixed', () => {});\n");
+        resolveDebt(dir, "`packages/demo/src/fixed.test.ts::fixed`");
+      },
+    });
+    const result = accept(host, finish(host, ws), { base, review: "medium" });
+    assert.equal(result.code, 0, result.output);
+    assert.equal(git(host, "rev-parse", "main^"), tip);
+    const register = readFileSync(join(host, "docs", "technical-debt.md"), "utf8");
+    assert.match(register, /\*\*Status:\*\* RESOLVED/);
+    assert.match(register, /stub MEDIUM finding/);
     assert.equal(git(host, "status", "--porcelain"), "");
   });
 

@@ -333,7 +333,9 @@ Guarantees, each covered by `scripts/ralph-debt.test.mjs` or `scripts/ralph-loop
 - **Evidence for resolutions.** `check` refuses `RESOLVED` without a `Resolution` and a
   `Verification` naming an existing test file; reviewers judge whether the test proves it; on
   merge, `record` adds a `resolution verified` history line. A resolved entry reported again is
-  reopened.
+  reopened. The host's importer judges that evidence in the candidate commit's own Git tree
+  (a regular file at exactly that path, read with `git ls-tree`, nothing executed), so a slice
+  may resolve an entry with a test it adds, and a file only the host has never counts.
 - **Nothing disappears.** `record` compares with the base branch's register and rejects the slice
   if an entry was removed. An escalated entry cannot stay `OPEN` or `ACCEPTED_RISK`.
 

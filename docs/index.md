@@ -43,7 +43,7 @@ below shows what is built.
 | Async messaging     | relay and consumer runner                     | [messaging/](messaging/index.md)       |
 | Agent workflow & CI | operational                                   | [workflow/](workflow/index.md)         |
 | Technical debt      | tracked, triaged, gated (ADR 0016)            | [technical-debt.md](technical-debt.md) |
-| Decisions (ADRs)    | 16 accepted                                   | [adr/](adr/index.md)                   |
+| Decisions (ADRs)    | 17 accepted                                   | [adr/](adr/index.md)                   |
 | Feature specs       | MVP ready                                     | [specs/](specs/index.md)               |
 | Domain vocabulary   | seeded                                        | [glossary.md](glossary.md)             |
 
@@ -63,6 +63,7 @@ below shows what is built.
 - `packages/messaging` and `apps/worker`: the `MessageBus` port with its JetStream adapter, the outbox relay (250 ms, batch of 100), the consumer runner and the worker app with `/health`.
 - Structured logging: each app injects a `pino` logger; booking, the relay and the consumer runner log with a child logger bound to `correlationId`/`causationId` (plus `holdId`, `orderId`, `paymentId`). See [architecture/](architecture/index.md#logging-and-ids).
 - Quality gate: Biome (warnings fail), strict `tsc`, Vitest, enforced by `ralph-loop.sh`.
+- Execution drivers: `ralph-loop.sh` (default) and the opt-in lead driver (`RALPH_DRIVER=lead`, [ADR 0017](adr/0017-opt-in-lead-driver.md)); the host judges both the same way.
 
 A buyer can hold up to 6 seats per event in one all-or-nothing action (the limit counts held, in-checkout and sold seats, enforced under a per-buyer advisory lock) and place an order for the hold; the mock Payment service captures it and the booking saga confirms the order (`CONFIRMED`, seats `SOLD`, ledger `APPLIED`) and the mock Notification service records one confirmation per channel. Concurrent holds on one seat yield exactly one winner; visibly taken seats are refused by a lock-free snapshot, and per-event `hold_ok`/`seat_unavailable`/`race_lost` counters go to Redis best-effort. Failures, late payments and refunds are still to come; no queue yet. Remaining features arrive as tickets split from the
 [MVP spec](specs/ticketarena-mvp.md) by `/to-tickets`.

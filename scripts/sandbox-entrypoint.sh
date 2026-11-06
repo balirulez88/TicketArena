@@ -26,6 +26,10 @@ readonly WORKSPACE="${HOME}/workspace"
 readonly STATE="${HOME}/ralph-state"
 readonly BASE_BRANCH="${RALPH_BASE_BRANCH:-main}"
 readonly VERIFY_ROOT=/workspace
+# The image carries its own copy of the choice of driver (ADR 0017), so what runs is not decided
+# by the workspace the agent can edit.
+# shellcheck source=ralph-driver.sh
+source /usr/local/lib/ralph/ralph-driver.sh
 
 # The command of a root package.json script (protected: no run can change it), run with bash, not
 # `pnpm run`, which would install first and needs the network.
@@ -146,6 +150,11 @@ if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
   exit 1
 fi
 
+# An unknown driver, or the lead without --ticket, stops here: before the clone, the services
+# and any agent.
+ralph_driver_check "${RALPH_DRIVER:-}" "$@" || exit 2
+driver="$(ralph_driver_script "${RALPH_DRIVER:-}")"
+
 git config --global user.name "${GIT_AUTHOR_NAME:-Ralph Loop}"
 git config --global user.email "${GIT_AUTHOR_EMAIL:-ralph@localhost}"
 
@@ -164,8 +173,28 @@ sandbox_start_services
 # pause are results as well. The exit status is only a hint to the host: what the host accepts
 # is decided by validating the bundle.
 status=0
-RALPH_PUSH_REMOTE=origin RALPH_LOG_ROOT="${OUT}/logs" RALPH_STATE_DIR="${STATE}" \
-  ./ralph-loop.sh "$@" || status=$?
+if ralph_driver_forwards_signals "${driver}"; then
+  # As PID 1 this shell ignores a `docker stop` (SIGTERM) it has no handler for, and the container
+  # would be killed with no result.bundle and no logs. The lead driver stops its session and saves
+  # the work on a signal, so pass the signal on and wait for it to finish (ADR 0017). Ralph's own
+  # line below is unchanged.
+  RALPH_PUSH_REMOTE=origin RALPH_LOG_ROOT="${OUT}/logs" RALPH_STATE_DIR="${STATE}" \
+    "${driver}" "$@" &
+  driver_pid=$!
+  trap 'kill -TERM "${driver_pid}" 2>/dev/null || true' INT TERM
+  while kill -0 "${driver_pid}" 2>/dev/null; do
+    wait "${driver_pid}" || status=$?
+  done
+  # A signal can interrupt `wait` just as the driver exits; bash still remembers its status.
+  wait "${driver_pid}" 2>/dev/null && status=0 || {
+    rc=$?
+    ((rc == 127)) || status=$rc
+  }
+  trap - INT TERM
+else
+  RALPH_PUSH_REMOTE=origin RALPH_LOG_ROOT="${OUT}/logs" RALPH_STATE_DIR="${STATE}" \
+    "${driver}" "$@" || status=$?
+fi
 mkdir -p "${OUT}/state"
 cp -R "${STATE}/." "${OUT}/state/"
 git -C "${STAGING}" bundle create --quiet "${OUT}/result.bundle.tmp" --branches

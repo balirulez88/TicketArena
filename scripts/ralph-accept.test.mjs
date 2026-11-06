@@ -1935,3 +1935,141 @@ describe("ralph-accept: the debt gate (ADR 0016)", () => {
     assert.equal(result.code, 0, result.output);
   });
 });
+
+// --- The lead driver's output (ADR 0017) ---------------------------------------------------------
+// The real scripts/ralph-lead.sh runs in the "container" clone with a stub in place of `claude`,
+// and the real importer judges what it leaves behind. The driver is not trusted to have done the
+// right thing: the importer decides, exactly as for Ralph's output.
+
+const LEAD_STUB = `#!/usr/bin/env bash
+case "\${STUB_LEAD:-ok}" in
+  ok)
+    echo "export const feature = 1;" >feature.ts
+    echo "test('feature', () => {});" >feature.test.ts
+    echo '{"type":"result","is_error":false,"total_cost_usd":0.1,"usage":{"output_tokens":5}}'
+    ;;
+  protected)
+    echo "// planted" >>scripts/ralph-accept.mjs
+    echo "test('feature', () => {});" >feature.test.ts
+    ;;
+  fail)
+    echo "export const partial = 1;" >partial.ts
+    exit 1
+    ;;
+esac
+`;
+
+/** A host whose base commit carries the drivers, as it will once they are merged. */
+function leadHost() {
+  const host = hostRepo();
+  copyFileSync(join(source, "ralph-loop.sh"), join(host, "ralph-loop.sh"));
+  for (const script of [
+    "ralph-lead.sh",
+    "ralph-driver.sh",
+    "ralph-usage.mjs",
+    "ralph-red.mjs",
+    "ralph-provider.mjs",
+  ]) {
+    copyFileSync(join(source, "scripts", script), join(host, "scripts", script));
+  }
+  write(host, "stub/lead.sh", LEAD_STUB);
+  git(host, "add", "-A");
+  git(host, "commit", "--quiet", "-m", "add the drivers");
+  return host;
+}
+
+/** Runs the lead driver in the container clone; returns the driver's exit status. */
+function runLeadDriver(host, ws, { lead = "ok", red = "pass" } = {}) {
+  const run = join(host, ".ralph", "sandbox", "run1");
+  mkdirSync(join(run, "out", "logs"), { recursive: true });
+  const script = [
+    "source ./scripts/ralph-lead.sh",
+    'run_gate() { : >"$1"; }',
+    `verify_red() { [[ "${red}" == pass ]] || return 1; : >"$1"; }`,
+    "lead_main --ticket 01",
+  ].join("\n");
+  const result = spawnSync("bash", ["-c", script], {
+    cwd: ws,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ...identity,
+      RALPH_AGENT_CMD: "bash stub/lead.sh",
+      RALPH_REVIEW_CMD: "bash stub/lead.sh",
+      RALPH_LEAD_CMD: "bash stub/lead.sh",
+      RALPH_LOG_ROOT: join(run, "out", "logs"),
+      RALPH_STATE_DIR: join(run, "out", "state-in"),
+      STUB_LEAD: lead,
+    },
+  });
+  return { status: result.status, output: result.stderr };
+}
+
+describe("ralph-accept: the lead driver's output (ADR 0017)", () => {
+  it("accepts its merge through the same validation, re-gate and host review", () => {
+    const host = leadHost();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    const driver = runLeadDriver(host, ws);
+    assert.equal(driver.status, 0, driver.output);
+    const tip = git(ws, "rev-parse", "main");
+    const result = accept(host, finish(host, ws, { logs: false }), { base });
+    assert.equal(result.code, 0, result.output);
+    assert.equal(git(host, "rev-parse", "main"), tip);
+    assert.deepEqual(result.verified, [tip], "the host re-gates the exact merged tree");
+    assert.equal(result.reviewed.length, 2, "the host's own two reviewers judged it");
+    assert.ok(existsSync(join(host, "issues", "done", "01-demo.md")));
+    assert.ok(existsSync(join(host, "feature.test.ts")));
+  });
+
+  it("still refuses a candidate that touches a protected path, whatever the driver judged", () => {
+    const host = leadHost();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    const driver = runLeadDriver(host, ws, { lead: "protected" });
+    assert.equal(driver.status, 0, "the driver does not enforce path rules; the host does");
+    const result = assertRefused(host, finish(host, ws, { logs: false }), { base });
+    assert.match(result.output, /protected|scripts\/ralph-accept\.mjs/i);
+    assert.deepEqual(result.verified, [], "an untrusted tree is never even re-gated");
+  });
+
+  it("imports a rejection as Ralph's blocked-status commit and quarantine branch", () => {
+    const host = leadHost();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    const driver = runLeadDriver(host, ws, { red: "fail" });
+    assert.notEqual(driver.status, 0);
+    const run = finish(host, ws, { logs: false });
+    const result = accept(host, run, { base, exit: driver.status });
+    assert.equal(result.code, 1, result.output);
+    assert.match(
+      readFileSync(join(host, "issues", "01-demo.md"), "utf8"),
+      /\*\*Status:\*\* blocked/,
+    );
+    assert.match(git(host, "branch", "--list", "rejected/01-demo-*"), /rejected\/01-demo-/);
+    assert.equal(JSON.parse(readFileSync(join(run, "verdict.json"), "utf8")).outcome, "rejected");
+  });
+
+  it("leaves the host untouched when the lead session failed, and keeps the work as evidence", () => {
+    const host = leadHost();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    const driver = runLeadDriver(host, ws, { lead: "fail" });
+    assert.notEqual(driver.status, 0);
+    const run = finish(host, ws, { logs: false });
+    const before = snapshot(host);
+    const result = accept(host, run, { base, exit: driver.status });
+    assert.equal(result.code, 1, result.output);
+    assert.deepEqual(snapshot(host), before, "a stopped run changes nothing on the host");
+    assert.match(readFileSync(join(host, "issues", "01-demo.md"), "utf8"), /ready-for-agent/);
+    const [logRun] = readdirSync(join(host, ".ralph", "logs")).filter((name) =>
+      /^\d{8}-\d{6}$/.test(name),
+    );
+    assert.match(
+      readFileSync(join(host, ".ralph", "logs", logRun, "01-demo.lead-work.patch"), "utf8"),
+      /partial\.ts/,
+      "the lead's work survives on the host as a patch in the imported logs",
+    );
+    assert.equal(JSON.parse(readFileSync(join(run, "verdict.json"), "utf8")).outcome, "failed");
+  });
+});

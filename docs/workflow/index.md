@@ -4,14 +4,14 @@
 
 ## Pipeline
 
-| Step | Skill / tool                   | Output                              |
-| ---- | ------------------------------ | ----------------------------------- |
-| 1    | `/grill-me` (→ `grilling`)     | Shared understanding, decisions     |
-| 2    | `/to-spec`                     | `docs/specs/<feature>.md`           |
-| 3    | `/to-tickets`                  | `issues/<NN>-<slug>.md`             |
-| 4    | `ralph-loop.sh` (in sandbox)   | One green, atomic commit per ticket |
-| 5    | `/update-docs` (inside step 4) | Updated `/docs` maps                |
-| 6    | `/code-review` (inside step 4) | Standards + Spec reports, per slice |
+| Step | Skill / tool                                             | Output                              |
+| ---- | -------------------------------------------------------- | ----------------------------------- |
+| 1    | `/grill-me` (→ `grilling`)                               | Shared understanding, decisions     |
+| 2    | `/to-spec`                                               | `docs/specs/<feature>.md`           |
+| 3    | `/to-tickets`                                            | `issues/<NN>-<slug>.md`             |
+| 4    | `ralph-loop.sh` (in sandbox); opt-in `RALPH_DRIVER=lead` | One green, atomic commit per ticket |
+| 5    | `/update-docs` (inside step 4)                           | Updated `/docs` maps                |
+| 6    | `/code-review` (inside step 4)                           | Standards + Spec reports, per slice |
 
 Skill sources and provenance: [`skills/README.md`](../../skills/README.md).
 
@@ -369,6 +369,35 @@ commits. `node scripts/ralph-debt.mjs gate` prints every unfinished ticket's ver
 
 Scenarios: `scripts/ralph-debt.test.mjs`, `scripts/ralph-accept.test.mjs` (the debt gate),
 `scripts/ralph-batch.test.mjs` (needs-triage, resume, independent and blocked tickets).
+
+## Lead driver (opt-in, [ADR 0017](../adr/0017-opt-in-lead-driver.md))
+
+`RALPH_DRIVER=lead pnpm sandbox --ticket NN` runs one ticket with a single Lead session instead of
+Ralph's phases. Unset or `ralph` runs `ralph-loop.sh`, unchanged; any other value, and the lead
+without `--ticket`, exit 2 before a container exists (`scripts/ralph-driver.sh`). Discovery
+(`/grill-me`, `/to-spec`, `/to-tickets`) is untouched: the lead consumes a `ready-for-agent` ticket.
+
+| Step   | Who                                        | What                                                                                                                                                              |
+| ------ | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Work   | one Lead session (`scripts/ralph-lead.sh`) | keeps its context for the ticket; delegates all editing to `ticketarena-implementer`; may call the read-only `ticketarena-reviewer` once (advisory, no loop)      |
+| Judge  | the driver, after the session              | git intact (slice branch on the base, base unmoved); **RED re-proved** (base + only the candidate's test files through `verify_red`); `run_gate` incl. debt rules |
+| Land   | `finalize_slice` / `reject_slice`          | the same one-commit squash, archive and merge, or quarantine branch and `blocked` ticket                                                                          |
+| Accept | the host, `ralph-accept.mjs`               | unchanged: path rules, debt gate, hardened re-gate, isolated Standards and Spec review of the exact commit                                                        |
+- **One session, no retry, no fallback.** A failed, timed-out, provider-limited or interrupted
+  session is never repeated, never handed to Ralph and never blocks the ticket. The work is saved
+  as `logs/<slug>.lead-work.patch` (imported by the host), `main` is untouched, exit 1. The
+  entrypoint forwards `SIGTERM`/`SIGINT` to the driver so `docker stop` ends this way, not in a
+  kill.
+- **Tests and the host.** `pnpm test:harness` (`scripts/ralph-lead.test.sh`, plus the importer
+  scenarios in `scripts/ralph-accept.test.mjs`) and `pnpm test:sandbox` (real Docker, scenarios
+  `lead-*`).
+- **Usage.** The Lead's JSON result is kept as `<slug>.lead.json`; `node scripts/ralph-usage.mjs
+  .ralph/logs/<run> .ralph/host-review/<run>` totals tokens and the CLI's reported cost. The dollar figure is
+  API-price arithmetic, not subscription usage: compare tokens and read the plan's own meter.
+  Tokens are summed from `modelUsage`, which includes subagent turns; the result's top-level
+  `usage` counts only the session's own (measured on a one-subagent call).
+- `RALPH_LEAD_CMD`, `RALPH_LEAD_TIMEOUT` (default 7200 s) and `RALPH_LEAD_MAX_BUDGET_USD` (optional
+  cap) tune a run.
 
 ## Run artifacts
 

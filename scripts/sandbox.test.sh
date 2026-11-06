@@ -36,7 +36,7 @@ new_host_repo() {
   cp "${SOURCE_ROOT}/Dockerfile" "${SOURCE_ROOT}/.dockerignore" "${SOURCE_ROOT}/ralph-loop.sh" \
     "${dir}/"
   cp "${SOURCE_ROOT}/infra/nats/nats.conf" "${dir}/infra/nats/"
-  cp "${SOURCE_ROOT}"/scripts/{sandbox.sh,sandbox-entrypoint.sh,sandbox-services.sh,ralph-review.mjs,ralph-review-prompt.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs,ralph-accept.mjs,ralph-verify.mjs,ralph-host-review.mjs,ralph-bins.mjs,ralph-toolchain.mjs} \
+  cp "${SOURCE_ROOT}"/scripts/{sandbox.sh,sandbox-entrypoint.sh,sandbox-services.sh,ralph-review.mjs,ralph-review-prompt.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs,ralph-accept.mjs,ralph-verify.mjs,ralph-host-review.mjs,ralph-bins.mjs,ralph-toolchain.mjs,ralph-driver.sh,ralph-lead.sh,ralph-usage.mjs} \
     "${dir}/scripts/"
   # Stands in for the CI check the batch runs on the host: a forgery target.
   printf '#!/usr/bin/env bash\nexit 2\n' >"${dir}/scripts/ralph-ci.sh"
@@ -213,13 +213,42 @@ EOF
 exec node stub/ralph-stub-reviewer.mjs "$@"
 EOF
 
+  # The lead driver's stand-in for `claude` (ADR 0017). STUB_LEAD picks what it does: `ok` writes
+  # a failing-then-passing test and the feature, `fail` dies with work left behind, `notest`
+  # writes no test, `evil` also rewrites a protected host script, `slow` signals that it runs
+  # (into the output mount) and waits to be stopped.
+  cat >"${dir}/stub/lead.sh" <<'EOF'
+#!/usr/bin/env bash
+case "${STUB_LEAD:-ok}" in
+  ok | notest | evil | fail | slow)
+    mkdir -p packages/demo/src
+    [[ "${STUB_LEAD}" == notest || "${STUB_LEAD}" == fail || "${STUB_LEAD}" == slow ]] ||
+      echo "test" >packages/demo/src/demo.test.ts
+    echo feature >feature.txt
+    ;;
+esac
+case "${STUB_LEAD:-ok}" in
+  evil) printf '#!/usr/bin/env bash\nexit 0\n' >scripts/ralph-ci.sh ;;
+  fail)
+    echo "partial work" >partial.txt
+    exit 1
+    ;;
+  slow)
+    echo "partial work" >partial.txt
+    : >/ralph-out/lead-started
+    exec sleep 600
+    ;;
+esac
+printf '{"type":"result","is_error":false,"total_cost_usd":0.25,"usage":{"input_tokens":2,"output_tokens":7}}\n'
+EOF
+
   git -C "${dir}" init --quiet --initial-branch=main
   git -C "${dir}" config core.autocrlf false
   git -C "${dir}" config user.name "Sandbox Test"
   git -C "${dir}" config user.email sandbox-test@localhost
   git -C "${dir}" add -A
   # As in the real repo; `cp` on Windows does not carry the executable bit.
-  git -C "${dir}" update-index --chmod=+x ralph-loop.sh scripts/sandbox.sh
+  git -C "${dir}" update-index --chmod=+x ralph-loop.sh scripts/sandbox.sh scripts/ralph-lead.sh
   git -C "${dir}" commit --quiet -m init
   printf '%s\n' "${dir}"
 }
@@ -250,7 +279,8 @@ check() {
   fi
 }
 # SANDBOX_TEST_ONLY=<scenario> runs one scenario: merge, reject, pause, forge-merge, forge-pause,
-# evil-test, evil-bin, host-review, dirty.
+# evil-test, evil-bin, host-review, dirty, and the lead driver (ADR 0017): lead-merge,
+# lead-refused, lead-stop, lead-reject, lead-evil, lead-interrupt.
 wanted() { [[ -z "${SANDBOX_TEST_ONLY:-}" || "${SANDBOX_TEST_ONLY}" == "$1" ]]; }
 show_output() { ((failures == 0)) || sed 's/^/      | /' "$1.out" | tail -n 40; }
 
@@ -423,6 +453,123 @@ code="$(run_sandbox "${host}" "" clean)"
 check "sandbox refuses to start" "[[ ${code} == 1 ]] && grep -q 'not clean' '${host}.out'"
 check "host main untouched" "[[ \$(git -C '${host}' rev-parse main) == ${main_before} ]]"
 check "local edit preserved" "grep -q 'my unsaved edit' '${host}/notes.md'"
+show_output "${host}"
+fi
+
+# --- The opt-in lead driver (ADR 0017): the same boundary, the same host checks -----------------------
+
+# Usage: run_lead_sandbox <host> <stub lead mode> <RALPH_DRIVER> <sandbox.sh args...>; prints the
+# exit code. The Ralph agent command is set too, to prove the lead driver never starts it.
+run_lead_sandbox() {
+  local dir=$1 mode=$2 driver=$3
+  shift 3
+  ANTHROPIC_API_KEY=placeholder-unused-by-stub-agents CLAUDE_CODE_OAUTH_TOKEN="" \
+    RALPH_TEST_RUNNER="node ../../stub/vitest.mjs" \
+    RALPH_DRIVER="${driver}" RALPH_LEAD_CMD="env STUB_LEAD=${mode} bash stub/lead.sh" \
+    RALPH_AGENT_CMD="env STUB_MODE= bash stub/agent.sh" \
+    RALPH_REVIEW_CMD="env STUB_REVIEW=clean node stub/ralph-stub-reviewer.mjs" \
+    RALPH_MAX_ATTEMPTS=1 RALPH_MAX_REVIEW_ROUNDS=1 RALPH_BASE_BRANCH="" \
+    RALPH_PROVIDER_RETRIES=0 \
+    RALPH_HOST_REVIEW_CMD="env STUB_REVIEW=clean bash stub/probe-reviewer.sh" \
+    bash "${dir}/scripts/sandbox.sh" "$@" >>"${dir}.out" 2>&1 && echo 0 || echo $?
+}
+# The sessions a run started, from the logs the host imported.
+sessions_of() { cat "$1"/.ralph/logs/*/sessions.tsv 2>/dev/null || true; }
+
+if wanted lead-merge; then
+echo "lead driver: a merge passes the same host checks:"
+host="$(new_host_repo lead-merge)"
+code="$(run_lead_sandbox "${host}" ok lead --ticket 01)"
+check "sandbox exits 0" "[[ ${code} == 0 ]]"
+check "slice merged into host main" "git -C '${host}' log --format=%s main | grep -q '^Merge slice/01-demo: Demo ticket'"
+check "the slice says it came from the lead driver" \
+  "git -C '${host}' log -1 --format=%B main^2 | grep -q 'lead driver'"
+check "host re-ran the gate without an agent" "grep -q 'sandbox: verifying' '${host}.out'"
+check "the host's own reviewers approved the exact slice" \
+  "grep -q \"host review of \$(git -C '${host}' rev-parse --short=12 slice/01-demo): approved\" '${host}.out'"
+check "one lead session, and none of Ralph's phases" \
+  "[[ \$(sessions_of '${host}' | grep -c ' lead') == 1 ]] && ! sessions_of '${host}' | grep -qE ' (red|green|refactor|docs|review)'"
+check "RED was re-proved by the harness, against the candidate's tests alone" \
+  "grep -q 'ralph-red' '${host}'/.ralph/logs/*/01-demo.lead.red.log"
+check "usage is reported on the host with its caveat" \
+  "grep -q '\$0.2500' '${host}'/.ralph/logs/*/usage.md && grep -q 'not subscription usage' '${host}'/.ralph/logs/*/usage.md"
+show_output "${host}"
+fi
+
+if wanted lead-refused; then
+echo "lead driver: a bad choice costs nothing:"
+host="$(new_host_repo lead-refused)"
+before="$(fingerprint "${host}")"
+code="$(run_lead_sandbox "${host}" ok lead --once)"
+check "the lead without --ticket exits 2" "[[ ${code} == 2 ]] && grep -q 'needs an explicit --ticket' '${host}.out'"
+code="$(run_lead_sandbox "${host}" ok leed --ticket 01)"
+check "an unknown driver exits 2, it is not defaulted" "[[ ${code} == 2 ]] && grep -q \"must be 'ralph'\" '${host}.out'"
+check "no run directory was even created" "[[ ! -d '${host}/.ralph/sandbox' ]]"
+check "host repository unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
+show_output "${host}"
+fi
+
+if wanted lead-stop; then
+echo "lead driver: a failed session stops safely, with no retry and no fallback:"
+host="$(new_host_repo lead-stop)"
+before="$(fingerprint "${host}")"
+code="$(run_lead_sandbox "${host}" fail lead --ticket 01)"
+check "sandbox exits 1" "[[ ${code} == 1 ]]"
+check "host repository, refs and checkout unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
+check "the ticket is not blocked" "[[ \$(status_on '${host}' main) == ready-for-agent ]]"
+check "no quarantine branch" "[[ -z \$(first_branch '${host}' 'rejected/*') ]]"
+check "the work survives on the host as a patch" \
+  "grep -q 'partial work' '${host}'/.ralph/logs/*/01-demo.lead-work.patch"
+check "exactly one lead session, no Ralph agent" \
+  "[[ \$(sessions_of '${host}' | grep -c ' lead') == 1 ]] && ! sessions_of '${host}' | grep -qE ' (red|green)'"
+show_output "${host}"
+fi
+
+if wanted lead-reject; then
+echo "lead driver: a candidate with no failing test is rejected like Ralph's:"
+host="$(new_host_repo lead-reject)"
+code="$(run_lead_sandbox "${host}" notest lead --ticket 01)"
+check "sandbox exits 1" "[[ ${code} == 1 ]]"
+rejected="$(first_branch "${host}" 'rejected/*')"
+check "quarantine branch on host" "[[ '${rejected}' == rejected/01-demo-* ]]"
+check "ticket blocked on host main" "[[ \$(status_on '${host}' main) == blocked ]]"
+check "work not merged into main" "! git -C '${host}' cat-file -e main:feature.txt 2>/dev/null"
+check "RED was refused for want of a test" "grep -q 'no test file was added' '${host}'/.ralph/logs/*/01-demo.lead.red.log"
+show_output "${host}"
+fi
+
+if wanted lead-evil; then
+echo "lead driver: an agent that rewrites a protected host script is still refused:"
+host="$(new_host_repo lead-evil)"
+before="$(fingerprint "${host}")"
+code="$(run_lead_sandbox "${host}" evil lead --ticket 01)"
+check "sandbox exits 3 (refused)" "[[ ${code} == 3 ]]"
+check "refused by the path rules" "grep -q 'scripts/ralph-ci.sh: protected' '${host}.out'"
+check "host repository, Git metadata and scripts unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
+check "forged CI check not on the host" "grep -q 'exit 2' '${host}/scripts/ralph-ci.sh'"
+show_output "${host}"
+fi
+
+if wanted lead-interrupt; then
+echo "lead driver: stopping the container saves the work and merges nothing:"
+host="$(new_host_repo lead-interrupt)"
+before="$(fingerprint "${host}")"
+(run_lead_sandbox "${host}" slow lead --ticket 01 >"${host}.code") &
+runner=$!
+for _ in $(seq 1 900); do
+  compgen -G "${host}/.ralph/sandbox/*/out/lead-started" >/dev/null && break
+  sleep 1
+done
+container="$(docker ps -q --filter ancestor=ticketarena-sandbox | head -n 1)"
+check "the lead is running in a container" "[[ -n '${container}' ]]"
+[[ -z "${container}" ]] || docker stop --time 120 "${container}" >/dev/null
+wait "${runner}" || true
+check "sandbox exits 1 (a stopped run)" "[[ \$(cat '${host}.code') == 1 ]]"
+check "host repository, refs and checkout unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
+check "the ticket is not blocked" "[[ \$(status_on '${host}' main) == ready-for-agent ]]"
+check "the session is recorded as interrupted" "sessions_of '${host}' | grep -q 'interrupted'"
+check "the work survives on the host as a patch" \
+  "grep -q 'partial work' '${host}'/.ralph/logs/*/01-demo.lead-work.patch"
 show_output "${host}"
 fi
 

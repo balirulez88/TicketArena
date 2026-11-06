@@ -23,3 +23,4 @@ number sequentially, and never rewrite an accepted decision; supersede it with a
 | [0014](0014-sandbox-trust-boundary.md)            | Sandbox trust boundary: bundles in, validated bundles out     | Accepted |
 | [0015](0015-review-and-verification-isolation.md) | Isolated host reviews and hardened, staged verification       | Accepted |
 | [0016](0016-risk-based-debt-gate.md)              | Risk-based technical debt gate                                | Accepted |
+| [0017](0017-opt-in-lead-driver.md)                | Opt-in lead driver for ticket execution                       | Accepted |

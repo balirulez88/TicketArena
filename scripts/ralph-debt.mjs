@@ -156,16 +156,13 @@ export function renderRegister({ preamble, entries, trailer }) {
 // --- Validation -------------------------------------------------------------------------------
 
 // Verification must point at something a later reader can re-run: a test file (`path` or
-// `path::test name`) that exists in the repository.
-function verifiedPaths(value, root) {
+// `path::test name`) that exists in the repository. `exists` decides what "exists" means.
+function verifiedPaths(value, exists) {
   return [...value.matchAll(/`([^`]+)`/g)]
     .map((match) => match[1].split("::")[0].trim())
     .filter(
       (path) =>
-        path.length > 0 &&
-        !isAbsolute(path) &&
-        !path.split(/[\\/]/).includes("..") &&
-        existsSync(join(root, path)),
+        path.length > 0 && !isAbsolute(path) && !path.split(/[\\/]/).includes("..") && exists(path),
     );
 }
 
@@ -189,7 +186,7 @@ function shapeErrors(entry) {
   return errors;
 }
 
-function statusErrors({ fields }, root) {
+function statusErrors({ fields }, exists) {
   const errors = [];
   if (NEEDS_JUSTIFICATION.includes(fields.Status) && !isSet(fields.Justification)) {
     errors.push(`a ${fields.Status} entry needs a Justification for the deferral`);
@@ -207,18 +204,25 @@ function statusErrors({ fields }, root) {
   if (!isSet(fields.Resolution)) {
     errors.push("a RESOLVED entry needs a Resolution");
   }
-  if (!isSet(fields.Verification) || verifiedPaths(fields.Verification, root).length === 0) {
+  if (!isSet(fields.Verification) || verifiedPaths(fields.Verification, exists).length === 0) {
     errors.push("a RESOLVED entry needs Verification naming an existing test in backticks");
   }
   return errors;
 }
 
-export function validateRegister(register, { root = "." } = {}) {
+/**
+ * `root` resolves Verification paths on the file system (the CLI and the in-sandbox gate). The
+ * host's importer passes `exists` instead, to judge evidence in the candidate commit's own tree.
+ */
+export function validateRegister(
+  register,
+  { root = ".", exists = (path) => existsSync(join(root, path)) } = {},
+) {
   const errors = [];
   const ids = new Set();
   const fingerprints = new Map();
   for (const entry of register.entries) {
-    const own = [...shapeErrors(entry), ...statusErrors(entry, root)];
+    const own = [...shapeErrors(entry), ...statusErrors(entry, exists)];
     if (ids.has(entry.id)) {
       own.push("duplicate id");
     }

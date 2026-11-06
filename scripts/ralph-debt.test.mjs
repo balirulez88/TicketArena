@@ -133,6 +133,24 @@ describe("register rules", () => {
     assert.deepEqual(validateRegister(register(resolved), { root }), []);
   });
 
+  it("judges verification with an injected exists check instead of the file system", () => {
+    const asked = [];
+    const resolved = entry("TD-001", {
+      Status: "RESOLVED",
+      Resolution: "fixed",
+      Verification: "`src/new.test.ts::a test the change adds`; `../outside.test.ts`",
+    });
+    const inTree = (path) => {
+      asked.push(path);
+      return path === "src/new.test.ts";
+    };
+    assert.deepEqual(validateRegister(register(resolved), { exists: inTree }), []);
+    // Only the path part is asked about, and a path leaving the repository never is.
+    assert.deepEqual(asked, ["src/new.test.ts"]);
+    const elsewhere = validateRegister(register(resolved), { exists: () => false }).join("\n");
+    assert.match(elsewhere, /Verification naming an existing test/);
+  });
+
   it("refuses a deferral without justification and a plan without a target", () => {
     assert.match(errorsOf(entry("TD-001", { Justification: "none" })), /needs a Justification/);
     assert.match(errorsOf(entry("TD-001", { Status: "PLANNED" })), /needs a Target/);

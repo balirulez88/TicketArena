@@ -36,10 +36,10 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 3      | 53  | 56    |
-| PLANNED       | 0        | 0    | 9      | 2   | 11    |
+| OPEN          | 0        | 0    | 3      | 51  | 54    |
+| PLANNED       | 0        | 0    | 9      | 1   | 10    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
-| RESOLVED      | 0        | 2    | 7      | 2   | 11    |
+| RESOLVED      | 0        | 2    | 7      | 5   | 14    |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 ## Entries
@@ -543,7 +543,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-026: placeOrder skips the buyer advisory lock of ADR 0005's lock order
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** LOW
 - **Escalation:** none
 - **Source:** ticket 05 (`05-place-order`)
@@ -554,11 +554,12 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** The advisory lock serializes the per-event buyer limit, which arrives with ticket 11; its AC2 makes placeOrder take the same lock first.
 - **Remediation:** Take pg_advisory_xact_lock(hash(eventId:buyerKey)) first in holdSeats and placeOrder, as ticket 11 AC2 specifies, with a test that races the two paths.
 - **Target:** ticket 11 (`issues/11-multi-seat-holds-and-buyer-limit.md`), AC2
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** Ticket 11 made `lockBuyer` (`pg_advisory_xact_lock(hashtextextended(eventId:buyerKey))`) the first statement of the locking transaction in both holdSeats and placeOrder, before the hold row and the seats by id. Tests now prove the order through Postgres itself: while a foreign transaction holds the buyer lock, each request is observed waiting on an advisory lock (`pg_locks` / `pg_blocking_pids`) and the hold row and seat rows it will need can still be locked `NOWAIT`. A hold and an order of one buyer started together both queue on the buyer lock and serialize, with the same outcome in either order and no partial hold.
+- **Verification:** `packages/booking/src/hold-buyer-limit.test.ts::holdSeats waits on the buyer lock before touching any seat row`; `packages/booking/src/hold-buyer-limit.test.ts::placeOrder waits on the buyer lock before locking the hold or its seats`; `packages/booking/src/hold-buyer-limit.test.ts::a hold of 2 seats racing the order of a 2-seat hold queues on the buyer lock (limit refused: false)`; `packages/booking/src/hold-buyer-limit.test.ts::a hold of 3 seats racing the order of a 4-seat hold queues on the buyer lock (limit refused: true)`
 - **Fingerprints:** none
 - **History:**
   - 2026-10-30: backfilled from an earlier review round; confirmed still present on main at 2513586 (correctness review of tickets 03-05, 2026-10-30)
+  - 2026-11-06: resolved on branch `fix/buyer-lock-order-tests` (human commit after ticket 11): the code fix landed with ticket 11 (8aeebeb); the tests above fail if holdSeats or placeOrder skips the buyer lock, and if placeOrder takes it after the hold row lock (mutation checks)
 
 ### TD-027: placeOrder fails with an unhandled error once the hold's seat.held outbox row is gone
 
@@ -1500,7 +1501,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-075: Lock-order tests rely on a fixed 400 ms sleep to show 'pending'
 
-- **Status:** OPEN
+- **Status:** RESOLVED
 - **Severity:** LOW
 - **Escalation:** none
 - **Source:** ticket 11 (`11-multi-seat-holds-and-buyer-limit`)
@@ -1511,11 +1512,12 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows.
 - **Remediation:** Confirm the wait through pg_stat_activity / pg_blocking_pids on the advisory lock, as hold-fast-path.test.ts does, instead of a fixed sleep. Alternatively assert that the placeOrder order row does not exist before release.
 - **Target:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** The sleep is gone. The lock holder records its `pg_backend_pid()`, and the tests poll `pg_locks` until the expected number of backends wait, not granted, on an advisory lock blocked by that pid (`pg_blocking_pids`); a request that skipped the buyer lock never appears there and the poll fails. The placeOrder test also locks the hold row and its seat `NOWAIT` while the order waits.
+- **Verification:** `packages/booking/src/hold-buyer-limit.test.ts::holdSeats waits on the buyer lock before touching any seat row`; `packages/booking/src/hold-buyer-limit.test.ts::placeOrder waits on the buyer lock before locking the hold or its seats`
 - **Fingerprints:** `packages/booking/src/hold-buyer-limit.test.ts#lock-order-tests-rely-on-a-fixed-400-ms-sleep-to-show-pendin`
 - **History:**
   - 2026-11-06: recorded: LOW missing_test at `packages/booking/src/hold-buyer-limit.test.ts:202`, standards axis (ticket 11 review-2 standards, run 20261106-073411)
+  - 2026-11-06: resolved on branch `fix/buyer-lock-order-tests` (human commit after ticket 11): both tests fail when the service skips the buyer lock (mutation checks)
 
 ### TD-076: buyer(), freeSeats(), service() and DB setup are copied across new test files
 
@@ -1557,7 +1559,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-078: LIMIT_EXCEEDED to CONFLICT mapping has no router test
 
-- **Status:** OPEN
+- **Status:** RESOLVED
 - **Severity:** LOW
 - **Escalation:** none
 - **Source:** ticket 11 (`11-multi-seat-holds-and-buyer-limit`)
@@ -1568,10 +1570,11 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows.
 - **Remediation:** Add a booking.test.ts case that holds 4 seats, then requests 3 more and expects code CONFLICT.
 - **Target:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** A router test holds six seats through tRPC, then asks for a seventh as the same guest: the answer is CONFLICT naming LIMIT_EXCEEDED, the seventh seat stays AVAILABLE with no hold or claim, and the buyer still has exactly one hold.
+- **Verification:** `apps/web/src/server/routers/booking.test.ts::a hold past the six-seat buyer limit is CONFLICT naming LIMIT_EXCEEDED and holds nothing`
 - **Fingerprints:** `apps/web/src/server/routers/booking.ts#limit-exceeded-to-conflict-mapping-has-no-router-test`; `apps/web/src/server/routers/booking.ts#router-mapping-of-limitexceedederror-to-conflict-is-untested`
 - **History:**
   - 2026-11-06: recorded: LOW missing_test at `apps/web/src/server/routers/booking.ts:89`, standards axis (ticket 11 host review standards, run 20261106-083344-25819)
   - 2026-11-06: seen again: LOW missing_test at `apps/web/src/server/routers/booking.ts:89`, spec axis (ticket 11 host review spec, run 20261106-083344-25819)
+  - 2026-11-06: resolved on branch `fix/buyer-lock-order-tests` (human commit after ticket 11): the test fails when the router stops mapping LimitExceededError (mutation check)
 <!-- ralph-debt:end -->

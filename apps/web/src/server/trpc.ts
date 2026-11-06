@@ -1,3 +1,4 @@
+import type { BookingMetrics } from "@ticketarena/booking";
 import type { Logger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
 import { initTRPC } from "@trpc/server";
@@ -18,6 +19,8 @@ export interface TRPCContext {
   readonly db: PrismaClient;
   /** Created at the app boundary; procedures bind booking ids on top of it. */
   readonly logger: Logger;
+  /** Optional: booking counters are best-effort and never decide a booking. */
+  readonly metrics?: BookingMetrics;
 }
 
 // One client per server process: the Neon driver pools internally, and a fresh client per

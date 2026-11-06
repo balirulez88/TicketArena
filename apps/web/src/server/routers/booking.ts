@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   BookingBusyError,
+  type BookingMetrics,
   type Buyer,
   createBookingService,
   HoldExpiredError,
@@ -68,12 +69,18 @@ function toBuyer(principal: Principal): Buyer {
 }
 
 // Built per request so the injected clock and db always come from the request context.
-function bookingServiceFor(ctx: { db: PrismaClient; now: () => Date; logger: Logger }) {
+function bookingServiceFor(ctx: {
+  db: PrismaClient;
+  now: () => Date;
+  logger: Logger;
+  metrics?: BookingMetrics | undefined;
+}) {
   return createBookingService({
     db: ctx.db,
     clock: { now: ctx.now },
     newId: randomUUID,
     logger: ctx.logger,
+    ...(ctx.metrics === undefined ? {} : { metrics: ctx.metrics }),
   });
 }
 

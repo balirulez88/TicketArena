@@ -95,7 +95,7 @@ helper that sets `lock_timeout` 3s and `statement_timeout` 5s (`set_config(..., 
 transaction). A transaction Postgres aborts with `40P01`, `55P03` or `40001` is retried whole, up to 3 times,
 with jitter, each retry counting `deadlock_retry`; a failed attempt has rolled back completely, so
 a retry never sees partial state. Exhausted retries fail with `BookingBusyError` (`BOOKING_BUSY`,
-tRPC `TOO_MANY_REQUESTS`, router-mapped for both procedures) and count `booking_busy`.
+tRPC `TOO_MANY_REQUESTS`, router-mapped for both procedures) and count `booking_busy` (under the `unknown` event bucket when the pool times out before `placeOrder` has read its hold; the tRPC context carries an optional `metrics`).
 
 Saturation: a pool acquire timeout (the `pg-pool` message, pinned against the real driver) or a
 Prisma `P2028` saying the transaction could not start in time is also `BOOKING_BUSY`. A `P2028`

@@ -6,6 +6,19 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest"
 import type { Principal } from "../identity/identity";
 import { createCaller } from "./_app";
 
+function recordingMetrics() {
+  const counted: string[] = [];
+  return {
+    counted,
+    metrics: {
+      increment: (metric: string) => {
+        counted.push(metric);
+        return Promise.resolve();
+      },
+    },
+  };
+}
+
 const database = setupTestDatabase();
 let prisma: PrismaClient | undefined;
 
@@ -296,6 +309,7 @@ describe("booking saturation", () => {
       acquireTimeoutMs: 100,
     });
     const { release, occupier } = await occupy(tight);
+    const { counted, metrics } = recordingMetrics();
     try {
       await expect(
         createCaller({
@@ -303,8 +317,10 @@ describe("booking saturation", () => {
           principal: alice,
           db: tight,
           logger: silentLogger,
+          metrics,
         }).booking.holdSeats({ eventId, seatIds: [seatId] }),
       ).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS", message: /BOOKING_BUSY/ });
+      await expect.poll(() => counted.filter((m) => m === "booking_busy")).toHaveLength(1);
     } finally {
       release();
       await occupier;
@@ -322,6 +338,7 @@ describe("booking saturation", () => {
       acquireTimeoutMs: 100,
     });
     const { release, occupier } = await occupy(tight);
+    const { counted, metrics } = recordingMetrics();
     try {
       await expect(
         createCaller({
@@ -329,12 +346,14 @@ describe("booking saturation", () => {
           principal: alice,
           db: tight,
           logger: silentLogger,
+          metrics,
         }).booking.placeOrder({
           holdId: hold.id,
           contact: { email: "alice@example.com" },
           idempotencyKey: randomUUID(),
         }),
       ).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS", message: /BOOKING_BUSY/ });
+      await expect.poll(() => counted.filter((m) => m === "booking_busy")).toHaveLength(1);
     } finally {
       release();
       await occupier;

@@ -31,6 +31,9 @@ export interface BookingServiceDeps {
   readonly metrics?: BookingMetrics;
 }
 
+/** Counter bucket for a busy outcome that happened before the request's event was resolved. */
+const UNKNOWN_EVENT = "unknown";
+
 export type BookingMetric =
   | "hold_ok"
   | "seat_unavailable"
@@ -526,10 +529,9 @@ export function createBookingService({
     if (!(error instanceof BookingBusyError || isSaturation(error))) {
       throw error;
     }
-    // placeOrder can be busy before it has read the hold, i.e. before the event is known.
-    if (eventId !== undefined) {
-      count("booking_busy", eventId);
-    }
+    // placeOrder can be busy before it has read the hold, i.e. before the event is known; that
+    // still counts, under a shared bucket, so saturation is never invisible.
+    count("booking_busy", eventId ?? UNKNOWN_EVENT);
     throw error instanceof BookingBusyError ? error : new BookingBusyError({ cause: error });
   }
 

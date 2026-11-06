@@ -36,7 +36,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 3      | 51  | 54    |
+| OPEN          | 0        | 0    | 3      | 53  | 56    |
 | PLANNED       | 0        | 0    | 9      | 1   | 10    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 2    | 7      | 5   | 14    |
@@ -560,6 +560,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-10-30: backfilled from an earlier review round; confirmed still present on main at 2513586 (correctness review of tickets 03-05, 2026-10-30)
   - 2026-11-06: resolved on branch `fix/buyer-lock-order-tests` (human commit after ticket 11): the code fix landed with ticket 11 (8aeebeb); the tests above fail if holdSeats or placeOrder skips the buyer lock, and if placeOrder takes it after the hold row lock (mutation checks)
+  - 2026-11-06: resolution verified: quality gate green and independent review approved (fix/buyer-lock-order-tests confirmation review, run a2ba22b)
 
 ### TD-027: placeOrder fails with an unhandled error once the hold's seat.held outbox row is gone
 
@@ -1518,6 +1519,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-06: recorded: LOW missing_test at `packages/booking/src/hold-buyer-limit.test.ts:202`, standards axis (ticket 11 review-2 standards, run 20261106-073411)
   - 2026-11-06: resolved on branch `fix/buyer-lock-order-tests` (human commit after ticket 11): both tests fail when the service skips the buyer lock (mutation checks)
+  - 2026-11-06: resolution verified: quality gate green and independent review approved (fix/buyer-lock-order-tests confirmation review, run a2ba22b)
 
 ### TD-076: buyer(), freeSeats(), service() and DB setup are copied across new test files
 
@@ -1578,4 +1580,43 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-06: recorded: LOW missing_test at `apps/web/src/server/routers/booking.ts:89`, standards axis (ticket 11 host review standards, run 20261106-083344-25819)
   - 2026-11-06: seen again: LOW missing_test at `apps/web/src/server/routers/booking.ts:89`, spec axis (ticket 11 host review spec, run 20261106-083344-25819)
   - 2026-11-06: resolved on branch `fix/buyer-lock-order-tests` (human commit after ticket 11): the test fails when the router stops mapping LimitExceededError (mutation check)
+  - 2026-11-06: resolution verified: quality gate green and independent review approved (fix/buyer-lock-order-tests confirmation review, run a2ba22b)
+
+### TD-079: Race cases assume the queuedFirst request runs first without asserting it
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** remediation after ticket 11 (`fix/buyer-lock-order-tests`)
+- **Evidence:** `.ralph/reviews/fix-buyer-lock-order-tests/review-2.standards.json`
+- **Components:** `packages/booking/src/hold-buyer-limit.test.ts:277`
+- **Problem:** Each test.each case of the TD-026 race fixes which request queues first on the buyer advisory lock and relies on Postgres granting waiters of one lock in arrival order. That is how the lock manager works, but it is not a documented guarantee, and the test never checks which request actually committed first.
+- **Impact:** If that behaviour changed, 'both orders run' would silently collapse to one order; the test still passes because the outcome is the same either way.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when both independent reviewers approved the remediation. Escalate if its real impact grows.
+- **Remediation:** Record the commit order (for example by comparing database-clock timestamps of the order row and the second hold row) and assert it matches queuedFirst, or accept the documented reasoning in the test comment.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/booking/src/hold-buyer-limit.test.ts#race-cases-assume-the-queuedfirst-request-runs-first-without`
+- **History:**
+  - 2026-11-06: recorded: LOW missing_test at `packages/booking/src/hold-buyer-limit.test.ts:277`, standards axis (fix/buyer-lock-order-tests confirmation review standards, run a2ba22b)
+
+### TD-080: Race test titles read 'a hold of 1 seats'
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Escalation:** none
+- **Source:** remediation after ticket 11 (`fix/buyer-lock-order-tests`)
+- **Evidence:** `.ralph/reviews/fix-buyer-lock-order-tests/review-2.spec.json`
+- **Components:** `packages/booking/src/hold-buyer-limit.test.ts:283`
+- **Problem:** The test.each title template renders 'a hold of 1 seats' for the one-seat cases.
+- **Impact:** Cosmetic only. A rename must also update TD-026's Verification names, which quote the titles.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when both independent reviewers approved the remediation. Escalate if its real impact grows.
+- **Remediation:** Reword the template so it reads naturally for one seat, and update TD-026's Verification in the same commit.
+- **Target:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `packages/booking/src/hold-buyer-limit.test.ts#race-test-titles-read-a-hold-of-1-seats`
+- **History:**
+  - 2026-11-06: recorded: LOW style at `packages/booking/src/hold-buyer-limit.test.ts:283`, spec axis (fix/buyer-lock-order-tests confirmation review spec, run a2ba22b)
 <!-- ralph-debt:end -->

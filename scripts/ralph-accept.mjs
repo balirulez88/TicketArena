@@ -1237,7 +1237,9 @@ function reviewMerges(merges, { base, label }) {
       blocking: result.decision.blocking,
     });
   }
-  return { register: recordHostFindings(merges.at(-1).merge, base, findings, label) };
+  // The register's evidence is judged in this one commit, here and again before the host commits it.
+  const evidence = merges.at(-1).merge;
+  return { register: recordHostFindings(evidence, base, findings, label), evidence };
 }
 
 /**
@@ -1410,7 +1412,7 @@ function apply({ tip, outcomes, pause, quarantines, review }, { base, namespace 
   if (review?.register) {
     // The host's review is the authoritative one, so its deferred findings reach the register in
     // the host's own commit, after the merge it approved.
-    const errors = checkRegisterText(review.register, { exists: fileInTree(tip) });
+    const errors = checkRegisterText(review.register, { exists: fileInTree(review.evidence) });
     if (errors.length > 0) {
       throw new Error(`the host review's register is invalid: ${errors.join("; ")}`);
     }

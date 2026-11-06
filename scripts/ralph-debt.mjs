@@ -212,7 +212,8 @@ function statusErrors({ fields }, exists) {
 
 /**
  * `root` resolves Verification paths on the file system (the CLI and the in-sandbox gate). The
- * host's importer passes `exists` instead, to judge evidence in the candidate commit's own tree.
+ * host's importer passes `exists` instead, to judge evidence in the candidate commit's own tree;
+ * when `exists` is given, `root` is not used.
  */
 export function validateRegister(
   register,

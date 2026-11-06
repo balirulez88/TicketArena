@@ -1332,7 +1332,9 @@ describe("ralph-accept: the host's own review of the exact candidate (TD-058)", 
     );
   });
 
-  it("refuses verification naming a directory or a pathspec instead of a test file", () => {
+  // Only a file whose name is exactly the path counts: a directory, or a pattern that would match
+  // other files, is refused by that exact-name check whatever Git's pathspec matching does.
+  it("refuses verification naming a directory or a pattern instead of a test file", () => {
     for (const verification of ["`packages/demo`", "`packages/demo/*.json`"]) {
       const host = hostWithDebt();
       const base = git(host, "rev-parse", "main");
@@ -1341,6 +1343,42 @@ describe("ralph-accept: the host's own review of the exact candidate (TD-058)", 
       const result = assertRefused(host, finish(host, ws), { base });
       assert.match(result.output, /a RESOLVED entry needs Verification naming an existing test/);
     }
+  });
+
+  // Paths are matched literally: `[x]` names the file `[x].test.ts`, not a pattern for `x.test.ts`.
+  // (ls-tree matches its paths literally already; `--literal-pathspecs` keeps it so if that changes.)
+  it("finds a verification test whose name contains pattern characters", () => {
+    const host = hostWithDebt();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "01-demo", {
+      change: (dir) => {
+        write(dir, "packages/demo/src/[x].test.ts", "test('x', () => {});\n");
+        resolveDebt(dir, "`packages/demo/src/[x].test.ts::x`");
+      },
+    });
+    const result = accept(host, finish(host, ws), { base });
+    assert.equal(result.code, 0, result.output);
+  });
+
+  // The host's own debt commit re-checks the register it writes, against the same candidate tree.
+  it("records deferred findings next to an entry the slice resolved with its own new test", () => {
+    const host = hostWithDebt();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    const { merge: tip } = merge(ws, "01-demo", {
+      change: (dir) => {
+        write(dir, "packages/demo/src/fixed.test.ts", "test('fixed', () => {});\n");
+        resolveDebt(dir, "`packages/demo/src/fixed.test.ts::fixed`");
+      },
+    });
+    const result = accept(host, finish(host, ws), { base, review: "medium" });
+    assert.equal(result.code, 0, result.output);
+    assert.equal(git(host, "rev-parse", "main^"), tip);
+    const register = readFileSync(join(host, "docs", "technical-debt.md"), "utf8");
+    assert.match(register, /\*\*Status:\*\* RESOLVED/);
+    assert.match(register, /stub MEDIUM finding/);
+    assert.equal(git(host, "status", "--porcelain"), "");
   });
 
   it("refuses a slice that drops an entry from the debt register", () => {

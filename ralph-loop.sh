@@ -109,6 +109,9 @@ ONCE=false
 DRY_RUN=false
 ONLY_TICKET=""
 CURRENT_BRANCH=""
+# The ticket the gate's debt check judges the slice for (set per ticket in process_ticket).
+GATE_TICKET=""
+GATE_TICKET_FILE=""
 REVIEW_FEEDBACK=""
 RUN_STATUS=failed
 # Agent sessions of the current ticket that ran out of context (see fresh_session).
@@ -304,8 +307,24 @@ blockers_done() {
   return 0
 }
 
-next_ticket() {
-  local file
+# The debt gate (ADR 0016, scripts/ralph-debt.mjs gate): one "NN<TAB>state<TAB>reasons" line per
+# unfinished ticket, state clear, waiting or needs-triage. An invalid register fails it, and then
+# no ticket is selected: unresolved debt is never assumed safe because the gate could not run.
+debt_gate() {
+  node "${DEBT}" gate "${DEBT_REGISTER}"
+}
+
+# Field $2 (2 = state, 3 = reasons) of ticket file $3's line in the gate output $1.
+debt_field() {
+  awk -F'\t' -v n="$(ticket_number "$3")" -v f="$2" '$1 == n { print $f }' <<<"$1"
+}
+
+# The tickets in order whose blockers are done, each with its debt verdict: "<file> <state>".
+# Debt that blocks a ticket makes it wait like a blocker does. The first one that needs triage
+# ends the scan: work does not skip past risk nobody has judged.
+candidate_tickets() {
+  local file gate state
+  gate="$(debt_gate)" || return 1
   for file in "${ISSUES_DIR}"/[0-9][0-9]-*.md; do
     [[ -f "${file}" ]] || continue
     if [[ -n "${ONLY_TICKET}" && "$(ticket_number "${file}")" != "${ONLY_TICKET}" ]]; then
@@ -313,19 +332,47 @@ next_ticket() {
     fi
     [[ "$(ticket_field "${file}" "Status")" == "ready-for-agent" ]] || continue
     blockers_done "${file}" || continue
-    printf '%s\n' "${file}"
-    return 0
+    state="$(debt_field "${gate}" 2 "${file}")"
+    printf '%s %s\n' "${file}" "${state:-needs-triage}"
+    [[ "${state}" == clear || "${state}" == waiting ]] || return 0
   done
-  return 1
 }
 
-# Ready tickets that cannot start because a blocker is not done (scripts/ralph-batch.mjs reports
-# them when nothing is eligible).
+next_ticket() {
+  local candidates
+  candidates="$(candidate_tickets)" || return 1
+  awk '$2 == "clear" { print $1; found = 1; exit } $2 != "waiting" { exit } END { exit !found }' \
+    <<<"${candidates}"
+}
+
+# The ticket the scan stopped at because unresolved debt affecting it needs a human's triage,
+# with the reasons (scripts/ralph-batch.mjs stops on it as needs-triage). Prints nothing when the
+# scan did not stop on one.
+triage_ticket() {
+  local candidates file gate
+  if ! candidates="$(candidate_tickets)"; then
+    printf 'the debt gate failed: the register is invalid (pnpm run check:debt)\n'
+    return 0
+  fi
+  file="$(awk '$2 == "clear" { exit } $2 != "waiting" { print $1; exit }' <<<"${candidates}")"
+  [[ -n "${file}" ]] || return 0
+  gate="$(debt_gate)" || return 0
+  printf '%s: %s\n' "${file}" "$(debt_field "${gate}" 3 "${file}")"
+}
+
+# Ready tickets that cannot start because a blocker is not done, or because a triaged debt entry
+# blocks them until its owner resolves it (scripts/ralph-batch.mjs reports them when nothing is
+# eligible).
 waiting_tickets() {
-  local file
+  local file gate
+  gate="$(debt_gate)" || return 1
   for file in "${ISSUES_DIR}"/[0-9][0-9]-*.md; do
     [[ -f "${file}" && "$(ticket_field "${file}" "Status")" == "ready-for-agent" ]] || continue
-    blockers_done "${file}" || printf '%s\n' "${file}"
+    if ! blockers_done "${file}"; then
+      printf '%s\n' "${file}"
+    elif [[ "$(debt_field "${gate}" 2 "${file}")" == waiting ]]; then
+      printf '%s (debt: %s)\n' "${file}" "$(debt_field "${gate}" 3 "${file}")"
+    fi
   done
 }
 
@@ -349,7 +396,19 @@ run_gate() {
   run_step "${logfile}" pnpm run lint &&
     run_step "${logfile}" pnpm run typecheck &&
     run_step "${logfile}" pnpm run test &&
-    run_step "${logfile}" pnpm run check:debt
+    run_step "${logfile}" pnpm run check:debt &&
+    run_step "${logfile}" debt_slice_check
+}
+
+# The slice's register against the base branch's (ADR 0016): it may resolve entries, never triage
+# them, and must resolve every entry its ticket owns. The host's importer refuses a slice that
+# breaks this; checking it here lets the agent fix it while the ticket is still in its loop.
+debt_slice_check() {
+  [[ -n "${GATE_TICKET}" ]] || return 0
+  local base_register
+  base_register="${LOG_DIR}/$(ticket_slug "${GATE_TICKET_FILE}").debt-base.md"
+  git show "${BASE_BRANCH}:${DEBT_REGISTER}" >"${base_register}" &&
+    node "${DEBT}" slice "${DEBT_REGISTER}" --base "${base_register}" --ticket "${GATE_TICKET}"
 }
 
 # RED is proven only if the new tests are lint-clean AND the suite fails AND the new tests are
@@ -461,7 +520,9 @@ TECHNICAL DEBT: ${DEBT_REGISTER} lists deferred review findings. Read the entrie
 Components overlap the files you change. An entry whose Target names this ticket is part of the
 ticket: fix it test-first. When you fix an entry, set its Status to RESOLVED, describe the fix in
 Resolution and name the test that proves it in Verification (\`path::test name\`), then run
-\`pnpm run format:debt\`. Never delete an entry or resolve one you did not fix and test.
+\`pnpm run format:debt\`. Never delete an entry or resolve one you did not fix and test. Never
+change an entry's Severity, Risk, Triage, Target, Blocks, Escalation, Acceptance or description,
+and never set ACCEPTED_RISK: those are a human's triage decisions, and the gate refuses them.
 
 HARNESS RULES (non-negotiable):
 - The harness owns git. Never run git commands that change state (commit, add, branch, switch,
@@ -1126,6 +1187,7 @@ must_pass() {
 process_ticket() {
   local ticket=$1 slug branch from status=0
   slug="$(ticket_slug "${ticket}")"
+  GATE_TICKET="$(ticket_number "${ticket}")" GATE_TICKET_FILE="${ticket}"
   branch="slice/${slug}"
   log "Ticket ${ticket}: $(ticket_title "${ticket}")"
 
@@ -1220,6 +1282,9 @@ main() {
     [[ "${ONCE}" == true || -n "${ONLY_TICKET}" ]] && break
   done
   RUN_STATUS=succeeded
+  local triage
+  triage="$(triage_ticket)"
+  [[ -z "${triage}" ]] || log "Needs triage: ${triage}"
   log "Done: ${processed} slice(s) merged. No further ticket is ready."
 }
 

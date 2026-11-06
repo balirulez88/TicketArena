@@ -2,7 +2,7 @@
 
 **What to build:** an operator can recreate a consumer, or recover from broker data loss, without ever skipping an unprocessed message, using a script and a documented runbook. Spec: Consumer recovery; ADR 0011.
 
-**Blocked by:** 25, 44 (payment latency outside the runner transaction)
+**Blocked by:** 25, 44 (payment latency outside the runner transaction), 49 (Prisma schema drift)
 
 **Status:** ready-for-agent
 
@@ -19,3 +19,4 @@
 - [ ] AT-33: processed {1, 2, 3, 5}, consumer deleted → resume at 4; 5 is redelivered and deduped.
 - [ ] AT-34: no checkpoint → replay from the earliest retained message with no duplicate side effects.
 - [ ] The runbook in `docs/messaging` documents every rule and the 14-day recovery limit.
+- [ ] Every entry in `docs/technical-debt.md` whose Target is ticket 27 (TD-033) is `RESOLVED`, with the tests that prove it named in `Verification` (the host refuses the merge otherwise).

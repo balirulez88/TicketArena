@@ -21,6 +21,7 @@
 // Stops, with the reason reported:
 //   batch-limit, no-eligible-ticket          finished                  exit 0
 //   unresolved-dependency                    finished; tickets wait     exit 2
+//   needs-triage                             resumable: triage, rerun   exit 4
 //   paused (ralph-loop exit 75)              resumable: rerun           exit 75
 //   ambiguous-merge, runner-failed, push-failed, ci-unverified, base-not-verified,
 //   checkout-changed                         resumable: fix, rerun      exit 1
@@ -42,6 +43,7 @@ import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { checkRegisterText, debtGate, loadTickets, parseRegister } from "./ralph-debt.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const env = process.env;
@@ -54,10 +56,12 @@ const STATE = join(DIR, "state.json");
 const LOCK = join(DIR, "lock");
 const PAUSED_EXIT = 75;
 const UNTRUSTED_EXIT = 3;
+const REGISTER = "docs/technical-debt.md";
 
 // Stops a rerun can resume from; the others end the batch.
 const RESUMABLE = new Set([
   "paused",
+  "needs-triage",
   "ambiguous-merge",
   "runner-failed",
   "push-failed",
@@ -65,7 +69,13 @@ const RESUMABLE = new Set([
   "base-not-verified",
   "checkout-changed",
 ]);
-const EXIT = { "batch-limit": 0, "no-eligible-ticket": 0, "unresolved-dependency": 2, paused: 75 };
+const EXIT = {
+  "batch-limit": 0,
+  "no-eligible-ticket": 0,
+  "unresolved-dependency": 2,
+  "needs-triage": 4,
+  paused: 75,
+};
 
 class Stop extends Error {
   constructor(reason, detail) {
@@ -229,10 +239,11 @@ function ticketStatus(slug) {
   return /^\*\*Status:\*\* (.*)$/m.exec(file.stdout)?.[1]?.trim() ?? "";
 }
 
-// Ticket selection is ralph-loop.sh's own (next_ticket), never a second implementation of it.
+// Ticket selection is ralph-loop.sh's own (next_ticket, with its debt gate), never a second
+// implementation of it.
 function selectNext() {
   const script =
-    'source ./ralph-loop.sh; if t="$(next_ticket)"; then echo "next $t"; else echo none; fi; waiting_tickets | sed "s/^/waiting /"';
+    'source ./ralph-loop.sh; if t="$(next_ticket)"; then echo "next $t"; else echo none; fi; triage_ticket | sed "s/^/triage /"; waiting_tickets | sed "s/^/waiting /"';
   const result = run("bash", ["-c", script]);
   const lines = result.stdout.split(/\r?\n/).filter(Boolean);
   const verdict = lines.find((line) => line === "none" || line.startsWith("next "));
@@ -240,12 +251,30 @@ function selectNext() {
     throw new Error(`could not select the next ticket: ${result.stderr.trim() || "no answer"}`);
   }
   const waiting = lines.filter((line) => line.startsWith("waiting ")).map((line) => line.slice(8));
+  const triage = lines.find((line) => line.startsWith("triage "))?.slice(7) ?? null;
   if (verdict === "none") {
-    return { next: null, waiting };
+    return { next: null, waiting, triage };
   }
   const file = verdict.slice(5);
   const slug = file.replace(/^.*\//, "").replace(/\.md$/, "");
-  return { next: { number: slug.slice(0, 2), slug }, waiting };
+  return { next: { number: slug.slice(0, 2), slug }, waiting, triage: null };
+}
+
+// The debt gate's verdict for one ticket on the checked-out base (scripts/ralph-debt.mjs). An
+// invalid register clears nothing.
+function debtVerdict(number) {
+  const text = readFileSync(join(root, REGISTER), "utf8");
+  const tickets = loadTickets(root);
+  const errors = checkRegisterText(text, { root, tickets });
+  if (errors.length > 0) {
+    return { state: "needs-triage", reasons: [`${REGISTER} is invalid: ${errors.join("; ")}`] };
+  }
+  return (
+    debtGate(parseRegister(text), tickets).get(number) ?? {
+      state: "needs-triage",
+      reasons: [`the debt gate has no verdict for ticket ${number}`],
+    }
+  );
 }
 
 // --- Steps ----------------------------------------------------------------------------------
@@ -291,6 +320,15 @@ function runTicket(state, entry) {
     throw new Stop(
       "ambiguous-merge",
       `ticket ${entry.number} is half-merged on ${BASE} (archive and merge commit disagree)`,
+    );
+  }
+  // A ticket chosen earlier (a paused one, resumed now) starts only if the debt gate still clears
+  // it on today's base: triage committed since then may have made it wait.
+  const debt = debtVerdict(entry.number);
+  if (debt.state !== "clear") {
+    throw new Stop(
+      "needs-triage",
+      `ticket ${entry.number} is ${debt.state} on unresolved debt: ${debt.reasons.join("; ")}; triage it in a reviewed commit on ${BASE}, push it, then rerun`,
     );
   }
   log(`ticket ${entry.number}: running ${entry.slug} in a fresh sandbox`);
@@ -415,8 +453,16 @@ function runBatch(state) {
       );
     }
     ensureBaseVerified(state);
-    const { next, waiting } = selectNext();
+    const { next, waiting, triage } = selectNext();
     if (!next) {
+      // Unresolved or untriaged debt that the next ticket relies on is never assumed safe, and
+      // work does not skip past it: a human triages it, then the same batch resumes.
+      if (triage) {
+        throw new Stop(
+          "needs-triage",
+          `the next ticket depends on debt that needs a human's triage: ${triage}`,
+        );
+      }
       if (waiting.length > 0) {
         throw new Stop(
           "unresolved-dependency",

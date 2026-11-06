@@ -2,7 +2,7 @@
 
 **What to build:** a message that exhausts its retry budget, or is poison, moves to the DLQ exactly once and is never terminated without a confirmed DLQ copy. Spec: Messaging (consumer runner); ADR 0011.
 
-**Blocked by:** 24
+**Blocked by:** 24, 49 (Prisma schema drift)
 
 **Status:** ready-for-agent
 

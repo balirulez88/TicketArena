@@ -13,3 +13,4 @@
 - [ ] AT-08: with the fake clock moved past `holdExpiresAt` while `placeOrder` waits on a lock held by the test → `HOLD_EXPIRED`.
 - [ ] AT-09: `placeOrder` and the sweeper on the same hold, in both arrival orders → either an order (hold not expired) or `HOLD_EXPIRED` (seats freed), never both.
 - [ ] AT-11: `placeOrder` refuses when a seat's `holdId` no longer matches its hold.
+- [ ] Every entry in `docs/technical-debt.md` whose Target is ticket 14 (TD-013) is `RESOLVED`, with the tests that prove it named in `Verification` (the host refuses the merge otherwise).

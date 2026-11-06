@@ -74,7 +74,9 @@ Integration tests run against real **Postgres 17, Redis 7 and NATS JetStream**, 
 
 ## Ralph loop (`ralph-loop.sh`)
 
-For each ticket whose `**Status:**` is `ready-for-agent` and whose blockers are all `done`:
+For each ticket whose `**Status:**` is `ready-for-agent`, whose blockers are all `done` and that
+the [debt gate](#debt-gate) clears (`waiting` and `needs-triage` tickets are skipped until their
+debt is resolved or triaged):
 
 1. Create branch `slice/<NN>-<slug>` from `main`.
 2. **RED:** the agent writes failing test(s) for the first acceptance criterion. The harness
@@ -234,13 +236,14 @@ admits one batch at a time, and `pnpm sandbox` refuses (best effort) to run besi
 automatically: the message says so, and a human removes it after checking that no batch or
 container is still running.
 
-| Stop                                                                                                        | Meaning                                         | Exit |
-| ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ---- |
-| `batch-limit`, `no-eligible-ticket`                                                                         | finished                                        | 0    |
-| `unresolved-dependency`                                                                                     | finished; ready tickets wait on unfinished ones | 2    |
-| `paused`                                                                                                    | provider failure; rerun to resume               | 75   |
-| `ambiguous-merge`, `runner-failed`, `push-failed`, `ci-unverified`, `base-not-verified`, `checkout-changed` | blocking until a rerun can verify it            | 1    |
-| `rejected`, `ci-failed`, `untrusted-result`                                                                 | final; resolve it, then `--new` starts a batch  | 1    |
+| Stop                                                                                                        | Meaning                                                                                           | Exit |
+| ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ---- |
+| `batch-limit`, `no-eligible-ticket`                                                                         | finished                                                                                          | 0    |
+| `unresolved-dependency`                                                                                     | finished; ready tickets wait on unfinished ones                                                   | 2    |
+| `needs-triage`                                                                                              | no cleared ticket left; one depends on untriaged or unowned debt; triage it on `main`, then rerun | 4    |
+| `paused`                                                                                                    | provider failure; rerun to resume                                                                 | 75   |
+| `ambiguous-merge`, `runner-failed`, `push-failed`, `ci-unverified`, `base-not-verified`, `checkout-changed` | blocking until a rerun can verify it                                                              | 1    |
+| `rejected`, `ci-failed`, `untrusted-result`                                                                 | final; resolve it, then `--new` starts a batch                                                    | 1    |
 
 `node scripts/ralph-batch.mjs --status` prints the current batch. Nothing is ever deployed.
 Scenarios: `scripts/ralph-batch.test.mjs` (limit, CI gating, rejection on the base or a side
@@ -338,6 +341,34 @@ Guarantees, each covered by `scripts/ralph-debt.test.mjs` or `scripts/ralph-loop
   may resolve an entry with a test it adds, and a file only the host has never counts.
 - **Nothing disappears.** `record` compares with the base branch's register and rejects the slice
   if an entry was removed. An escalated entry cannot stay `OPEN` or `ACCEPTED_RISK`.
+
+### Debt gate
+
+[ADR 0016](../adr/0016-risk-based-debt-gate.md). Each entry carries a `Risk` class, a `Triage`
+line, an owner (`Target: ticket NN`) and the tickets it `Blocks`; humans set them in reviewed
+commits. `node scripts/ralph-debt.mjs gate` prints every unfinished ticket's verdict:
+
+| Verdict        | Cause                                                                                                                                                                                                                                                    |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `needs-triage` | an unresolved `MEDIUM`+ entry is untriaged or unowned (all tickets); an untriaged `LOW` found by a ticket this one builds on, or owned by it, or found outside any ticket's review (all tickets); an entry back in triage that still `Blocks` the ticket |
+| `waiting`      | a triaged unresolved entry lists the ticket in `Blocks`                                                                                                                                                                                                  |
+| `clear`        | neither                                                                                                                                                                                                                                                  |
+- **Selection and batch.** `next_ticket` picks the first cleared ticket, so independent work
+  continues; the batch stops `needs-triage` (exit 4, resumable) once no cleared ticket is left
+  and one needs triage, and re-checks a paused ticket before resuming it. An invalid register
+  clears nothing.
+- **Importer.** The host refuses (exit 3) a ticket the base's gate does not clear, and a slice
+  whose register changes anything but resolving entries and the recorder's own additions
+  (`slice` rules: severity, risk, triage, target, blocks, acceptance and history are fixed), or
+  leaves an entry the ticket owns unresolved. `debt_slice_check` in `run_gate` applies the same
+  rules inside the loop, early.
+- **Maintainers.** CI runs `ralph-debt.mjs audit` against the base: every governed field a
+  commit changes needs a new history line, and no entry or history line disappears.
+- **Recorder.** New entries are `UNTRIAGED`/`pending` (a `security` finding is `SECURITY`); the
+  history suggests a class. A higher-severity sighting sends the entry back to triage.
+
+Scenarios: `scripts/ralph-debt.test.mjs`, `scripts/ralph-accept.test.mjs` (the debt gate),
+`scripts/ralph-batch.test.mjs` (needs-triage, resume, independent and blocked tickets).
 
 ## Run artifacts
 

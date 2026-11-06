@@ -21,6 +21,10 @@
 //     skills, the root package.json scripts, every package's gate and install scripts), Git
 //     attributes or submodules, or add a symlink or submodule. So the host scripts the batch
 //     runs, and the definition of the gate the agent is judged by, cannot change through a run.
+//   - The debt gate (ADR 0016), judged on the base's own register and tickets: the ticket must be
+//     cleared by it, the slice may resolve debt entries but not triage them (class, owner, what
+//     they block, acceptance, severity), and it must resolve, with a test in its own tree, every
+//     entry its ticket owns.
 //   - What runs in a trusted role while the gate judges the slice is fixed by the base (ADR 0015):
 //     test and build configuration, the test infrastructure, Prisma generators, and the
 //     toolchain's locked dependencies (lockfileErrors).
@@ -68,9 +72,12 @@ import { isMap, isScalar, parse, parseAllDocuments, visit } from "yaml";
 import { cleanup, initRoot, markRun, redactRun, secretValues } from "./ralph-artifacts.mjs";
 import {
   checkRegisterText,
+  debtGate,
   parseRegister,
+  parseTicket,
   recordFindings,
   renderRegister,
+  sliceErrors,
   validateRegister,
 } from "./ralph-debt.mjs";
 import { hostReview } from "./ralph-host-review.mjs";
@@ -266,6 +273,66 @@ function ticketFileAt(sha, number) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+/** Every ticket on `sha`, active and archived, as the debt gate reads them. */
+function ticketsAt(sha) {
+  const tickets = new Map();
+  // As loadTickets: an active ticket file wins over an archived one with the same number.
+  for (const path of [...lsTree(sha, "issues/done"), ...lsTree(sha, "issues")]) {
+    const name = basename(path);
+    if (/^\d{2}-.*\.md$/.test(name)) {
+      tickets.set(name.slice(0, 2), parseTicket(name, show(sha, path) ?? ""));
+    }
+  }
+  return tickets;
+}
+
+/** The debt register as `sha` has it; refuses when there is none or it cannot be read. */
+function registerAt(sha) {
+  const text = show(sha, REGISTER);
+  if (text === null) {
+    refuse(`${short(sha)} has no ${REGISTER}, so the debt gate cannot judge it`);
+  }
+  try {
+    return parseRegister(text);
+  } catch (error) {
+    return refuse(
+      `${REGISTER} on ${short(sha)}: ${error instanceof Error ? error.message : error}`,
+    );
+  }
+}
+
+// The debt gate decides on the register of the commit the slice was merged onto: the verified
+// base, or an earlier slice of the same run that this importer already accepted under the same
+// slice rules. Nothing the slice itself wrote has a say in whether its ticket could start.
+function assertDebtCleared(sha, slug) {
+  const verdict = debtGate(registerAt(sha), ticketsAt(sha)).get(slug.slice(0, 2));
+  if (verdict?.state !== "clear") {
+    refuse(
+      `ticket ${slug} is not cleared by the debt gate on ${short(sha)} (${verdict?.state ?? "unknown"}): ${verdict?.reasons.join("; ") ?? "no verdict"}`,
+    );
+  }
+}
+
+/**
+ * The slice's register against its base's: only the changes a slice may make (resolutions with
+ * evidence in the slice's own tree, the recorder's additions), and every entry its ticket owns
+ * resolved. Evidence and ticket references are judged in the candidate commit itself.
+ */
+function assertDebtChanges(prev, slice, slug) {
+  const next = registerAt(slice);
+  const errors = [
+    ...sliceErrors(registerAt(prev), next, { ticket: slug.slice(0, 2) }),
+    ...validateRegister(next, { exists: fileInTree(slice), tickets: ticketsAt(slice) }),
+  ];
+  // As check:debt: a register the batch and the loop would refuse to read must not reach main.
+  if (renderRegister(next) !== show(slice, REGISTER)) {
+    errors.push(`${REGISTER} is not in canonical form (pnpm run format:debt)`);
+  }
+  if (errors.length > 0) {
+    refuse(`slice ${slug} breaks the debt register's rules: ${errors.join("; ")}`);
+  }
+}
+
 // The ticket as it stood on `sha` must have been eligible there, as next_ticket decides.
 function eligibleTicket(sha, slug) {
   const text = show(sha, `issues/${slug}.md`);
@@ -275,19 +342,18 @@ function eligibleTicket(sha, slug) {
   if (field(text, "Status") !== "ready-for-agent") {
     refuse(`ticket ${slug} was not ready-for-agent on ${short(sha)}`);
   }
-  const blockers = field(text, "Blocked by");
-  if (blockers === "") {
+  if (field(text, "Blocked by") === "") {
     refuse(`ticket ${slug} has no Blocked by line`);
   }
-  if (!blockers.startsWith("None")) {
-    for (const number of blockers.replace(/\([^)]*\)/g, "").match(/\b\d{2}\b/g) ?? []) {
-      const file = ticketFileAt(sha, number);
-      const done = file !== null && field(show(sha, file) ?? "", "Status") === "done";
-      if (!done) {
-        refuse(`ticket ${slug} is blocked by ${number}, which is not done on ${short(sha)}`);
-      }
+  // One reading of the blockers for eligibility and for the debt gate's dependency graph.
+  for (const number of parseTicket(`${slug}.md`, text).blockedBy) {
+    const file = ticketFileAt(sha, number);
+    const done = file !== null && field(show(sha, file) ?? "", "Status") === "done";
+    if (!done) {
+      refuse(`ticket ${slug} is blocked by ${number}, which is not done on ${short(sha)}`);
     }
   }
+  assertDebtCleared(sha, slug);
   return text;
 }
 
@@ -818,6 +884,7 @@ function sliceMerge(prev, merge, slice, only) {
   if (unarchived(done) !== unarchived(ticket)) {
     refuse(`slice ${slug} changes its ticket beyond marking it done`);
   }
+  assertDebtChanges(prev, slice, slug);
   return { kind: "merged", slug, slice, merge };
 }
 
@@ -1273,7 +1340,7 @@ function recordHostFindings(tip, base, reviews, label) {
     errors.push(...result.errors);
     register = result.register;
   }
-  errors.push(...validateRegister(register, { exists: fileInTree(tip) }));
+  errors.push(...validateRegister(register, { exists: fileInTree(tip), tickets: ticketsAt(tip) }));
   if (errors.length > 0) {
     refuse(`the debt register: ${errors.join("; ")}`);
   }
@@ -1412,7 +1479,10 @@ function apply({ tip, outcomes, pause, quarantines, review }, { base, namespace 
   if (review?.register) {
     // The host's review is the authoritative one, so its deferred findings reach the register in
     // the host's own commit, after the merge it approved.
-    const errors = checkRegisterText(review.register, { exists: fileInTree(review.evidence) });
+    const errors = checkRegisterText(review.register, {
+      exists: fileInTree(review.evidence),
+      tickets: ticketsAt(review.evidence),
+    });
     if (errors.length > 0) {
       throw new Error(`the host review's register is invalid: ${errors.join("; ")}`);
     }

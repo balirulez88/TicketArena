@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { parseRegister, renderRegister } from "./ralph-debt.mjs";
 
 const source = fileURLToPath(new URL("..", import.meta.url));
 const identity = {
@@ -327,12 +328,13 @@ const snapshot = (host) => ({
     : "",
 });
 
-/** A host whose register holds one OPEN entry, TD-001, recorded from an approved review. */
-function hostWithDebt() {
+/** A host whose register holds one OPEN LOW entry, TD-001, recorded from an approved review. */
+function hostWithDebt({ severity = "LOW", ticket = "issues/01-demo.md" } = {}) {
   const host = hostRepo();
+  // LOW and found by ticket 01's own review: untriaged, it holds up only tickets built on 01.
   const finding = {
     axis: "standards",
-    severity: "MEDIUM",
+    severity,
     kind: "defect",
     file: "app.txt",
     line: 1,
@@ -353,7 +355,7 @@ function hostWithDebt() {
     "--decision",
     ".ralph/decision.json",
     "--ticket",
-    "issues/01-demo.md",
+    ticket,
     "--run",
     RUN,
     "--round",
@@ -372,7 +374,8 @@ function resolveDebt(dir, verification) {
     .replace("- **Status:** OPEN", "- **Status:** RESOLVED")
     .replace("- **Resolution:** none", "- **Resolution:** fixed in this slice")
     .replace("- **Verification:** none", `- **Verification:** ${verification}`);
-  writeFileSync(path, text);
+  // As `pnpm run format:debt` leaves it: the host refuses a register that is not canonical.
+  writeFileSync(path, renderRegister(parseRegister(text)));
 }
 
 /** Runs a forged result and checks it was refused without any trace on the host. */
@@ -1310,10 +1313,7 @@ describe("ralph-accept: the host's own review of the exact candidate (TD-058)", 
       change: (dir) => resolveDebt(dir, "`packages/demo/src/missing.test.ts::fixed`"),
     });
     const result = assertRefused(host, finish(host, ws), { base });
-    assert.match(
-      result.output,
-      /TD-001: a RESOLVED entry needs Verification naming an existing test/,
-    );
+    assert.match(result.output, /TD-001: Verification names [^,]+, which is not an existing test/);
   });
 
   it("refuses verification that exists only on the host, outside the candidate's tree", () => {
@@ -1326,10 +1326,7 @@ describe("ralph-accept: the host's own review of the exact candidate (TD-058)", 
       change: (dir) => resolveDebt(dir, "`secrets/host-only.test.ts::host`"),
     });
     const result = assertRefused(host, finish(host, ws), { base });
-    assert.match(
-      result.output,
-      /TD-001: a RESOLVED entry needs Verification naming an existing test/,
-    );
+    assert.match(result.output, /TD-001: Verification names [^,]+, which is not an existing test/);
   });
 
   // Only a file whose name is exactly the path counts: a directory, or a pattern that would match
@@ -1341,7 +1338,7 @@ describe("ralph-accept: the host's own review of the exact candidate (TD-058)", 
       const ws = container(host);
       merge(ws, "01-demo", { change: (dir) => resolveDebt(dir, verification) });
       const result = assertRefused(host, finish(host, ws), { base });
-      assert.match(result.output, /a RESOLVED entry needs Verification naming an existing test/);
+      assert.match(result.output, /Verification names [^,]+, which is not an existing test/);
     }
   });
 
@@ -1385,7 +1382,7 @@ describe("ralph-accept: the host's own review of the exact candidate (TD-058)", 
     const host = hostRepo();
     const finding = {
       axis: "standards",
-      severity: "MEDIUM",
+      severity: "LOW",
       kind: "defect",
       file: "app.txt",
       line: 1,
@@ -1756,4 +1753,185 @@ describe("ralph-accept: the toolchain's locked dependencies (TD-058)", () => {
       assert.match(assertRefused(host, finish(host, ws), { base }).output, reason);
     });
   }
+});
+
+// --- The debt gate (ADR 0016) ------------------------------------------------------------------
+
+/** Rewrites TD-001's fields in `dir`'s register, in canonical form. */
+function editDebt(dir, fields) {
+  const path = join(dir, "docs", "technical-debt.md");
+  const register = parseRegister(readFileSync(path, "utf8"));
+  const entries = register.entries.map((entry) =>
+    entry.id === "TD-001" ? { ...entry, fields: { ...entry.fields, ...fields } } : entry,
+  );
+  writeFileSync(path, renderRegister({ ...register, entries }));
+}
+
+const TRIAGED = { Risk: "CORRECTNESS", Triage: "2026-11-06: triaged by a maintainer" };
+
+/** A host commit, as a human-reviewed maintenance commit makes it. */
+function maintain(host, message, change) {
+  change(host);
+  git(host, "add", "-A");
+  git(host, "commit", "--quiet", "-m", message);
+}
+
+describe("ralph-accept: the debt gate (ADR 0016)", () => {
+  for (const [name, fields, refusal] of [
+    ["lowers or raises its severity", { Severity: "MEDIUM" }, /TD-001: Severity changed/],
+    ["reclassifies its risk", { Risk: "MAINTAINABILITY" }, /TD-001: Risk changed/],
+    ["triages it", { Triage: "2026-11-07: the agent" }, /TD-001: Triage changed/],
+    [
+      "sends it back to triage without a higher-severity sighting",
+      { Triage: "pending" },
+      /TD-001: Triage was reset without a higher-severity sighting/,
+    ],
+    ["re-targets it", { Target: "ticket 02" }, /TD-001: Target changed/],
+    ["makes it block a ticket", { Target: "ticket 02", Blocks: "01" }, /TD-001: Blocks changed/],
+    [
+      "accepts the risk",
+      {
+        Status: "ACCEPTED_RISK",
+        Acceptance: "Residual risk: none. Review when: never. Decided by: the agent.",
+      },
+      /TD-001: Status OPEN -> ACCEPTED_RISK is a triage decision/,
+    ],
+  ]) {
+    it(`refuses a slice that ${name}`, () => {
+      const host = hostWithDebt();
+      maintain(host, "chore(debt): triage TD-001", (dir) => editDebt(dir, TRIAGED));
+      const base = git(host, "rev-parse", "main");
+      const ws = container(host);
+      merge(ws, "01-demo", { change: (dir) => editDebt(dir, fields) });
+      const result = assertRefused(host, finish(host, ws), { base });
+      assert.match(result.output, /slice 01-demo breaks the debt register's rules/);
+      assert.match(result.output, refusal);
+    });
+  }
+
+  it("refuses a slice that leaves the register valid but not in canonical form", () => {
+    const host = hostWithDebt();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "01-demo", {
+      change: (dir) => {
+        const path = join(dir, "docs", "technical-debt.md");
+        writeFileSync(path, readFileSync(path, "utf8").replace("| OPEN ", "|   OPEN "));
+      },
+    });
+    const result = assertRefused(host, finish(host, ws), { base });
+    assert.match(result.output, /not in canonical form/);
+  });
+
+  it("refuses a ticket that merges with an entry it owns still unresolved", () => {
+    const host = hostWithDebt();
+    maintain(host, "chore(debt): plan TD-001 for ticket 01", (dir) =>
+      editDebt(dir, { ...TRIAGED, Status: "PLANNED", Target: "ticket 01 (`issues/01-demo.md`)" }),
+    );
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws);
+    const result = assertRefused(host, finish(host, ws), { base });
+    assert.match(result.output, /TD-001 is owned by ticket 01 \(Target\) and must be RESOLVED/);
+  });
+
+  it("accepts a ticket that resolves the entry it owns with a test of its own tree", () => {
+    const host = hostWithDebt();
+    maintain(host, "chore(debt): plan TD-001 for ticket 01", (dir) =>
+      editDebt(dir, { ...TRIAGED, Status: "PLANNED", Target: "ticket 01 (`issues/01-demo.md`)" }),
+    );
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "01-demo", {
+      change: (dir) => {
+        write(dir, "packages/demo/src/fixed.test.ts", "test('fixed', () => {});\n");
+        editDebt(dir, {
+          Status: "RESOLVED",
+          Resolution: "fixed in this slice",
+          Verification: "`packages/demo/src/fixed.test.ts::fixed`",
+        });
+      },
+    });
+    const result = accept(host, finish(host, ws), { base });
+    assert.equal(result.code, 0, result.output);
+    const register = readFileSync(join(host, "docs", "technical-debt.md"), "utf8");
+    assert.match(register, /\*\*Status:\*\* RESOLVED/);
+    assert.match(register, /resolution verified/);
+  });
+
+  it("refuses a resolution whose evidence is not a test the gate runs", () => {
+    const host = hostWithDebt();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "01-demo", { change: (dir) => resolveDebt(dir, "`packages/demo/package.json`") });
+    const result = assertRefused(host, finish(host, ws), { base });
+    assert.match(
+      result.output,
+      /Verification names packages\/demo\/package\.json, which is not a test file the gate runs/,
+    );
+  });
+
+  it("refuses every ticket while a MEDIUM finding is untriaged", () => {
+    const host = hostWithDebt({ severity: "MEDIUM" });
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws);
+    const result = assertRefused(host, finish(host, ws), { base });
+    assert.match(
+      result.output,
+      /ticket 01-demo is not cleared by the debt gate on [0-9a-f]+ \(needs-triage\): TD-001 \(MEDIUM\) is untriaged/,
+    );
+  });
+
+  it("refuses a ticket that a triaged entry blocks until its owner resolves it", () => {
+    const host = hostWithDebt();
+    maintain(host, "chore(debt): TD-001 blocks ticket 01 until ticket 03", (dir) => {
+      write(dir, "issues/03-fix.md", DEMO.replace("# 01: Demo ticket", "# 03: Fix"));
+      editDebt(dir, { ...TRIAGED, Status: "PLANNED", Target: "ticket 03", Blocks: "01" });
+    });
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws);
+    const result = assertRefused(host, finish(host, ws), { base });
+    assert.match(result.output, /\(waiting\): TD-001 \(CORRECTNESS\) until ticket 03 resolves it/);
+  });
+
+  it("refuses a dependent ticket while a LOW finding of its blocker awaits triage", () => {
+    const host = hostWithDebt();
+    // Ticket 01 is done, and TD-001 came from its review: ticket 02 builds on it.
+    maintain(host, "chore(issues): ticket 01 done", (dir) => {
+      mkdirSync(join(dir, "issues", "done"), { recursive: true });
+      git(dir, "mv", "issues/01-demo.md", "issues/done/01-demo.md");
+      const path = join(dir, "issues", "done", "01-demo.md");
+      writeFileSync(path, readFileSync(path, "utf8").replace("ready-for-agent", "done"));
+    });
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws, "02-next");
+    const result = assertRefused(host, finish(host, ws), { base, ticket: "02" });
+    assert.match(
+      result.output,
+      /\(needs-triage\): TD-001 is untriaged and ticket 02 builds on ticket 01/,
+    );
+  });
+
+  it("lets an independent ticket merge past an untriaged LOW finding it does not build on", () => {
+    // Found by ticket 02's review; ticket 01 does not build on ticket 02.
+    const host = hostWithDebt({ ticket: "issues/02-next.md" });
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws);
+    const result = accept(host, finish(host, ws), { base });
+    assert.equal(result.code, 0, result.output);
+  });
+
+  it("lets a ticket merge past a triaged LOW correctness finding that blocks nothing", () => {
+    const host = hostWithDebt({ ticket: "issues/02-next.md" });
+    maintain(host, "chore(debt): triage TD-001, deferred", (dir) => editDebt(dir, TRIAGED));
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws);
+    const result = accept(host, finish(host, ws), { base });
+    assert.equal(result.code, 0, result.output);
+  });
 });

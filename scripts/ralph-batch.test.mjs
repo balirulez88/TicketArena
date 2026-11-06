@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { parseRegister, renderRegister } from "./ralph-debt.mjs";
 
 const source = fileURLToPath(new URL("..", import.meta.url));
 const identity = {
@@ -46,6 +47,8 @@ function merge() {
   writeFileSync("issues/done/" + file, text);
   git("rm", "--quiet", "issues/" + file);
   writeFileSync("feature-" + ticket + ".txt", "x\\n");
+  const register = JSON.parse(process.env.STUB_REGISTER || "{}")[ticket];
+  if (register) writeFileSync("docs/technical-debt.md", register);
   git("add", "-A");
   git("commit", "--quiet", "-m", "feat(slice-" + ticket + "): demo");
   git("switch", "--quiet", "main");
@@ -111,6 +114,7 @@ function fixture(
     ["02", "None"],
     ["03", "None"],
   ],
+  entries = [],
 ) {
   const dir = mkdtempSync(join(tmpdir(), "ralph-batch-"));
   const github = join(dir, "github.git");
@@ -122,6 +126,9 @@ function fixture(
     join(source, "scripts", "ralph-batch.mjs"),
     join(host, "scripts", "ralph-batch.mjs"),
   );
+  copyFileSync(join(source, "scripts", "ralph-debt.mjs"), join(host, "scripts", "ralph-debt.mjs"));
+  mkdirSync(join(host, "docs"), { recursive: true });
+  writeFileSync(join(host, "docs", "technical-debt.md"), debtRegister(...entries));
   writeFileSync(join(host, ".gitignore"), ".ralph/\n");
   for (const [number, blockedBy, status = "ready-for-agent"] of tickets) {
     writeFileSync(
@@ -141,10 +148,58 @@ function fixture(
   return { dir, host, github };
 }
 
+// --- Debt (ADR 0016) ---------------------------------------------------------------------------
+
+const debtRegister = (...entries) =>
+  renderRegister({
+    preamble: "# Technical Debt Register\n\n",
+    entries,
+    trailer: "\n",
+  });
+
+/** A LOW finding as a review records it: untriaged, found by ticket `source`. */
+const finding = (id, source, fields = {}) => ({
+  id,
+  title: `Finding ${id}`,
+  fields: {
+    Status: "OPEN",
+    Severity: "LOW",
+    Source: `ticket ${source} (\`${source}-t${source}\`)`,
+    Evidence: "`.ralph/host-review/run/x.standards.json`",
+    Components: "`feature.txt:1`",
+    Problem: "p",
+    Impact: "i",
+    Justification: "Non-blocking under the merge policy.",
+    Remediation: "r",
+    ...fields,
+  },
+  history: ["2026-11-06: recorded"],
+});
+const TRIAGED = { Risk: "CORRECTNESS", Triage: "2026-11-06: triaged by a maintainer" };
+
+/** A maintainer's commit on main, pushed: what a human's triage looks like to the batch. */
+function triage(fx, id, fields) {
+  const path = join(fx.host, "docs", "technical-debt.md");
+  const register = parseRegister(readFileSync(path, "utf8"));
+  const entries = register.entries.map((e) =>
+    e.id === id
+      ? { ...e, fields: { ...e.fields, ...fields }, history: [...e.history, "2026-11-06: triaged"] }
+      : e,
+  );
+  writeFileSync(path, renderRegister({ ...register, entries }));
+  git(fx.host, "commit", "--quiet", "-am", `chore(debt): triage ${id}`);
+  git(fx.host, "push", "--quiet", "origin", "main");
+}
+
 function batch(
   fx,
   args,
-  { plan = {}, ci = [], entry = ["node", join(fx.host, "scripts", "ralph-batch.mjs")] } = {},
+  {
+    plan = {},
+    ci = [],
+    debt = {},
+    entry = ["node", join(fx.host, "scripts", "ralph-batch.mjs")],
+  } = {},
 ) {
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([name]) => !name.startsWith("RALPH_")),
@@ -159,6 +214,7 @@ function batch(
       RALPH_BATCH_RUNNER: `node ${join(fx.dir, "runner.mjs")}`,
       RALPH_BATCH_CI: `node ${join(fx.dir, "ci.mjs")}`,
       STUB_PLAN: JSON.stringify(plan),
+      STUB_REGISTER: JSON.stringify(debt),
       STUB_CI: JSON.stringify(ci),
       STUB_RUNNER_LOG: join(fx.dir, "runner.log"),
       STUB_CI_LOG: join(fx.dir, "ci.log"),
@@ -457,5 +513,144 @@ describe("entry points", () => {
     assert.notEqual(code, 0, out);
     assert.match(out, /use 'pnpm sandbox --max-tickets N'/);
     assert.deepEqual(runnerCalls(fx), []);
+  });
+});
+
+describe("bounded batch: the debt gate (ADR 0016)", () => {
+  it("runs independent tickets first, stops needs-triage before one that builds on an untriaged finding, and resumes", () => {
+    const fx = fixture([
+      ["01", "None"],
+      ["02", "01"],
+      ["03", "None"],
+    ]);
+    // Ticket 01's review leaves an untriaged LOW finding; ticket 02 builds on 01.
+    const first = batch(fx, ["--max-tickets", "3"], {
+      debt: { "01": debtRegister(finding("TD-001", "01")) },
+    });
+    assert.equal(first.code, 4, first.out);
+    assert.match(
+      first.out,
+      /STOPPED \(resumable\): needs-triage: .*02-t02\.md: TD-001 is untriaged and ticket 02 builds on ticket 01/,
+    );
+    // The independent ticket 03 proceeds; ticket 02 never runs on risk nobody has judged.
+    assert.deepEqual(runnerCalls(fx), ["01", "03"]);
+    assert.equal(state(fx).status, "running");
+    // A human triages it as deferred; the same batch resumes with its own limit.
+    triage(fx, "TD-001", TRIAGED);
+    const again = batch(fx, []);
+    assert.equal(again.code, 0, again.out);
+    assert.match(again.out, /FINISHED: batch-limit/);
+    assert.deepEqual(runnerCalls(fx), ["01", "03", "02"]);
+  });
+
+  it("lets an independent ticket proceed past an untriaged LOW finding it does not build on", () => {
+    const fx = fixture([
+      ["01", "None"],
+      ["02", "None"],
+    ]);
+    const { code, out } = batch(fx, ["--max-tickets", "2"], {
+      debt: { "01": debtRegister(finding("TD-001", "01")) },
+    });
+    assert.equal(code, 0, out);
+    assert.deepEqual(runnerCalls(fx), ["01", "02"]);
+  });
+
+  it("lets every ticket proceed past a triaged LOW correctness finding that blocks nothing", () => {
+    const fx = fixture(
+      [
+        ["01", "None"],
+        ["02", "01"],
+      ],
+      [finding("TD-001", "01", TRIAGED)],
+    );
+    const { code, out } = batch(fx, ["--max-tickets", "2"]);
+    assert.equal(code, 0, out);
+    assert.deepEqual(runnerCalls(fx), ["01", "02"]);
+  });
+
+  it("never runs a ticket that triaged debt blocks; independent tickets run instead", () => {
+    // TD-001 blocks ticket 01 until ticket 03 resolves it.
+    const blocking = finding("TD-001", "02", {
+      ...TRIAGED,
+      Status: "PLANNED",
+      Target: "ticket 03",
+      Blocks: "01",
+    });
+    const fx = fixture(
+      [
+        ["01", "None"],
+        ["02", "None"],
+        ["03", "None", "blocked"],
+      ],
+      [blocking],
+    );
+    const { code, out } = batch(fx, ["--max-tickets", "3"]);
+    assert.equal(code, 2, out);
+    assert.match(
+      out,
+      /unresolved-dependency: .*01-t01\.md \(debt: TD-001 \(CORRECTNESS\) until ticket 03 resolves it\)/,
+    );
+    // Ticket 01 never runs while TD-001 is unresolved: it cannot bypass the debt.
+    assert.deepEqual(runnerCalls(fx), ["02"]);
+  });
+
+  it("stops before any ticket while a MEDIUM finding is untriaged", () => {
+    const fx = fixture(undefined, [finding("TD-001", "01", { Severity: "MEDIUM" })]);
+    const { code, out } = batch(fx, ["--max-tickets", "1"]);
+    assert.equal(code, 4, out);
+    assert.match(out, /needs-triage: .*01-t01\.md: TD-001 \(MEDIUM\) is untriaged/);
+    assert.deepEqual(runnerCalls(fx), []);
+  });
+
+  it("stops a paused ticket that triaged debt now blocks as a dependency, not as triage", () => {
+    const fx = fixture([
+      ["01", "None"],
+      ["02", "None", "blocked"],
+    ]);
+    const first = batch(fx, ["--max-tickets", "1"], { plan: { "01": ["pause"] } });
+    assert.equal(first.code, 75, first.out);
+    // Meanwhile a maintainer decides ticket 01 relies on a fix ticket 02 owns.
+    writeFileSync(
+      join(fx.host, "docs", "technical-debt.md"),
+      debtRegister(
+        finding("TD-001", "01", {
+          ...TRIAGED,
+          Status: "PLANNED",
+          Target: "ticket 02",
+          Blocks: "01",
+        }),
+      ),
+    );
+    git(fx.host, "commit", "--quiet", "-am", "chore(debt): TD-001 blocks ticket 01");
+    git(fx.host, "push", "--quiet", "origin", "main");
+    const held = batch(fx, []);
+    assert.equal(held.code, 2, held.out);
+    assert.match(held.out, /unresolved-dependency: ticket 01 waits on unresolved debt: TD-001/);
+    assert.deepEqual(runnerCalls(fx), ["01"]);
+  });
+
+  it("does not resume a paused ticket that new debt now holds up, until it is triaged", () => {
+    const fx = fixture([["01", "None"]]);
+    const first = batch(fx, ["--max-tickets", "1"], { plan: { "01": ["pause"] } });
+    assert.equal(first.code, 75, first.out);
+    // Meanwhile a maintainer records a MEDIUM finding nobody has triaged yet.
+    writeFileSync(
+      join(fx.host, "docs", "technical-debt.md"),
+      debtRegister(finding("TD-001", "01", { Severity: "MEDIUM" })),
+    );
+    git(fx.host, "commit", "--quiet", "-am", "chore(debt): record TD-001");
+    git(fx.host, "push", "--quiet", "origin", "main");
+    const held = batch(fx, []);
+    assert.equal(held.code, 4, held.out);
+    assert.match(
+      held.out,
+      /ticket 01 is needs-triage on unresolved debt: TD-001 \(MEDIUM\) is untriaged/,
+    );
+    assert.deepEqual(runnerCalls(fx), ["01"]);
+    triage(fx, "TD-001", { ...TRIAGED, Status: "PLANNED", Target: "ticket 01" });
+    const resumed = batch(fx, []);
+    assert.equal(resumed.code, 0, resumed.out);
+    assert.deepEqual(runnerCalls(fx), ["01", "01"]);
+    assert.equal(mergedCount(fx, "01"), 1);
   });
 });

@@ -12,4 +12,4 @@
 - [ ] TD-031: a sustained outage is not logged on every 250 ms tick: repeated identical failures are rate-limited, and the first success after them is logged (test with a controlled clock).
 - [ ] TD-032: a consumer runner whose fetch fails (broker unreachable) logs the cause at `error` and keeps polling (test).
 - [ ] TD-032: a handler failure is logged with the error and the delivery count before the `nak`, proved by a test (the poison-message loop itself is ticket 25's DLQ gate; the entry names it).
-- [ ] The register entries TD-031 and TD-032 are `RESOLVED` with the verifying tests named in `Verification`, or TD-032 stays `PLANNED` for ticket 25 if only its logging part is fixed here, with that split recorded in its history.
+- [ ] The register entries TD-031 and TD-032 are `RESOLVED` with the verifying tests named in `Verification`. TD-032's fix is the error reporting above; the endless redelivery of a poison message is ticket 25's specified DLQ gate, which the entry's Target names (the host refuses a merge that leaves an owned entry unresolved).

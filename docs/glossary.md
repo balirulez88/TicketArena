@@ -39,3 +39,4 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Consumer runner**    | Worker component running a durable pull consumer; dedupes via `processed_messages` in the handler TX. |
 | **Slice**              | One tracer-bullet ticket: a thin, complete path through every layer, green on its own.                |
 | **Seam**               | A public interface where tests observe behaviour without reaching inside.                             |
+| **Debt gate**          | The host check that holds a ticket on unresolved or untriaged technical debt it relies on (ADR 0016). |

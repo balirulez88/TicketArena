@@ -48,6 +48,23 @@ jobs:
       - name: Quality gate (lint, typecheck, test, harness tests)
         run: pnpm run check
 
+      # ADR 0016: a maintainer's triage is auditable. Against the register this push or pull
+      # request started from, no entry or history line disappears and every changed triage field
+      # comes with a new history line. A new branch's first push has no "before" to compare.
+      - name: Debt register audit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "no base commit to audit against"; exit 0
+          fi
+          git fetch --quiet --depth=1 origin "$BASE_SHA"
+          if ! git cat-file -e "$BASE_SHA:docs/technical-debt.md" 2>/dev/null; then
+            echo "the base has no register"; exit 0
+          fi
+          git show "$BASE_SHA:docs/technical-debt.md" > "$RUNNER_TEMP/debt-base.md"
+          node scripts/ralph-debt.mjs audit docs/technical-debt.md --base "$RUNNER_TEMP/debt-base.md"
+
       - name: Service logs
         if: failure()
         run: docker compose logs --no-color

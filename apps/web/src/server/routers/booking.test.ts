@@ -109,6 +109,33 @@ describe("booking.holdSeats seat-count boundary", () => {
     expect(hold.seatIds).toHaveLength(6);
   });
 
+  test("a hold past the six-seat buyer limit is CONFLICT naming LIMIT_EXCEEDED and holds nothing", async () => {
+    const event = await db().event.findFirstOrThrow({ where: { demo: true } });
+    const seats = await db().seat.findMany({
+      where: { eventId: event.id, status: "AVAILABLE" },
+      orderBy: { id: "asc" },
+      take: 7,
+    });
+    const [extra, ...six] = seats.map((seat) => seat.id);
+    if (extra === undefined || six.length !== 6) {
+      throw new Error(`the demo event needs 7 free seats, found ${seats.length}`);
+    }
+    await caller(alice).booking.holdSeats({ eventId: event.id, seatIds: six });
+
+    await expect(
+      caller(alice).booking.holdSeats({ eventId: event.id, seatIds: [extra] }),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: expect.stringContaining("LIMIT_EXCEEDED"),
+    });
+    expect(await db().seat.findUniqueOrThrow({ where: { id: extra } })).toMatchObject({
+      status: "AVAILABLE",
+      holdId: null,
+      claimBuyerKey: null,
+    });
+    expect(await db().hold.count({ where: { buyerKey: alice.sessionId } })).toBe(1);
+  });
+
   test("seats of another event are CONFLICT and nothing is held", async () => {
     const demo = await db().event.findFirstOrThrow({ where: { demo: true } });
     const other = await db().event.findFirstOrThrow({ where: { demo: false } });

@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** blocked
+**Status:** ready-for-agent
 
 Each criterion names its test and the sabotage that test must catch.
 

@@ -53,6 +53,14 @@ Decision: [ADR 0012](../adr/0012-identity-service-seam.md). Code: `apps/web/src/
 - **Config:** `SESSION_SECRET` (at least 32 bytes) is validated in `parseServerEnv`; the error
   names the field. The proxy and `createTRPCContext` use `parseSessionEnv`, which validates only
   that variable, so an unrelated missing setting (e.g. the Redis token) cannot break page requests.
+- **Metrics config:** `UPSTASH_REDIS_REST_URL` (https) and `UPSTASH_REDIS_REST_TOKEN` are read only
+  by `parseMetricsEnv`, called from `ctx.metrics()` (`apps/web/src/server/upstash-metrics.ts`),
+  never by `createTRPCContext`. The first call builds a `fetch`-based Upstash REST client
+  (`HINCRBY`, bearer token, timeout) behind `createRedisBookingMetrics` and caches the outcome per
+  process. Missing or invalid values therefore fail only procedures that use metrics, with an error
+  naming the variable; the failure is logged once through the app logger and later calls rethrow it
+  without re-parsing. Health and session requests are unaffected. Same per-concern parsing as
+  `parseSessionEnv` and `parseDatabaseEnv`.
 - **Known MVP limitation:** clearing cookies yields a new guest session, so per-session guest
   limits (e.g. the 6-ticket limit) can be bypassed until authentication exists.
 - **API:** `session.whoami` returns the caller's principal.

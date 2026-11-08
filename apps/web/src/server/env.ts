@@ -11,6 +11,11 @@ const serverEnvSchema = z.object({
 
 const sessionEnvSchema = serverEnvSchema.pick({ SESSION_SECRET: true });
 
+const metricsEnvSchema = serverEnvSchema.pick({
+  UPSTASH_REDIS_REST_URL: true,
+  UPSTASH_REDIS_REST_TOKEN: true,
+});
+
 const databaseEnvSchema = serverEnvSchema.pick({ DATABASE_URL: true });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
@@ -46,4 +51,14 @@ export function parseSessionEnv(source: EnvSource): Pick<ServerEnv, "SESSION_SEC
 /** Validates only the database URL, for the tRPC context, which needs nothing else yet. */
 export function parseDatabaseEnv(source: EnvSource): Pick<ServerEnv, "DATABASE_URL"> {
   return parseEnv(databaseEnvSchema, source, "database");
+}
+
+/**
+ * Validates only the Upstash settings, resolved lazily by the metrics dependency so a missing
+ * or invalid value breaks only procedures that record metrics, never health or session requests.
+ */
+export function parseMetricsEnv(
+  source: EnvSource,
+): Pick<ServerEnv, "UPSTASH_REDIS_REST_URL" | "UPSTASH_REDIS_REST_TOKEN"> {
+  return parseEnv(metricsEnvSchema, source, "metrics");
 }

@@ -4,7 +4,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-08 by slice/56-metrics-configuration-bootstrap (replay of 2794ebe554dc)
 
 Each criterion names its test and the sabotage that test must catch.
 

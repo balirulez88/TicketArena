@@ -388,6 +388,12 @@ without `--ticket`, exit 2 before a container exists (`scripts/ralph-driver.sh`)
   as `logs/<slug>.lead-work.patch` (imported by the host), `main` is untouched, exit 1. The
   entrypoint forwards `SIGTERM`/`SIGINT` to the driver so `docker stop` ends this way, not in a
   kill.
+- **Handoff.** The Lead runs its subagents in the foreground and ends its session only after it
+  wrote `.ralph/lead/checklist.md` and `.ralph/lead/changeset.md` (pilot of ticket 56: it ended its
+  turn while the implementer ran in the background). The driver copies `.ralph/lead/` to
+  `logs/<slug>.lead-handoff/` as soon as the session ends. A session that ends without both files
+  is treated as unfinished: nothing is judged, merged or blocked, the work is saved as
+  `lead-work.patch`, exit 1.
 - **Tests and the host.** `pnpm test:harness` (`scripts/ralph-lead.test.sh`, plus the importer
   scenarios in `scripts/ralph-accept.test.mjs`) and `pnpm test:sandbox` (real Docker, scenarios
   `lead-*`).

@@ -75,6 +75,9 @@ YOUR ROLE: coordinate; do not edit files yourself.
   for the whole ticket over many small ones; each brief costs a cold start.
 - \`ticketarena-reviewer\` is a read-only pre-check. Call it AT MOST ONCE, after the ticket is
   green. It is advisory; the host's independent review decides.
+- SUBAGENTS RUN IN THE FOREGROUND ONLY. Never start one with run_in_background, and never end
+  your turn while one is running: your session is over the moment you stop, and the harness then
+  judges the tree as it is. Wait for each subagent's result, read it, and only then continue.
 
 PLAN
 1. Write .ralph/lead/checklist.md: one line per acceptance criterion, with the test that proves it
@@ -89,7 +92,8 @@ PLAN
    another review round. Note MEDIUM and LOW findings in your final message; the host records
    deferred findings in the debt register.
 5. Finish with \`pnpm run check\` green and a final message of at most ten lines: criteria met,
-   open risks. Stop.
+   open risks. Stop. A session that ends without .ralph/lead/checklist.md and
+   .ralph/lead/changeset.md is treated as unfinished and is not judged.
 
 THE HARNESS JUDGES YOU AFTER THE SESSION; you cannot approve or merge your own work:
 - RED is re-proved. The harness resets to the base commit, applies ONLY your \`*.test.ts(x)\` and
@@ -157,6 +161,26 @@ lead_interrupt() {
   log "STOPPED ${LEAD_SLUG}: interrupted. No retry, no fallback, ticket not blocked. Work saved in ${patch}"
   RUN_STATUS=failed
   exit "$1"
+}
+
+# The Lead's checklist, changeset and anything else it wrote under .ralph/lead/ are the handoff
+# evidence. .ralph/ is git-ignored and the clone is thrown away, so they are copied into the run's
+# logs (which the host imports) as soon as the session ends, before the harness touches the tree.
+# Regular files only and size-capped: the Lead is untrusted and the host drops anything else.
+lead_export_handoff() {
+  local dest="${LOG_DIR}/${LEAD_SLUG}.lead-handoff" file
+  [[ -d .ralph/lead ]] || return 0
+  mkdir -p "${dest}"
+  while IFS= read -r -d '' file; do
+    head -c 2097152 "${file}" >"${dest}/$(basename "${file}")" 2>/dev/null || true
+  done < <(find .ralph/lead -maxdepth 1 -type f -not -type l -print0)
+}
+
+# A Lead that stops while a subagent still runs (a background delegation) ends its session with
+# the work unfinished. Both handoff files are written only in the plan's last steps, so their
+# absence is how the harness tells a finished session from an abandoned one.
+lead_handed_off() {
+  [[ -s .ralph/lead/checklist.md && -s .ralph/lead/changeset.md ]]
 }
 
 # Like fresh_session (ralph-loop.sh), with one deliberate difference: compaction stays on. One
@@ -350,6 +374,7 @@ lead_ticket() {
   log "  running the lead session (timeout ${LEAD_TIMEOUT}s); it is the only agent run for this ticket"
   lead_session "${ticket}" "${out}" "${err}" "$(build_lead_prompt "${ticket}" "${base_sha}")" ||
     status=$?
+  lead_export_handoff
   report_usage
   if grep -qiE "${CONTEXT_EXHAUSTED}" "${out}" "${err}" 2>/dev/null; then
     log "  the lead session ran out of context: the ticket is probably too large; split it"
@@ -358,6 +383,11 @@ lead_ticket() {
     lead_stop "${ticket}" "${branch}" "${base_sha}" \
       "$(lead_failure_reason "${status}" "${out}" "${err}")"
     return "${status}"
+  fi
+  if ! lead_handed_off; then
+    lead_stop "${ticket}" "${branch}" "${base_sha}" \
+      "the lead ended its session without handing off (no checklist.md and changeset.md); a subagent was probably left running in the background"
+    return 1
   fi
   if ! lead_git_intact "${branch}" "${base_sha}"; then
     lead_stop "${ticket}" "${branch}" "${base_sha}" \

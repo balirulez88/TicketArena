@@ -22,6 +22,9 @@ cat >"${WORK}/lead.sh" <<'EOF'
 echo "${STUB_LEAD:-ok} ticket ${RALPH_TICKET} phase ${RALPH_PHASE}" >>"${STUB_CALLS}.lead"
 case "${STUB_LEAD:-ok}" in
   ok)
+    mkdir -p .ralph/lead
+    echo "AC1 feature.test.ts::feature; sabotage: drop feature" >.ralph/lead/checklist.md
+    echo "A feature.ts feature.test.ts" >.ralph/lead/changeset.md
     echo "export const feature = 1;" >feature.ts
     echo "test('feature', () => {});" >feature.test.ts
     printf '{"type":"result","is_error":false,"total_cost_usd":0.42,"usage":{"input_tokens":3,"output_tokens":9,"cache_read_input_tokens":100,"cache_creation_input_tokens":50}}\n'
@@ -36,7 +39,20 @@ case "${STUB_LEAD:-ok}" in
     echo "Claude AI usage limit reached|1762300800"
     exit 1
     ;;
+  premature)
+    # What the pilot did: delegated in the background, wrote the checklist, then ended its turn
+    # (exit 0) with the work half done and no changeset.
+    mkdir -p .ralph/lead
+    echo "AC1 feature.test.ts::feature" >.ralph/lead/checklist.md
+    echo "export const partial = 1;" >partial.ts
+    echo "I will wait for the implementer's completion notice." >&2
+    printf '{"type":"result","is_error":false,"result":"waiting for the background implementer"}
+'
+    ;;
   tamper)
+    mkdir -p .ralph/lead
+    echo "AC1" >.ralph/lead/checklist.md
+    echo "A" >.ralph/lead/changeset.md
     echo "export const feature = 1;" >feature.ts
     git switch --quiet main
     ;;
@@ -171,6 +187,7 @@ expect "RED judged the candidate's test alone" bash -c \
   "grep -qx 'feature.test.ts' '${d}.calls.red-tree' && ! grep -qx 'feature.ts' '${d}.calls.red-tree'"
 expect "usage is reported with its caveat" bash -c \
   "grep -q '\$0.4200' '${d}'/.ralph/logs/*/usage.md && grep -q 'not subscription usage' '${d}'/.ralph/logs/*/usage.md"
+expect "the checklist and changeset are exported to the run's logs" bash -c   "grep -q 'sabotage' '${d}'/.ralph/logs/*/01-demo.lead-handoff/checklist.md && test -s '${d}'/.ralph/logs/*/01-demo.lead-handoff/changeset.md"
 expect "the session is logged as ok with exit 0" bash -c \
   "awk -F'\t' '\$4==\"ok\" && \$5==0 {f=1} END{exit !f}' '${d}'/.ralph/logs/*/sessions.tsv"
 
@@ -216,6 +233,25 @@ for kind in fail limit; do
     "git -C '${d}' show slice/01-demo:partial.ts | grep -q partial"
 done
 expect "a provider limit is named as the provider's" grep -q 'provider usage-limit' "${WORK}/stop-limit.out"
+
+# ------------------------------------------------------------------------- premature exit (pilot 56)
+scenario "a lead that ends its turn without handing off is not judged, merged or blocked"
+d="$(new_repo premature)"
+base="$(base_of premature)"
+code=0
+STUB_LEAD=premature run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "non-zero exit" test "${code}" != 0
+expect "the missing handoff is named, with the likely cause" grep -q 'background' "${d}.out"
+expect "main did not move, nothing merged" test "$(base_of premature)" = "${base}"
+expect "the ticket is NOT blocked" test "$(main_status premature)" = ready-for-agent
+expect "no quarantine branch" bash -c "! git -C '${d}' branch --list 'rejected/*' | grep -q ."
+expect "RED and the gate were never asked to judge it" bash -c   "test ! -e '${d}.calls.red-tree' && test ! -e '${d}.calls.gate-ran'"
+expect "exactly one lead session, no retry, no Ralph agent" test   "$(calls premature lead)-$(calls premature agent)" = 1-0
+expect "the partial checklist is still exported as evidence" bash -c   "grep -q 'AC1' '${d}'/.ralph/logs/*/01-demo.lead-handoff/checklist.md"
+expect "the half-done work is kept as a patch" bash -c   "grep -q 'partial.ts' '${d}'/.ralph/logs/*/01-demo.lead-work.patch"
+
+scenario "the lead's prompt orders foreground subagents and names the handoff files"
+expect "foreground rule" bash -c "grep -q 'SUBAGENTS RUN IN THE FOREGROUND ONLY' '${SOURCE_ROOT}/scripts/ralph-lead.sh' && grep -q 'Never start one with run_in_background' '${SOURCE_ROOT}/scripts/ralph-lead.sh'"
 
 # ---------------------------------------------------------------------------------- git tampering
 scenario "a lead that moves git is not trusted: the candidate is not merged or judged"

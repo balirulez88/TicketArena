@@ -369,6 +369,24 @@ describe("imports --hook", () => {
   });
 });
 
+// Only the project's settings fire for an Implementer subagent in the sandbox; hooks in the agent's
+// frontmatter were measured not to, and `pnpm run format` rewrites that frontmatter too (ADR 0019).
+describe("the hook's installation", () => {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+  test("the project settings run the check after every kind of edit", () => {
+    const settings = JSON.parse(readFileSync(join(repoRoot, ".claude/settings.json"), "utf8"));
+    const [entry] = settings.hooks.PostToolUse;
+    assert.deepEqual(entry.matcher.split("|").sort(), ["Bash", "Edit", "Write"]);
+    assert.match(entry.hooks[0].command, /ralph-preflight\.mjs" imports --hook --root/);
+  });
+
+  test("the Implementer's definition does not carry a hook that would not fire", () => {
+    const agent = readFileSync(join(repoRoot, ".claude/agents/ticketarena-implementer.md"), "utf8");
+    assert.doesNotMatch(agent.split("---")[1], /^hooks:/m);
+  });
+});
+
 describe("the check itself failing", () => {
   test("exits 2, which the driver treats as a stop", () => {
     const { root } = repo();

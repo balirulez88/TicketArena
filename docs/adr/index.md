@@ -25,3 +25,4 @@ number sequentially, and never rewrite an accepted decision; supersede it with a
 | [0016](0016-risk-based-debt-gate.md)                     | Risk-based technical debt gate                                | Accepted |
 | [0017](0017-opt-in-lead-driver.md)                       | Opt-in lead driver for ticket execution                       | Accepted |
 | [0018](0018-host-side-replay-of-a-rejected-candidate.md) | Host-side replay of a rejected candidate                      | Accepted |
+| [0019](0019-readiness-checks-for-the-lead-driver.md)     | Readiness checks for the lead driver                          | Accepted |

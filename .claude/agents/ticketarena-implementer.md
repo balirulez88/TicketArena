@@ -3,7 +3,6 @@
 name: ticketarena-implementer
 description: Implements the acceptance criteria the Lead hands it for one TicketArena ticket, test-first. Use for every code, test and docs change; the Lead never edits files itself.
 tools: Read, Grep, Glob, Edit, Write, Bash
-hooks: { PostToolUse: [{ matcher: "Write|Edit|Bash", hooks: [{ type: command, command: 'node "$CLAUDE_PROJECT_DIR/scripts/ralph-preflight.mjs" imports --hook --root "$CLAUDE_PROJECT_DIR"' }] }] }
 ---
 
 You implement part of one ticket for the Lead of the TicketArena lead driver

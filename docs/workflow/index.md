@@ -394,6 +394,15 @@ without `--ticket`, exit 2 before a container exists (`scripts/ralph-driver.sh`)
   `logs/<slug>.lead-handoff/` as soon as the session ends. A session that ends without both files
   is treated as unfinished: nothing is judged, merged or blocked, the work is saved as
   `lead-work.patch`, exit 1.
+- **Readiness ([ADR 0019](../adr/0019-readiness-checks-for-the-lead-driver.md)).** Model-free
+  checks in `scripts/ralph-preflight.mjs`, verdict `READY`, `NEEDS PREPARATION` (exit 5) or
+  `BLOCKED`. Before any image is built, `sandbox.sh` refuses a ticket that is not ready or that a
+  test cannot verify. Before the Lead starts, `run_gate` runs on the base unless the host has
+  already verified this code (`.ralph/baseline/`). A hook in `.claude/settings.json` tells the
+  agent as soon as a test imports what the base cannot load, in review fixes too, and the driver
+  makes the same check on the exact candidate before RED, whether or not the hook ran. A finding
+  stops the run like an unfinished session: nothing judged or blocked, the work kept as
+  `lead-work.patch`. RED and the importer are unchanged.
 - **Tests and the host.** `pnpm test:harness` (`scripts/ralph-lead.test.sh`, plus the importer
   scenarios in `scripts/ralph-accept.test.mjs`) and `pnpm test:sandbox` (real Docker, scenarios
   `lead-*`).

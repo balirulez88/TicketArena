@@ -222,6 +222,10 @@ EOF
 case "${STUB_LEAD:-ok}" in
   ok | notest | evil | fail | slow)
     mkdir -p packages/demo/src
+    # The handoff the driver requires before it judges a session.
+    mkdir -p .ralph/lead
+    echo "AC1 packages/demo/src/demo.test.ts" >.ralph/lead/checklist.md
+    echo "A feature.txt" >.ralph/lead/changeset.md
     [[ "${STUB_LEAD}" == notest || "${STUB_LEAD}" == fail || "${STUB_LEAD}" == slow ]] ||
       echo "test" >packages/demo/src/demo.test.ts
     echo feature >feature.txt

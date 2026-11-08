@@ -1942,13 +1942,21 @@ describe("ralph-accept: the debt gate (ADR 0016)", () => {
 // right thing: the importer decides, exactly as for Ralph's output.
 
 const LEAD_STUB = `#!/usr/bin/env bash
+# The handoff files the driver requires before it judges a session (ralph-lead.sh).
+handoff() {
+  mkdir -p .ralph/lead
+  echo "AC1 feature.test.ts::feature" >.ralph/lead/checklist.md
+  echo "A feature.ts" >.ralph/lead/changeset.md
+}
 case "\${STUB_LEAD:-ok}" in
   ok)
+    handoff
     echo "export const feature = 1;" >feature.ts
     echo "test('feature', () => {});" >feature.test.ts
     echo '{"type":"result","is_error":false,"total_cost_usd":0.1,"usage":{"output_tokens":5}}'
     ;;
   protected)
+    handoff
     echo "// planted" >>scripts/ralph-accept.mjs
     echo "test('feature', () => {});" >feature.test.ts
     ;;

@@ -20,7 +20,13 @@ let alice: Principal = { kind: "guest", sessionId: "a".repeat(32) };
 const bob: Principal = { kind: "guest", sessionId: "b".repeat(32) };
 
 function caller(principal: Principal) {
-  return createCaller({ now: () => NOW, principal, db: db(), logger: silentLogger });
+  return createCaller({
+    now: () => NOW,
+    principal,
+    db: db(),
+    logger: silentLogger,
+    metrics: () => ({ increment: async () => undefined }),
+  });
 }
 
 async function availableSeat() {
@@ -244,6 +250,7 @@ describe("booking.placeOrder / getOrder", () => {
       principal: alice,
       db: db(),
       logger: silentLogger,
+      metrics: () => ({ increment: async () => undefined }),
     });
 
     await expect(
@@ -292,6 +299,7 @@ describe("booking.holdSeats saturation", () => {
           principal: alice,
           db: tight,
           logger: silentLogger,
+          metrics: () => ({ increment: async () => undefined }),
         }).booking.holdSeats({ eventId, seatIds: [seatId] }),
       ).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS", message: /BOOKING_BUSY/ });
     } finally {

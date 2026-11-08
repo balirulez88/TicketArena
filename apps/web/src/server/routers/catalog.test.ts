@@ -19,6 +19,7 @@ function caller() {
     principal: { kind: "guest", sessionId: "0123456789abcdef0123456789abcdef" },
     db: db(),
     logger: silentLogger,
+    metrics: () => ({ increment: async () => undefined }),
   });
 }
 

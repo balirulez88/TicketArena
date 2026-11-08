@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { parseServerEnv, parseSessionEnv } from "./env";
+import { parseMetricsEnv, parseServerEnv, parseSessionEnv } from "./env";
 
 const validEnv = {
   DATABASE_URL: "postgresql://user:pass@db.example.com/ticketarena?sslmode=require",
@@ -45,5 +45,34 @@ describe("parseSessionEnv", () => {
 
   test("names SESSION_SECRET when it is missing", () => {
     expect(() => parseSessionEnv({})).toThrow(/SESSION_SECRET/);
+  });
+});
+
+describe("parseMetricsEnv", () => {
+  const valid = {
+    UPSTASH_REDIS_REST_URL: "https://example.upstash.io",
+    UPSTASH_REDIS_REST_TOKEN: "t",
+  };
+
+  test("accepts a valid URL and token and ignores unrelated variables", () => {
+    expect(parseMetricsEnv({ ...valid, SESSION_SECRET: "short" })).toEqual(valid);
+  });
+
+  test("names UPSTASH_REDIS_REST_URL when it is missing", () => {
+    expect(() => parseMetricsEnv({ UPSTASH_REDIS_REST_TOKEN: "t" })).toThrow(
+      /UPSTASH_REDIS_REST_URL/,
+    );
+  });
+
+  test("names UPSTASH_REDIS_REST_URL when it is not https", () => {
+    expect(() =>
+      parseMetricsEnv({ ...valid, UPSTASH_REDIS_REST_URL: "http://example.upstash.io" }),
+    ).toThrow(/UPSTASH_REDIS_REST_URL/);
+  });
+
+  test("names UPSTASH_REDIS_REST_TOKEN when it is empty", () => {
+    expect(() => parseMetricsEnv({ ...valid, UPSTASH_REDIS_REST_TOKEN: "" })).toThrow(
+      /UPSTASH_REDIS_REST_TOKEN/,
+    );
   });
 });

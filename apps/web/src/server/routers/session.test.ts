@@ -1,20 +1,16 @@
-import { silentLogger } from "@ticketarena/contracts";
-import { createPrismaClient } from "@ticketarena/db";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
+import { createTRPCContext } from "../trpc";
 import { createCaller } from "./_app";
 
-// Procedures under test never touch the database; the client connects lazily, so no server is needed.
-const unusedDb = () =>
-  createPrismaClient({ connectionString: "postgresql://unused@127.0.0.1:1/unused", driver: "pg" });
+// The context is built by the real boundary with the Upstash variables absent: a missing metrics
+// configuration must never break a procedure that does not use metrics.
+test("whoami returns the principal on the context, without Upstash configuration", async () => {
+  vi.stubEnv("SESSION_SECRET", "s".repeat(32));
+  vi.stubEnv("DATABASE_URL", "postgresql://unused@127.0.0.1:1/unused");
+  vi.stubEnv("UPSTASH_REDIS_REST_URL", "");
+  vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "");
+  const ctx = await createTRPCContext({ req: new Request("https://ticketarena.example/") });
 
-test("whoami returns the principal on the context", async () => {
-  const principal = { kind: "guest", sessionId: "0123456789abcdef0123456789abcdef" } as const;
-  const caller = createCaller({
-    now: () => new Date(),
-    principal,
-    db: unusedDb(),
-    logger: silentLogger,
-  });
-
-  expect(await caller.session.whoami()).toEqual(principal);
+  expect(await createCaller(ctx).session.whoami()).toEqual(ctx.principal);
+  vi.unstubAllEnvs();
 });

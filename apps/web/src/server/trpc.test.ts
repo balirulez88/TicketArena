@@ -40,4 +40,20 @@ describe("createTRPCContext", () => {
     expect(principal.sessionId).toMatch(/^[0-9a-f]{32}$/);
     expect(principal.sessionId).not.toBe(forged.split(".")[0]);
   });
+
+  test("does not read the Upstash variables while building the context", async () => {
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "");
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "");
+
+    await expect(createTRPCContext({ req: requestWith() })).resolves.toBeDefined();
+  });
+
+  test("resolving metrics without the Upstash variables fails naming the variable", async () => {
+    vi.stubEnv("UPSTASH_REDIS_REST_URL", "");
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "");
+
+    const ctx = await createTRPCContext({ req: requestWith() });
+
+    expect(() => ctx.metrics()).toThrow(/UPSTASH_REDIS_REST_URL/);
+  });
 });

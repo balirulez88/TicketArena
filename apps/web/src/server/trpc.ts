@@ -1,3 +1,4 @@
+import type { BookingMetrics } from "@ticketarena/booking";
 import type { Logger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
 import { initTRPC } from "@trpc/server";
@@ -5,6 +6,7 @@ import superjson from "superjson";
 import { parseDatabaseEnv, parseSessionEnv } from "./env";
 import { type CookieReader, createIdentityService, type Principal } from "./identity/identity";
 import { createWebLogger } from "./logger";
+import { createLazyMetrics } from "./upstash-metrics";
 
 /**
  * Per-request context. Infrastructure (clock, and later db/redis/outbox) is injected here
@@ -18,6 +20,11 @@ export interface TRPCContext {
   readonly db: PrismaClient;
   /** Created at the app boundary; procedures bind booking ids on top of it. */
   readonly logger: Logger;
+  /**
+   * Resolved on first call and cached per process, so the Upstash variables are read only by
+   * procedures that record metrics; throws when that configuration is invalid.
+   */
+  readonly metrics: () => BookingMetrics;
 }
 
 // One client per server process: the Neon driver pools internally, and a fresh client per
@@ -34,12 +41,14 @@ function database(): PrismaClient {
 
 const logger = createWebLogger();
 
+const metrics = createLazyMetrics({ readEnv: () => process.env, logger });
+
 export async function createTRPCContext({ req }: { req: Request }): Promise<TRPCContext> {
   const identity = createIdentityService({
     sessionSecret: parseSessionEnv(process.env).SESSION_SECRET,
   });
   const principal = await identity.resolve(cookieReader(req.headers.get("cookie")));
-  return { now: () => new Date(), principal, db: database(), logger };
+  return { now: () => new Date(), principal, db: database(), logger, metrics };
 }
 
 // Parsed by hand: the tRPC fetch adapter hands us a plain Request, not Next's cookie store, and

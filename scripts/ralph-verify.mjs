@@ -4,6 +4,11 @@
 // a slice reach the base branch:
 //
 //   node scripts/ralph-verify.mjs <commit>        (scripts/sandbox.sh --verify builds the image)
+//   node scripts/ralph-verify.mjs --red <commit> <test file>...
+//
+// The second form is the RED proof of scripts/ralph-replay.mjs: <commit> holds the base plus only
+// the candidate's test files, and the same prepared, offline, read-only test container runs lint
+// and then exactly those files through scripts/ralph-red.mjs. Exit 0 only if RED is proven.
 //
 // The candidate's tests and package code were written by the agent, so they are executed as
 // untrusted code, never inside a process whose word the host takes. Every stage is a disposable
@@ -144,13 +149,17 @@ function container(name, options, args) {
   return result.status ?? 1;
 }
 
-export function verify(commit) {
+/**
+ * Prepares a workspace volume at `commit` (a bundle of just that commit, the dependencies
+ * installed with only trusted code running) and hands `run` the helpers for its offline stages.
+ * The volume and the run directory are gone afterwards. `run` returns the exit status.
+ */
+function withWorkspace(commit, describe, run) {
   const sha = git("rev-parse", "--verify", `${commit}^{commit}`);
   const id = `${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${process.pid}`;
   const runDir = join(root, ".ralph", "sandbox", `verify-${id}`);
   const volume = `ralph-verify-${id}`;
   const prefix = `ralph-verify-${id}`;
-  const targets = testTargets(sha);
   mkdirSync(join(runDir, "in"), { recursive: true });
   // A bundle carries refs, not bare commits: name the commit under a private ref only for that.
   git("update-ref", `refs/ralph/verify/${id}`, sha);
@@ -179,9 +188,7 @@ export function verify(commit) {
     throw new Error(`could not create the Docker volume ${volume}`);
   }
   try {
-    log(
-      `verifying ${sha.slice(0, 12)}: prepare, tools, then tests in ${targets.join(", ") || "no package"}`,
-    );
+    log(`${describe(sha)}: prepare first`);
     const prepared = container(
       `${prefix}-prepare`,
       [...input, ...shared(""), "--env", `RALPH_VERIFY_COMMIT=${sha}`],
@@ -190,44 +197,93 @@ export function verify(commit) {
     if (prepared !== 0) {
       return 1;
     }
-    if (container(`${prefix}-tools`, [...offline, ...shared("")], ["--tools"]) !== 0) {
-      return 1;
-    }
-    let failed = 0;
-    for (const [index, target] of targets.entries()) {
-      const temp = `${WORKSPACE}/${target === "." ? "" : `${target}/`}node_modules/.vite-temp`;
-      const status = container(
-        `${prefix}-test-${index}`,
-        [
-          ...offline,
-          "--read-only",
-          "--tmpfs",
-          `${temp}:exec,uid=1000,gid=1000`,
-          ...shared(",readonly"),
-        ],
-        ["--test", target],
-      );
-      failed += status === 0 ? 0 : 1;
-    }
-    log(
-      failed === 0
-        ? `${sha.slice(0, 12)}: the gate passed`
-        : `${sha.slice(0, 12)}: ${failed} test stage(s) FAILED`,
-    );
-    return failed === 0 ? 0 : 1;
+    return run({ sha, prefix, offline, shared });
   } finally {
     spawnSync("docker", ["volume", "rm", "--force", volume], { stdio: "ignore" });
     rmSync(runDir, { recursive: true, force: true });
   }
 }
 
+// The test stages see the prepared workspace read-only; Vite's temp directory is their one
+// writable path in a package.
+const tempDir = (target) =>
+  `${WORKSPACE}/${target === "." ? "" : `${target}/`}node_modules/.vite-temp`;
+const testMounts = (offline, shared, ...targets) => [
+  ...offline,
+  "--read-only",
+  ...targets.flatMap((target) => ["--tmpfs", `${tempDir(target)}:exec,uid=1000,gid=1000`]),
+  ...shared(",readonly"),
+];
+
+export function verify(commit) {
+  const sha = git("rev-parse", "--verify", `${commit}^{commit}`);
+  const targets = testTargets(sha);
+  return withWorkspace(
+    sha,
+    (full) =>
+      `verifying ${full.slice(0, 12)}: prepare, tools, then tests in ${targets.join(", ") || "no package"}`,
+    ({ prefix, offline, shared }) => {
+      if (container(`${prefix}-tools`, [...offline, ...shared("")], ["--tools"]) !== 0) {
+        return 1;
+      }
+      let failed = 0;
+      for (const [index, target] of targets.entries()) {
+        const status = container(`${prefix}-test-${index}`, testMounts(offline, shared, target), [
+          "--test",
+          target,
+        ]);
+        failed += status === 0 ? 0 : 1;
+      }
+      log(
+        failed === 0
+          ? `${sha.slice(0, 12)}: the gate passed`
+          : `${sha.slice(0, 12)}: ${failed} test stage(s) FAILED`,
+      );
+      return failed === 0 ? 0 : 1;
+    },
+  );
+}
+
+/**
+ * RED for a replayed candidate: `commit` is the base plus only the candidate's test files. Every
+ * test file must execute and at least one test must fail (scripts/ralph-red.mjs), after lint.
+ * The tests run exactly as the gate's tests do: offline, read-only, in a disposable container.
+ */
+export function proveRed(commit, tests) {
+  if (tests.length === 0) {
+    throw new Error("RED needs at least one test file");
+  }
+  return withWorkspace(
+    commit,
+    (full) => `proving RED of ${tests.length} test file(s) on ${full.slice(0, 12)}`,
+    ({ sha, prefix, offline, shared }) => {
+      // Vitest bundles each package's config into that package's temp directory, so every package
+      // that can own one of the files gets its one writable path.
+      const status = container(
+        `${prefix}-red`,
+        testMounts(offline, shared, ".", ...testTargets(sha)),
+        ["--red", ...tests],
+      );
+      log(`${sha.slice(0, 12)}: RED ${status === 0 ? "proven" : "NOT proven"}`);
+      return status;
+    },
+  );
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const commit = process.argv[2];
-    if (!commit) {
-      throw new Error("usage: ralph-verify.mjs <commit>");
+    const [first, ...rest] = process.argv.slice(2);
+    if (first === "--red") {
+      const [commit, ...tests] = rest;
+      if (!commit || tests.length === 0) {
+        throw new Error("usage: ralph-verify.mjs --red <commit> <test file>...");
+      }
+      process.exitCode = proveRed(commit, tests);
+    } else if (first && first !== "--red") {
+      process.exitCode = verify(first);
+    } else {
+      throw new Error("usage: ralph-verify.mjs <commit> | --red <commit> <test file>...");
     }
-    process.exitCode = verify(commit);
   } catch (error) {
     log(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;

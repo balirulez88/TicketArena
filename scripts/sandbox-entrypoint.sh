@@ -17,6 +17,8 @@
 #   --tools      register check, lint, typecheck, harness tests (no network)
 #   --test DIR   the `test` script of one workspace directory against fresh services (no network,
 #                read-only workspace): the only stage that runs the slice's own code
+#   --red FILE.. RED proof of a replayed candidate (scripts/ralph-replay.mjs): lint, then exactly
+#                these test files through scripts/ralph-red.mjs. Same isolation as --test.
 set -Eeuo pipefail
 
 readonly IN=/ralph-in
@@ -110,6 +112,32 @@ case "${1:-}" in
     echo "sandbox: test ${target}" >&2
     cd "${dir}"
     PATH="${dir}/node_modules/.bin:${VERIFY_ROOT}/node_modules/.bin:${PATH}" exec bash -c "${command}"
+    ;;
+  --red)
+    # The candidate's tests run against a workspace that holds only the base plus those tests, so
+    # this stage is as untrusted as --test and gets the same isolation, and the same refusal.
+    scope="$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo none)"
+    [[ "${scope}" =~ ^[1-3]$ ]] || {
+      echo "sandbox: the kernel does not restrict ptrace (Yama ptrace_scope: ${scope}); refusing to run tests" >&2
+      exit 1
+    }
+    shift
+    (($# > 0)) || {
+      echo "sandbox: --red needs the test files" >&2
+      exit 1
+    }
+    run_root_script lint
+    # shellcheck source=sandbox-services.sh
+    source /usr/local/lib/sandbox-services.sh
+    sandbox_start_services
+    echo "sandbox: red $*" >&2
+    cd "${VERIFY_ROOT}"
+    status=0
+    PATH="${VERIFY_ROOT}/node_modules/.bin:${PATH}" node scripts/ralph-red.mjs       --runner "pnpm exec vitest" --out /tmp/ralph-red "$@" || status=$?
+    # The container is gone afterwards: show why a package produced no report. Output only; the
+    # verdict is the exit status.
+    ((status == 0)) || tail -n 40 /tmp/ralph-red/*.log >&2 2>/dev/null || true
+    exit "${status}"
     ;;
   --review)
     # One reviewer of the host's own review (scripts/ralph-host-review.mjs): a fresh session over

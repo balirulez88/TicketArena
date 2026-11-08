@@ -60,6 +60,16 @@ case "${STUB_LEAD:-ok}" in
     printf '{"type":"result","is_error":false,"result":"waiting for the background implementer"}
 '
     ;;
+  undeclared | check-broken)
+    # A finished candidate whose test loads a package the base does not have.
+    mkdir -p .ralph/lead
+    echo "AC1 feature.test.ts::feature" >.ralph/lead/checklist.md
+    echo "A feature.ts feature.test.ts" >.ralph/lead/changeset.md
+    echo "export const feature = 1;" >feature.ts
+    printf 'import "brand-new";\ntest("feature", () => {});\n' >feature.test.ts
+    [[ "${STUB_LEAD}" != check-broken ]] || rm scripts/ralph-preflight.mjs
+    printf '{"type":"result","is_error":false}\n'
+    ;;
   tamper)
     mkdir -p .ralph/lead
     echo "AC1" >.ralph/lead/checklist.md
@@ -87,7 +97,7 @@ new_repo() {
   local dir="${WORK}/$1"
   mkdir -p "${dir}/scripts" "${dir}/skills/code-review" "${dir}/issues" "${dir}/docs"
   cp "${SOURCE_ROOT}/ralph-loop.sh" "${dir}/"
-  cp "${SOURCE_ROOT}"/scripts/{ralph-lead.sh,ralph-driver.sh,ralph-usage.mjs,ralph-review.mjs,ralph-review-prompt.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs} "${dir}/scripts/"
+  cp "${SOURCE_ROOT}"/scripts/{ralph-lead.sh,ralph-driver.sh,ralph-preflight.mjs,ralph-usage.mjs,ralph-review.mjs,ralph-review-prompt.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs} "${dir}/scripts/"
   printf '# Technical Debt Register\n\n<!-- ralph-debt:begin -->\n<!-- ralph-debt:end -->\n' \
     >"${dir}/docs/technical-debt.md"
   node "${dir}/scripts/ralph-debt.mjs" format "${dir}/docs/technical-debt.md"
@@ -119,13 +129,28 @@ run_lead_body() {
     # shellcheck source=ralph-lead.sh
     source ./scripts/ralph-lead.sh
     run_gate() {
+      # Before the Lead has started, the only gate that runs is the baseline check on the base.
+      if [[ ! -f "${STUB_CALLS}.lead" ]]; then
+        echo x >>"${STUB_CALLS}.baseline"
+        if [[ "${STUB_BASELINE:-pass}" == fail ||
+          ("${STUB_BASELINE:-pass}" == flaky && "$(wc -l <"${STUB_CALLS}.baseline")" -eq 1) ]]; then
+          echo "baseline failed" >"$1"
+          return 1
+        fi
+        : >"$1"
+        return 0
+      fi
       : >"${STUB_CALLS}.gate-ran"
       if [[ "${STUB_GATE:-pass}" == pass ]]; then : >"$1"; else
         echo "gate failed" >"$1"
         return 1
       fi
     }
+    [[ "${STUB_BASELINE_KEY:-}" != current ]] ||
+      export RALPH_BASELINE_VERIFIED="$(ralph_baseline_key "${PWD}/scripts/ralph-preflight.mjs" HEAD)"
+    [[ "${STUB_BASELINE_KEY:-}" != stale ]] || export RALPH_BASELINE_VERIFIED=stale-key
     verify_red() {
+      : >"${STUB_CALLS}.red-ran"
       if [[ "${STUB_RED:-pass}" == slow ]]; then
         : >"${STUB_CALLS}.red-started"
         sleep 60 &
@@ -370,6 +395,91 @@ code=0
 STUB_LEAD=ok run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
 expect "a ticket paused by the Ralph driver is not taken over" test "${code}" != 0
 expect "still no lead session" test "$(calls notask lead)" = 0
+
+# -------------------------------------------------------------------------------- readiness (ADR 0019)
+scenario "the check before RED stops a candidate the base cannot load: no RED, no block, work kept"
+d="$(new_repo notready)"
+code=0
+STUB_LEAD=undeclared run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "exit non-zero" test "${code}" != 0
+expect "says what is needed" grep -q 'NEEDS PREPARATION' "${d}.out"
+expect "names the import" grep -q 'brand-new' "${d}.out"
+expect "RED and the gate never ran" test ! -e "${d}.calls.red-ran" -a ! -e "${d}.calls.gate-ran"
+expect "nothing merged" no_merge notready
+expect "the ticket is not blocked" test "$(main_status notready)" = ready-for-agent
+expect "no quarantine branch" test -z "$(git -C "${d}" for-each-ref 'refs/heads/rejected/')"
+expect "the work is kept as a patch" bash -c \
+  "grep -q 'brand-new' '${d}'/.ralph/logs/*/01-demo.lead-work.patch"
+expect "the session's lack of a hook is reported, and did not matter" \
+  grep -q 'hook never fired' "${d}.out"
+
+scenario "a check that cannot run stops the run; it is never read as a pass"
+d="$(new_repo checkbroken)"
+code=0
+STUB_LEAD=check-broken run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "exit non-zero" test "${code}" != 0
+expect "says so" grep -q 'could not run' "${d}.out"
+expect "RED never ran" test ! -e "${d}.calls.red-ran"
+expect "nothing merged" no_merge checkbroken
+expect "the ticket is not blocked" test "$(main_status checkbroken)" = ready-for-agent
+
+scenario "a candidate that passes the check still has to pass RED"
+d="$(new_repo stillred)"
+code=0
+STUB_LEAD=ok STUB_RED=fail run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "RED ran and rejected it" test -e "${d}.calls.red-ran" -a "${code}" != 0
+expect "the ticket is blocked as before" test "$(main_status stillred)" = blocked
+
+scenario "a base the host already verified is not run again"
+d="$(new_repo reuse)"
+code=0
+STUB_LEAD=ok STUB_BASELINE_KEY=current run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "merged" test "${code}" = 0
+expect "no baseline run" test "$(calls reuse baseline)" = 0
+
+scenario "a verification of other code is not reused"
+d="$(new_repo stale)"
+code=0
+STUB_LEAD=ok STUB_BASELINE_KEY=stale run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "merged" test "${code}" = 0
+expect "exactly one baseline run" test "$(calls stale baseline)" = 1
+
+scenario "a red base stops before the session and blocks nothing"
+d="$(new_repo redbase)"
+code=0
+STUB_LEAD=ok STUB_BASELINE=fail run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "exit non-zero" test "${code}" != 0
+expect "says BLOCKED" grep -q 'BLOCKED' "${d}.out"
+expect "tried once more" test "$(calls redbase baseline)" = 2
+expect "no lead session" test "$(calls redbase lead)" = 0
+expect "the ticket is untouched" test "$(main_status redbase)" = ready-for-agent
+
+scenario "a flaky base is reported and the ticket goes on"
+d="$(new_repo flaky)"
+code=0
+STUB_LEAD=ok STUB_BASELINE=flaky run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "merged" test "${code}" = 0
+expect "reported" grep -q 'FLAKY' "${d}.out"
+
+scenario "a ticket a test cannot verify never starts, and --dry-run says so without running anything"
+d="$(new_repo docsonly)"
+printf -- '- [ ] The limits are documented in `docs/limits.md`.\n' >>"${d}/issues/01-demo.md"
+git -C "${d}" -c user.name=t -c user.email=t@t commit --quiet -am "criterion"
+code=0
+STUB_LEAD=ok run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "exit 5" test "${code}" = 5
+expect "says what to change" grep -q 'Documentation deliverable' "${d}.out"
+expect "no baseline, no lead session" test "$(calls docsonly baseline)$(calls docsonly lead)" = 00
+code=0
+run_lead "${d}" --ticket 01 --dry-run >"${d}.out" 2>&1 || code=$?
+expect "dry run: exit 5" test "${code}" = 5
+sed -i '$d' "${d}/issues/01-demo.md"
+sed -i 's/ready-for-agent/blocked/' "${d}/issues/01-demo.md"
+git -C "${d}" -c user.name=t -c user.email=t@t commit --quiet -am "block"
+code=0
+run_lead "${d}" --ticket 01 --dry-run >"${d}.out" 2>&1 || code=$?
+expect "dry run on a blocked ticket: exit 1" test "${code}" = 1
+expect "dry run says BLOCKED" grep -q 'BLOCKED' "${d}.out"
 
 if ((failures > 0)); then
   echo "${failures} check(s) failed" >&2

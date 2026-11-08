@@ -7,6 +7,7 @@
 #
 #   ralph_driver_script <RALPH_DRIVER value>   prints the driver's path in the workspace
 #   ralph_driver_check <RALPH_DRIVER value> <args...>   as above, plus the lead's one-ticket rule
+#   ralph_baseline_key <ralph-preflight.mjs> <commit>   identifies that commit's code (ADR 0019)
 
 ralph_driver_script() {
   case "${1:-}" in
@@ -37,4 +38,12 @@ ralph_driver_check() {
   done
   echo "sandbox: RALPH_DRIVER=lead needs an explicit --ticket NN (one ticket per run)" >&2
   return 2
+}
+
+# Tickets and the debt register are the harness's own records: the host commits to them right after
+# verifying a slice (a blocked status, deferred findings), and the debt gate validates them on every
+# run. Moving them does not change what the gate verified.
+ralph_baseline_key() {
+  node "$1" baseline-key --root "$(dirname "$1")/.." --commit "$2" \
+    --exclude issues/ --exclude docs/technical-debt.md
 }

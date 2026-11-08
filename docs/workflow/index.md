@@ -560,3 +560,18 @@ developer machines and in CI) are in [ADR 0015](../adr/0015-review-and-verificat
 use it after changing the image. The agent runs with permission prompts disabled **only** inside
 the container (`RALPH_SANDBOX=1`); the script refuses to do so elsewhere unless explicitly
 overridden.
+
+## Replaying a rejected candidate ([ADR 0018](../adr/0018-host-side-replay-of-a-rejected-candidate.md))
+
+When the host review blocked a slice because of its ticket (for example a documentation-only
+criterion), amend the ticket and set it `ready-for-agent` in a reviewed commit, then:
+
+```bash
+node scripts/ralph-replay.mjs --candidate rejected/<slug>-<run> --expect <full commit>            # reproduce + RED
+node scripts/ralph-replay.mjs --candidate rejected/<slug>-<run> --expect <full commit> --accept   # + importer
+```
+
+It reproduces the implementation byte for byte, re-proves RED in the hardened container and hands
+the bundle to `ralph-accept.mjs`, which still runs the path rules, the debt gate, the hardened gate
+and fresh independent reviews. It is host-only, never writes the quarantine branch and refuses a
+moved candidate or a base that changed the candidate's files.

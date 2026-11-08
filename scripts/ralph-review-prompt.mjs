@@ -17,6 +17,9 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
+// Tickets state documentation requirements here instead of as criteria (issues/README.md).
+const DOC_DELIVERABLE = /^\*\*Documentation deliverable/m;
+
 const AXIS_BRIEF = {
   standards: `- Standards brief: judge architecture (ADRs, module boundaries, dependency direction),
   correctness (concurrency, transactions, idempotency), security (validation, authz, secrets),
@@ -73,6 +76,14 @@ export function reviewPrompt(input) {
     `- Spec: the ticket ${input.ticket} and the spec and ADRs it references. Acceptance criteria:`,
     ...numberedCriteria(input.ticketText),
     AXIS_BRIEF[input.axis],
+    ...(input.axis === "spec" && DOC_DELIVERABLE.test(input.ticketText)
+      ? [
+          "- The ticket has a Documentation deliverable paragraph. It is not an acceptance criterion (no test",
+          "  can verify prose), but it is part of the ticket: check from the changeset that the docs it names",
+          "  exist and say what it requires. A deliverable that is missing, or that the docs contradict, is a",
+          "  HIGH finding on the Spec axis.",
+        ]
+      : []),
     "- Standards: discover the sources as the skill describes, starting from CLAUDE.md.",
     `- Technical debt: ${input.register} is the register of findings deferred by earlier reviews.`,
     "  Read the entries whose Components overlap the changed files. If a finding of yours is the same",

@@ -39,6 +39,17 @@ case "${STUB_LEAD:-ok}" in
     echo "Claude AI usage limit reached|1762300800"
     exit 1
     ;;
+  symlinked)
+    # A handoff directory that is a link to somewhere else must neither pass nor be exported.
+    secret="$(mktemp -d)"
+    echo "TOP-SECRET" >"${secret}/checklist.md"
+    echo "TOP-SECRET" >"${secret}/changeset.md"
+    mkdir -p .ralph
+    rm -rf .ralph/lead
+    ln -s "${secret}" .ralph/lead
+    echo "export const partial = 1;" >partial.ts
+    printf '{"type":"result","is_error":false}\n'
+    ;;
   premature)
     # What the pilot did: delegated in the background, wrote the checklist, then ended its turn
     # (exit 0) with the work half done and no changeset.
@@ -249,6 +260,23 @@ expect "RED and the gate were never asked to judge it" bash -c   "test ! -e '${d
 expect "exactly one lead session, no retry, no Ralph agent" test   "$(calls premature lead)-$(calls premature agent)" = 1-0
 expect "the partial checklist is still exported as evidence" bash -c   "grep -q 'AC1' '${d}'/.ralph/logs/*/01-demo.lead-handoff/checklist.md"
 expect "the half-done work is kept as a patch" bash -c   "grep -q 'partial.ts' '${d}'/.ralph/logs/*/01-demo.lead-work.patch"
+
+probe="$(mktemp -d "${WORK}/probe.XXXXXX")"
+mkdir "${probe}/target"
+ln -s "${probe}/target" "${probe}/link" 2>/dev/null || true
+if [[ -L "${probe}/link" ]]; then
+scenario "a handoff directory that is a symlink is neither accepted nor exported"
+d="$(new_repo symlinked)"
+code=0
+STUB_LEAD=symlinked run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "non-zero exit" test "${code}" != 0
+expect "treated as no handoff" grep -q 'without handing off' "${d}.out"
+expect "nothing outside the clone was copied into the logs" bash -c \
+  "! grep -rq 'TOP-SECRET' '${d}'/.ralph/logs 2>/dev/null"
+expect "nothing merged, ticket not blocked" test "$(main_status symlinked)" = ready-for-agent
+else
+  echo "  skip  symlinks are unavailable on this host (the Linux gate runs this scenario)"
+fi
 
 scenario "the lead's prompt orders foreground subagents and names the handoff files"
 expect "foreground rule" bash -c "grep -q 'SUBAGENTS RUN IN THE FOREGROUND ONLY' '${SOURCE_ROOT}/scripts/ralph-lead.sh' && grep -q 'Never start one with run_in_background' '${SOURCE_ROOT}/scripts/ralph-lead.sh'"

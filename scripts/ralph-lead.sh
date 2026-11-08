@@ -169,18 +169,27 @@ lead_interrupt() {
 # Regular files only and size-capped: the Lead is untrusted and the host drops anything else.
 lead_export_handoff() {
   local dest="${LOG_DIR}/${LEAD_SLUG}.lead-handoff" file
-  [[ -d .ralph/lead ]] || return 0
-  mkdir -p "${dest}"
+  lead_dir_real || return 0
+  mkdir -p "${dest}" || return 0
   while IFS= read -r -d '' file; do
-    head -c 2097152 "${file}" >"${dest}/$(basename "${file}")" 2>/dev/null || true
+    # timeout: a file swapped for a FIFO after the listing must not hang the run.
+    timeout 10 head -c 2097152 "${file}" >"${dest}/$(basename "${file}")" 2>/dev/null || true
   done < <(find .ralph/lead -maxdepth 1 -type f -not -type l -print0)
+}
+
+# The Lead's directory must be a real one: a symlinked .ralph or .ralph/lead could point the
+# export (and the handoff check) at any directory the agent likes.
+lead_dir_real() {
+  [[ -d .ralph/lead && ! -L .ralph && ! -L .ralph/lead ]]
 }
 
 # A Lead that stops while a subagent still runs (a background delegation) ends its session with
 # the work unfinished. Both handoff files are written only in the plan's last steps, so their
 # absence is how the harness tells a finished session from an abandoned one.
 lead_handed_off() {
-  [[ -s .ralph/lead/checklist.md && -s .ralph/lead/changeset.md ]]
+  lead_dir_real &&
+    [[ -f .ralph/lead/checklist.md && ! -L .ralph/lead/checklist.md && -s .ralph/lead/checklist.md ]] &&
+    [[ -f .ralph/lead/changeset.md && ! -L .ralph/lead/changeset.md && -s .ralph/lead/changeset.md ]]
 }
 
 # Like fresh_session (ralph-loop.sh), with one deliberate difference: compaction stays on. One

@@ -6,7 +6,7 @@
 
 **Blocked by:** 10
 
-**Status:** ready-for-agent
+**Status:** blocked
 
 Each criterion names its test and the sabotage that test must catch: making the stated change to the production code must turn that test red.
 

@@ -51,3 +51,8 @@ with that diagnosis; split it into smaller tickets.
 - [ ] Acceptance criterion 1
 - [ ] Acceptance criterion 2
 ```
+
+Every acceptance criterion (`- [ ]`) must be verifiable by a named test: the host review treats a
+criterion without one as `unverifiable`, which blocks the merge. A documentation requirement is
+not a criterion. Write it as a `**Documentation deliverable (reviewed, not test-verified):**`
+paragraph and put the behaviour it describes in a criterion that a test asserts.

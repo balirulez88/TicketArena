@@ -94,7 +94,7 @@ Saturation: a `holdSeats` whose pool acquire (`pg` `connectionTimeoutMillis`) or
 (Prisma `maxWait`, `P2028`) times out fails with `BookingBusyError` (`BOOKING_BUSY`, tRPC
 `TOO_MANY_REQUESTS`) and counts `booking_busy`. `createPrismaClient` takes `poolMax`,
 `acquireTimeoutMs` and `transaction` so callers size pool and timeouts. Lock-timeout and deadlock
-retry, and the same mapping for `placeOrder`, remain ticket 12 (TD-020).
+retry, and the same mapping for `placeOrder`, are ticket 54 (TD-020).
 
 Orders: `booking.placeOrder` (no admission required) and `booking.getOrder` (owner only, else
 `NOT_FOUND`). `placeOrder` runs one transaction with the lock order buyer lock (same key as `holdSeats`, taken after an unlocked read of the hold's event), hold `FOR UPDATE`, seats

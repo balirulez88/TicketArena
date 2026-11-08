@@ -1,0 +1,16 @@
+# 56: Metrics configuration bootstrap
+
+**What to build:** the web app can reach Upstash Redis for booking metrics, with its configuration validated at the boundary, and a missing or invalid metrics configuration can never break requests that do not use metrics (health check, session). Spec: Admin dashboard (metrics); ADR 0012, ADR 0013. Remediation split from ticket 12 (part 3 of 4, see `issues/12-lock-timeout-and-deadlock-retry.md`): its second rejected attempt made every tRPC request fail when the Upstash variables were absent.
+
+**Blocked by:** None (can start immediately)
+
+**Status:** ready-for-agent
+
+Each criterion names its test and the sabotage that test must catch.
+
+- [ ] Ground rules: packages never read `process.env`; configuration is parsed in `apps/web` and injected (CLAUDE.md). No existing assertion is removed or loosened. No new dependency: the Upstash client is a `fetch`-based REST call.
+- [ ] Configuration: `parseMetricsEnv` in `apps/web/src/server/env.ts` validates `UPSTASH_REDIS_REST_URL` (https URL) and `UPSTASH_REDIS_REST_TOKEN` (non-empty) with zod, and its error names each offending variable. Tests: missing URL, non-https URL and empty token each fail naming that variable; a valid pair parses. Sabotage: dropping the https check turns a test red.
+- [ ] Client: an Upstash REST client implements `RedisMetricsClient.hIncrBy` by POSTing `["HINCRBY", key, field, increment]` with `Authorization: Bearer <token>` and a request timeout; a non-2xx response, an Upstash `error` body, or the timeout rejects with an error naming the command (never the token). Tests against a local fake HTTP server assert the method, path, body and header, and each rejection. Sabotage: omitting the header, or ignoring the timeout, turns a test red.
+- [ ] Lazy, isolated resolution: the tRPC context offers booking metrics as a dependency resolved on first use and cached per process, so the Upstash variables are read only when a procedure uses metrics. Router tests with the Upstash variables absent: `health.check` and `session.whoami` succeed; resolving the metrics dependency fails with an error naming the missing variable. Sabotage: resolving metrics eagerly in `createTRPCContext` turns the health and session tests red.
+- [ ] Startup visibility: a misconfigured metrics setup is reported once, at the boundary, naming the variable (the first resolution logs it through the app logger); a later resolution in the same process does not re-parse. Test: two resolutions with a bad configuration log once and fail both times with the same message.
+- [ ] `docs/` records where the metrics configuration is read, what fails when it is missing (only procedures that use metrics) and why (the existing per-concern env parsing, as `parseSessionEnv` does for the proxy).

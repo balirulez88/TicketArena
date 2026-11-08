@@ -2,7 +2,7 @@
 
 **What to build:** capacity and durability claims are backed by repeatable load tests and recorded results. Spec: Load tests; ADR 0004.
 
-**Blocked by:** 31, 12
+**Blocked by:** 31, 54, 55, 56, 57 (ticket 12 was split into 54–57; every part must be done)
 
 **Status:** ready-for-agent
 

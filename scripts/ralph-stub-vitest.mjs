@@ -16,11 +16,20 @@ if (log) {
 }
 const out = args.find((arg) => arg.startsWith("--outputFile="))?.slice("--outputFile=".length);
 const files = args.filter((arg) => !arg.startsWith("--") && arg !== "run");
+// Flags (a runner string can carry them where the environment cannot reach): --pass reports every
+// test as passing; --load-error is STUB_VITEST_LOAD_ERROR.
+const passing = args.includes("--pass");
+const failToLoad = loadError || args.includes("--load-error");
 const failing = [{ status: "failed", fullName: "the missing behaviour" }];
 const testResults = files.map((file) =>
-  loadError
+  failToLoad
     ? { name: resolve(file), status: "failed", message: "Cannot find module", assertionResults: [] }
-    : { name: resolve(file), status: "failed", message: "", assertionResults: failing },
+    : {
+        name: resolve(file),
+        status: passing ? "passed" : "failed",
+        message: "",
+        assertionResults: passing ? [{ status: "passed", fullName: "ok" }] : failing,
+      },
 );
 if (out) {
   writeFileSync(out, JSON.stringify({ testResults }));

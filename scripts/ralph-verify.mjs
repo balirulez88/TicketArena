@@ -261,7 +261,10 @@ export function proveRed(commit, tests) {
       // that can own one of the files gets its one writable path.
       const status = container(
         `${prefix}-red`,
-        testMounts(offline, shared, ".", ...testTargets(sha)),
+        [
+          ...(env.RALPH_RED_RUNNER ? ["--env", `RALPH_RED_RUNNER=${env.RALPH_RED_RUNNER}`] : []),
+          ...testMounts(offline, shared, ...new Set([".", ...testTargets(sha)])),
+        ],
         ["--red", ...tests],
       );
       log(`${sha.slice(0, 12)}: RED ${status === 0 ? "proven" : "NOT proven"}`);

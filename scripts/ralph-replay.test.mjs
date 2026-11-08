@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -65,7 +66,7 @@ appendFileSync(process.env.STUB_HOST_REVIEW_LOG, process.env.RALPH_REVIEW_AXIS +
 const result = spawnSync(process.execPath, [join(process.cwd(), "stub/reviewer.mjs"), readFileSync(join(input, "prompt.txt"), "utf8")], {
   cwd: ws,
   encoding: "utf8",
-  env: { ...process.env, STUB_REVIEW: "clean" },
+  env: { ...process.env, STUB_REVIEW: process.env.STUB_HOST_REVIEW || "clean" },
 });
 process.stdout.write(result.stdout);
 process.exit(result.status ?? 1);
@@ -101,7 +102,7 @@ const write = (dir, path, text) => {
 };
 
 /** A host with the importer, the replay tool, a candidate on a quarantine branch and an amended ticket. */
-function scenario({ candidate: change, amend = true } = {}) {
+function scenario({ candidate: change, staged, amend = true, recorded = true } = {}) {
   const host = mkdtempSync(join(tmpdir(), "ralph-replay-"));
   git(host, "init", "--quiet", "--initial-branch=main");
   git(host, "config", "core.autocrlf", "false");
@@ -162,9 +163,22 @@ function scenario({ candidate: change, amend = true } = {}) {
     ).replace("- [ ] works", "- [x] works"),
   );
   git(host, "add", "-A");
+  staged?.(host);
   git(host, "commit", "--quiet", "-m", "feat(slice-01): Demo ticket");
   const tip = git(host, "rev-parse", "HEAD");
   git(host, "switch", "--quiet", "main");
+
+  // The importer's record of the host review's rejection, the one commit only it can write.
+  if (recorded) {
+    write(host, "issues/01-demo.md", DEMO.replace("ready-for-agent", "blocked"));
+    git(
+      host,
+      "commit",
+      "--quiet",
+      "-am",
+      `chore(issues): block issues/01-demo.md after the host review\n\nThe host's isolated review of slice/01-demo (${tip.slice(0, 12)}) was blocked. It is preserved on ${BRANCH}.`,
+    );
+  }
 
   // A human then amended the ticket on main; it is ready again.
   if (amend) {
@@ -174,7 +188,11 @@ function scenario({ candidate: change, amend = true } = {}) {
   return { host, origin, tip };
 }
 
-function replay(host, tip, { red = 0, verify = 0, accept = true, expect = tip, extra = [] } = {}) {
+function replay(
+  host,
+  tip,
+  { red = 0, verify = 0, accept = true, expect = tip, extra = [], review = "clean" } = {},
+) {
   const verifyLog = join(host, ".ralph", "verify.log");
   mkdirSync(dirname(verifyLog), { recursive: true });
   const result = spawnSync(
@@ -203,6 +221,7 @@ function replay(host, tip, { red = 0, verify = 0, accept = true, expect = tip, e
         STUB_VERIFY_EXIT: String(verify),
         RALPH_HOST_REVIEWER: "node stub/host-reviewer.mjs",
         STUB_HOST_REVIEW_LOG: join(host, ".ralph", "host-review.log"),
+        STUB_HOST_REVIEW: review,
         RALPH_PROVIDER_RETRIES: "0",
       },
     },
@@ -222,6 +241,8 @@ function replay(host, tip, { red = 0, verify = 0, accept = true, expect = tip, e
 
 const heads = (host) =>
   git(host, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/");
+// Private refs the replay made for its one fetch must never outlive it.
+const leaked = (host) => git(host, "for-each-ref", "refs/ralph/replay/");
 const runs = (host) => {
   const dir = join(host, ".ralph", "sandbox");
   return existsSync(dir) ? readdirSync(dir).filter((name) => name.startsWith("replay-")) : [];
@@ -264,6 +285,7 @@ describe("ralph-replay", () => {
     assert.equal(git(host, "rev-parse", BRANCH), tip);
     assert.notEqual(before, heads(host));
     assert.equal(runs(host).length, 0);
+    assert.equal(leaked(host), "");
   });
 
   it("prepares without importing when --accept is not given", () => {
@@ -301,7 +323,7 @@ describe("ralph-replay", () => {
     git(host, "switch", "--quiet", "main");
     const result = replay(host, tip, { expect: moved });
     assert.equal(result.code, 1);
-    assert.match(result.output, /own base .* is not part of main|not a slice commit/);
+    assert.match(result.output, /no host-review rejection|own base .* is not part of main/);
     assert.equal(result.red.length, 0);
   });
 
@@ -322,8 +344,6 @@ describe("ralph-replay", () => {
 
   it("does not turn a blocked ticket into a merge", () => {
     const { host, tip } = scenario({ amend: false });
-    write(host, "issues/01-demo.md", DEMO.replace("ready-for-agent", "blocked"));
-    git(host, "commit", "--quiet", "-am", "chore(issues): block 01");
     const before = heads(host);
     const result = replay(host, tip);
     assert.equal(result.code, 1);
@@ -342,6 +362,7 @@ describe("ralph-replay", () => {
     assert.equal(result.verified.length + result.reviewed.length, 0);
     assert.equal(heads(host), before);
     assert.equal(runs(host).length, 0);
+    assert.equal(leaked(host), "");
   });
 
   it("leaves protected paths to the importer, which refuses them untouched", () => {
@@ -362,8 +383,116 @@ describe("ralph-replay", () => {
     const before = heads(host);
     const result = replay(host, tip, { verify: 1 });
     assert.equal(result.code, UNTRUSTED, result.output);
+    assert.equal(result.red.length, 1, "RED ran before the importer");
     assert.equal(heads(host), before);
     assert.equal(result.reviewed.length, 0);
+  });
+
+  it("refuses a quarantine branch the host review never rejected", () => {
+    const { host, tip } = scenario({ recorded: false });
+    const before = heads(host);
+    const result = replay(host, tip);
+    assert.equal(result.code, 1);
+    assert.match(result.output, /no host-review rejection of .* is recorded/);
+    assert.equal(heads(host), before);
+    assert.equal(result.red.length, 0);
+  });
+
+  it("refuses a record that names another commit of the same branch", () => {
+    const { host, tip } = scenario({ recorded: false });
+    write(host, "issues/01-demo.md", DEMO.replace("ready-for-agent", "blocked"));
+    git(
+      host,
+      "commit",
+      "--quiet",
+      "-am",
+      `chore(issues): block issues/01-demo.md after the host review\n\nPreserved on ${BRANCH} at ${"0".repeat(12)}.`,
+    );
+    const result = replay(host, tip);
+    assert.equal(result.code, 1);
+    assert.match(result.output, /no host-review rejection/);
+  });
+
+  it("reproduces a deletion exactly in the bundle it prepares", () => {
+    const { host, tip } = scenario({ candidate: (dir) => rmSync(join(dir, "app.txt")) });
+    const result = replay(host, tip, { accept: false });
+    assert.equal(result.code, 0, result.output);
+    const [run] = runs(host);
+    const bundle = join(host, ".ralph", "sandbox", run, "out", "result.bundle");
+    git(host, "fetch", "--quiet", bundle, "refs/heads/main:refs/heads/probe");
+    assert.throws(() => git(host, "cat-file", "-e", "probe:app.txt"));
+    assert.equal(
+      git(host, "rev-parse", "probe:packages/demo/feature.ts"),
+      git(host, "rev-parse", `${tip}:packages/demo/feature.ts`),
+    );
+    assert.equal(git(host, "rev-parse", "probe^2^"), git(host, "rev-parse", "main"));
+  });
+
+  it("keeps a host review that blocks the replay as blocking", () => {
+    const { host, tip } = scenario();
+    const result = replay(host, tip, { review: "high" });
+    assert.equal(result.code, 1, result.output);
+    assert.equal(result.reviewed.length >= 1, true);
+    assert.match(git(host, "show", "main:issues/01-demo.md"), /\*\*Status:\*\* blocked/);
+    assert.equal(git(host, "rev-parse", BRANCH), tip);
+    assert.equal(leaked(host), "");
+  });
+
+  const refusals = [
+    [
+      "a symlink",
+      /symlink or submodule/,
+      null,
+      (dir) => {
+        const target = git(dir, "hash-object", "-w", "app.txt");
+        git(dir, "update-index", "--add", "--cacheinfo", `120000,${target},packages/demo/link`);
+      },
+    ],
+    [
+      "a submodule",
+      /symlink or submodule/,
+      null,
+      (dir) =>
+        git(
+          dir,
+          "update-index",
+          "--add",
+          "--cacheinfo",
+          `160000,${"1".repeat(40)},packages/demo/sub`,
+        ),
+    ],
+    [
+      "a second ticket file",
+      /may only archive its own ticket/,
+      (dir) => write(dir, "issues/02-other.md", "x\n"),
+    ],
+    ["an option-like path", /will not carry/, (dir) => write(dir, "-evil/x.ts", "x\n")],
+    ["a non-ASCII path", /will not carry/, (dir) => write(dir, "packages/demo/café.ts", "x\n")],
+    ["no test file", /no test file/, (dir) => rmSync(join(dir, "packages/demo/feature.test.ts"))],
+  ];
+  for (const [name, message, ...hooks] of refusals) {
+    it(`refuses a candidate with ${name}`, () => {
+      // Three-element rows give the working-tree change; four-element rows a staged-only one.
+      const [change, staged] = hooks.length === 2 ? hooks : [hooks[0], undefined];
+      const { host, tip } = scenario({ candidate: change ?? undefined, staged });
+      const before = heads(host);
+      const result = replay(host, tip);
+      assert.equal(result.code, 1, result.output);
+      assert.match(result.output, message);
+      assert.equal(heads(host), before);
+      assert.equal(result.verified.length + result.reviewed.length, 0);
+      assert.equal(runs(host).length, 0);
+      assert.equal(leaked(host), "");
+    });
+  }
+
+  it("refuses when the ticket's amended title no longer matches the slice subject", () => {
+    const { host, tip } = scenario();
+    write(host, "issues/01-demo.md", `${DEMO.replace("Demo ticket", "Renamed ticket")}- [ ] x\n`);
+    git(host, "commit", "--quiet", "-am", "chore(issues): rename");
+    const result = replay(host, tip);
+    assert.equal(result.code, 1);
+    assert.match(result.output, /is not "feat\(slice-01\): Renamed ticket"/);
   });
 
   it("refuses to run away from a clean base checkout", () => {

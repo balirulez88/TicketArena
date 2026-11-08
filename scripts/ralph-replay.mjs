@@ -55,10 +55,13 @@ class Refusal extends Error {}
 const refuse = (message) => {
   throw new Refusal(message);
 };
-const log = (message) => console.error(`[ralph-replay] ${message}`);
+// Candidate-controlled text (subjects, paths) reaches the terminal only as printable ASCII.
+const printable = (text) => String(text).replace(/[^ -~]/g, "?");
+const log = (message) => console.error(`[ralph-replay] ${printable(message)}`);
 
 function run(args, { input, extraEnv, cwd = root } = {}) {
-  const result = spawnSync("git", ["-C", cwd, ...args], {
+  // Literal pathspecs: a path from the candidate is never git pathspec magic (`:(top)`, globs).
+  const result = spawnSync("git", ["--literal-pathspecs", "-C", cwd, ...args], {
     encoding: "utf8",
     input,
     env: { ...env, ...extraEnv },
@@ -128,6 +131,34 @@ function buildTree(base, edits) {
   }
 }
 
+// The host's own record that this commit was rejected by the host review. Only the importer
+// writes to the base branch, so a candidate a container quarantined itself (reject_slice) has no
+// such commit: its content never went through the host review and is not replayable.
+function assertHostRejected(base, name, tip, slug) {
+  const subject = `chore(issues): block issues/${slug}.md after the host review`;
+  const candidates = git([
+    "log",
+    "--first-parent",
+    "--fixed-strings",
+    `--grep=${subject}`,
+    "--format=%H",
+    base,
+  ])
+    .split("\n")
+    .filter(Boolean);
+  const recorded = candidates.some(
+    (commit) =>
+      git(["log", "-1", "--format=%s", commit]) === subject &&
+      git(["log", "-1", "--format=%b", commit]).includes(`preserved on ${name}`) &&
+      git(["log", "-1", "--format=%b", commit]).includes(tip.slice(0, 12)),
+  );
+  if (!recorded) {
+    refuse(
+      `no host-review rejection of ${name} at ${tip.slice(0, 12)} is recorded on ${BASE}'s first-parent history ("${subject}"); only a candidate the host review rejected can be replayed`,
+    );
+  }
+}
+
 /** Pins and reads the candidate. Nothing here can change it. */
 function readCandidate(name, expect, base) {
   const match = QUARANTINE.exec(name);
@@ -148,6 +179,7 @@ function readCandidate(name, expect, base) {
   if (parents.length !== 1) {
     refuse(`${name} is not one commit on one parent`);
   }
+  assertHostRejected(base, name, tip, slug);
   const [origin] = parents;
   if (!succeeds(["merge-base", "--is-ancestor", origin, base])) {
     refuse(`the candidate's own base ${origin.slice(0, 12)} is not part of ${BASE}'s history`);
@@ -178,6 +210,11 @@ function implementation(candidate) {
     refuse(`${candidate.name} changes nothing besides its ticket`);
   }
   for (const change of rest) {
+    // Printable ASCII only, and no component that could be read as an option by the tools that
+    // later receive the path: what is replayed must be exactly what the importer will see.
+    if (/[^ -~]/.test(change.path) || change.path.split("/").some((part) => part.startsWith("-"))) {
+      refuse(`${candidate.name} has a path the replay will not carry: ${change.path}`);
+    }
     if (change.path.startsWith("issues/")) {
       refuse(
         `${candidate.name} also changes ${change.path}; a slice may only archive its own ticket`,
@@ -304,9 +341,9 @@ function writeRun(candidate, built, base) {
   // Private refs name the unreferenced commits for the one fetch; they are removed straight away.
   const prefix = `refs/ralph/replay/${id}`;
   const scratch = mkdtempSync(join(tmpdir(), "ralph-replay-bundle-"));
-  git(["update-ref", `${prefix}/main`, built.merge]);
-  git(["update-ref", `${prefix}/slice`, built.slice]);
   try {
+    git(["update-ref", `${prefix}/main`, built.merge]);
+    git(["update-ref", `${prefix}/slice`, built.slice]);
     run(["init", "--quiet", "--bare", scratch]);
     run(
       [
@@ -322,9 +359,13 @@ function writeRun(candidate, built, base) {
     run(["bundle", "create", "--quiet", join(out, "result.bundle"), "--branches"], {
       cwd: scratch,
     });
+  } catch (error) {
+    // A half-made run directory must not look like a prepared one.
+    rmSync(runDir, { recursive: true, force: true });
+    throw error;
   } finally {
-    git(["update-ref", "-d", `${prefix}/main`]);
-    git(["update-ref", "-d", `${prefix}/slice`]);
+    succeeds(["update-ref", "-d", `${prefix}/main`]);
+    succeeds(["update-ref", "-d", `${prefix}/slice`]);
     rmSync(scratch, { recursive: true, force: true });
   }
   writeFileSync(
@@ -354,7 +395,9 @@ function proveRed(rest, base) {
     "RED: the base plus the candidate's tests only",
   ]);
   const command = env.RALPH_REPLAY_RED ?? "node scripts/ralph-verify.mjs --red";
-  if (env.RALPH_REPLAY_RED === undefined) {
+  if (env.RALPH_REPLAY_RED !== undefined) {
+    log(`WARNING: RALPH_REPLAY_RED replaces the hardened RED container with: ${command}`);
+  } else {
     const image = env.RALPH_IMAGE || "ticketarena-sandbox";
     log(`building the sandbox image ${image}`);
     const built = spawnSync("docker", ["build", "--quiet", "--tag", image, root], {

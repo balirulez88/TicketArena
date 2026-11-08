@@ -279,7 +279,7 @@ check() {
   fi
 }
 # SANDBOX_TEST_ONLY=<scenario> runs one scenario: merge, reject, pause, forge-merge, forge-pause,
-# evil-test, evil-bin, host-review, dirty, and the lead driver (ADR 0017): lead-merge,
+# evil-test, evil-bin, host-review, dirty, red (the replay's RED stage), and the lead driver (ADR 0017): lead-merge,
 # lead-refused, lead-stop, lead-reject, lead-evil, lead-interrupt.
 wanted() { [[ -z "${SANDBOX_TEST_ONLY:-}" || "${SANDBOX_TEST_ONLY}" == "$1" ]]; }
 show_output() { ((failures == 0)) || sed 's/^/      | /' "$1.out" | tail -n 40; }
@@ -453,6 +453,44 @@ code="$(run_sandbox "${host}" "" clean)"
 check "sandbox refuses to start" "[[ ${code} == 1 ]] && grep -q 'not clean' '${host}.out'"
 check "host main untouched" "[[ \$(git -C '${host}' rev-parse main) == ${main_before} ]]"
 check "local edit preserved" "grep -q 'my unsaved edit' '${host}/notes.md'"
+show_output "${host}"
+fi
+
+# --- RED proof of a replayed candidate (ADR 0018) -------------------------------------------------
+
+# Usage: red_stage <host> <runner flags>; prints the exit code of `ralph-verify.mjs --red` on the
+# commit holding the fixture's base plus one test file, run by the stub Vitest.
+red_stage() {
+  local dir=$1 flags=${2:-} commit
+  mkdir -p "${dir}/packages/demo/src"
+  printf 'test\n' >"${dir}/packages/demo/src/red.test.ts"
+  git -C "${dir}" add -A
+  git -C "${dir}" commit --quiet -m "RED: base plus one test"
+  commit="$(git -C "${dir}" rev-parse HEAD)"
+  docker build --quiet --tag ticketarena-sandbox "${dir}" >/dev/null
+  (cd "${dir}" && RALPH_RED_RUNNER="node ../../stub/vitest.mjs ${flags}" \
+    node scripts/ralph-verify.mjs --red "${commit}" packages/demo/src/red.test.ts) \
+    >>"${dir}.out" 2>&1 && echo 0 || echo $?
+}
+
+if wanted red; then
+echo "the RED stage runs the candidate's tests in the hardened container:"
+host="$(new_host_repo red-proven)"
+code="$(red_stage "${host}")"
+check "a test that fails on an assertion proves RED (exit 0)" "[[ ${code} == 0 ]]"
+check "the container ran the file" "grep -q 'sandbox: red packages/demo/src/red.test.ts' '${host}.out'"
+check "no verify volume left behind" "! docker volume ls --format '{{.Name}}' | grep -q '^ralph-verify-'"
+show_output "${host}"
+
+host="$(new_host_repo red-passes)"
+code="$(red_stage "${host}" --pass)"
+check "a test that passes does not prove RED" "[[ ${code} != 0 ]] && grep -q 'none of them proves a missing behaviour' '${host}.out'"
+show_output "${host}"
+
+host="$(new_host_repo red-load)"
+code="$(red_stage "${host}" --load-error)"
+check "a test that fails to load does not prove RED" "[[ ${code} != 0 ]] && grep -q 'failed to load' '${host}.out'"
+check "no verify volume left behind" "! docker volume ls --format '{{.Name}}' | grep -q '^ralph-verify-'"
 show_output "${host}"
 fi
 

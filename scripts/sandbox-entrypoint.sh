@@ -133,7 +133,7 @@ case "${1:-}" in
     echo "sandbox: red $*" >&2
     cd "${VERIFY_ROOT}"
     status=0
-    PATH="${VERIFY_ROOT}/node_modules/.bin:${PATH}" node scripts/ralph-red.mjs       --runner "pnpm exec vitest" --out /tmp/ralph-red "$@" || status=$?
+    PATH="${VERIFY_ROOT}/node_modules/.bin:${PATH}" node scripts/ralph-red.mjs       --runner "${RALPH_RED_RUNNER:-pnpm exec vitest}" --out /tmp/ralph-red -- "$@" || status=$?
     # The container is gone afterwards: show why a package produced no report. Output only; the
     # verdict is the exit status.
     ((status == 0)) || tail -n 40 /tmp/ralph-red/*.log >&2 2>/dev/null || true

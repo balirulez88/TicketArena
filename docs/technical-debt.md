@@ -52,7 +52,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 0      | 45  | 45    |
+| OPEN          | 0        | 0    | 0      | 48  | 48    |
 | PLANNED       | 0        | 0    | 12     | 12  | 24    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 2    | 7      | 5   | 14    |
@@ -66,7 +66,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 | VERIFICATION    | 10   | 9       | 0           | 4        | 0             | 23    |
 | OPERABILITY     | 7    | 6       | 0           | 2        | 0             | 15    |
 | MAINTAINABILITY | 25   | 1       | 0           | 0        | 0             | 26    |
-| UNTRIAGED       | 0    | 0       | 0           | 0        | 0             | 0     |
+| UNTRIAGED       | 3    | 0       | 0           | 0        | 0             | 3     |
 
 ## Entries
 
@@ -1786,11 +1786,12 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Acceptance:** none
 - **Resolution:** none
 - **Verification:** none
-- **Fingerprints:** `docs/index.md#metrics-adapter-is-never-wired-in-production-code`; `docs/index.md#docs-say-counters-go-to-redis-but-the-metrics-adapter-is-not`
+- **Fingerprints:** `docs/index.md#metrics-adapter-is-never-wired-in-production-code`; `docs/index.md#docs-say-counters-go-to-redis-but-the-metrics-adapter-is-not`; `apps/web/src/server/trpc.ts#ctx-metrics-is-added-but-no-production-router-consumes-it`
 - **History:**
   - 2026-11-05: recorded: LOW spec_gap at `docs/index.md:67`, spec axis (ticket 10 review-3 spec, run 20261105-143619)
   - 2026-11-05: seen again: LOW spec_gap at `docs/index.md:67`, spec axis (ticket 10 host review spec, run 20261105-153541-378)
   - 2026-11-06: triaged: OPERABILITY, no owner: deferred, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-08: seen again: LOW regression_risk at `apps/web/src/server/trpc.ts:27`, standards axis (ticket 56 host review standards, run replay-20261108122117-29384)
 
 ### TD-071: Saturation tests assume the occupier holds the only connection after a fixed 50 ms sleep
 
@@ -2108,4 +2109,74 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-06: recorded: LOW at `scripts/ralph-debt.mjs:657`, spec axis (ticket 53 confirmation review, host-side)
   - 2026-11-06: triaged: SECURITY, no owner: deferred, blocks no ticket (ticket 53 maintainer)
+
+### TD-084: Env stubs are restored inline, not in a finally or afterEach
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Risk:** UNTRIAGED
+- **Triage:** pending
+- **Escalation:** none
+- **Source:** ticket 56 (`56-metrics-configuration-bootstrap`)
+- **Evidence:** `.ralph/host-review/replay-20261108122117-29384/56-metrics-configuration-bootstrap.standards.json`
+- **Components:** `apps/web/src/server/routers/health.test.ts:19`
+- **Problem:** vi.unstubAllEnvs() runs as the last statement of the test body. If the caller or an assertion throws first, the stubbed SESSION_SECRET, DATABASE_URL and blank Upstash values leak into later tests in the same worker. session.test.ts has the same pattern at line 15.
+- **Impact:** A failing test can cascade into misleading failures in other tests that share the worker. The existing trpc.test.ts uses a shared cleanup.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows.
+- **Remediation:** Move vi.unstubAllEnvs() into afterEach, as trpc.test.ts and proxy.test.ts do, or wrap the body in try/finally.
+- **Target:** none
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/web/src/server/routers/health.test.ts#env-stubs-are-restored-inline-not-in-a-finally-or-aftereach`; `apps/web/src/server/routers/health.test.ts#env-stubs-are-unstubbed-only-on-the-success-path`
+- **History:**
+  - 2026-11-08: recorded: LOW maintainability at `apps/web/src/server/routers/health.test.ts:19`, standards axis; suggested risk MAINTAINABILITY, awaiting triage (ticket 56 host review standards, run replay-20261108122117-29384)
+  - 2026-11-08: seen again: LOW missing_test at `apps/web/src/server/routers/health.test.ts:19`, spec axis (ticket 56 host review spec, run replay-20261108122117-29384)
+
+### TD-085: Needless per-test dynamic imports and repeated failure assertions
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Risk:** UNTRIAGED
+- **Triage:** pending
+- **Escalation:** none
+- **Source:** ticket 56 (`56-metrics-configuration-bootstrap`)
+- **Evidence:** `.ralph/host-review/replay-20261108122117-29384/56-metrics-configuration-bootstrap.standards.json`
+- **Components:** `apps/web/src/server/upstash-metrics.test.ts:52`
+- **Problem:** Each test re-imports ./upstash-metrics dynamically with no module state or mocks that need it. Three tests repeat the same instanceof, HINCRBY and not-token assertions.
+- **Impact:** Noise, and extra places to edit when the error contract changes.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows.
+- **Remediation:** Import statically at the top of the file and extract a small helper such as expectRejectsNamingCommand(promise).
+- **Target:** none
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/web/src/server/upstash-metrics.test.ts#needless-per-test-dynamic-imports-and-repeated-failure-asser`
+- **History:**
+  - 2026-11-08: recorded: LOW maintainability at `apps/web/src/server/upstash-metrics.test.ts:52`, standards axis; suggested risk MAINTAINABILITY, awaiting triage (ticket 56 host review standards, run replay-20261108122117-29384)
+
+### TD-086: A failed resolution is cached for the life of the process
+
+- **Status:** OPEN
+- **Severity:** LOW
+- **Risk:** UNTRIAGED
+- **Triage:** pending
+- **Escalation:** none
+- **Source:** ticket 56 (`56-metrics-configuration-bootstrap`)
+- **Evidence:** `.ralph/host-review/replay-20261108122117-29384/56-metrics-configuration-bootstrap.standards.json`
+- **Components:** `apps/web/src/server/upstash-metrics.ts:84`
+- **Problem:** createLazyMetrics caches the failure permanently, and the recorded outcome includes failures other than configuration errors, such as an unexpected throw from createRedisBookingMetrics. Fixing the environment needs a restart. The log line always says "metrics configuration is invalid".
+- **Impact:** This is intended by AC5 and documented. If the construction step later gains non-config failure modes, the log text will mislead.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows.
+- **Remediation:** Keep the behaviour. Restrict the try block to parseMetricsEnv, or word the log neutrally, so only configuration errors are labelled that way.
+- **Target:** none
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `apps/web/src/server/upstash-metrics.ts#a-failed-resolution-is-cached-for-the-life-of-the-process`
+- **History:**
+  - 2026-11-08: recorded: LOW unverified_assumption at `apps/web/src/server/upstash-metrics.ts:84`, standards axis; suggested risk VERIFICATION, awaiting triage (ticket 56 host review standards, run replay-20261108122117-29384)
 <!-- ralph-debt:end -->

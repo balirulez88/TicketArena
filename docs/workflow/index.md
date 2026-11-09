@@ -39,6 +39,18 @@ warnings:
   lifecycle, and bash scenarios that run `ralph-loop.sh` with stub agents and a stub reviewer
   (`scripts/ralph-stub-reviewer.mjs`), proving the merge policy, the evidence gate, the
   retention rules, provider-failure pause and resume, and bounded batches (all below).
+  Every `scripts/*.test.mjs` that needs temporary files imports
+  `scripts/ralph-test-workspace.mjs`, and a test keeps it that way. Its fixtures and those of its
+  child processes go to one session folder under `RALPH_TEST_TMP_ROOT` (absolute; default
+  `.ralph/tmp/harness`). There is no fallback to the system's temporary directory: an unusable root
+  fails the run. A root may not contain the repository, or sit inside it anywhere but below
+  `.ralph/tmp`, or inside `failure-injection*` evidence. Each test's directories are removed after
+  it, passed or failed; `RALPH_TEST_KEEP_FAILED=1` moves a failed test's to `kept-failed/` for
+  debugging, and `preserveEvidence()` moves designated ones to `evidence/`. Neither is ever swept.
+  A hard kill runs no cleanup on Windows, so the next run removes the sessions of owners proven
+  dead: same host, and the process ID no longer matches the recorded name and start time. A
+  session whose owner cannot be proven dead stays. `GIT_CEILING_DIRECTORIES` stops Git in a fixture
+  from discovering the real repository above it.
 
 ## Integration test infrastructure
 

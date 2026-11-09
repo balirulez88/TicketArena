@@ -1,3 +1,4 @@
+import "./ralph-test-workspace.mjs";
 import assert from "node:assert/strict";
 import {
   existsSync,

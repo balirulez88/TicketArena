@@ -3,6 +3,7 @@
 // node_modules, packages in the store under node_modules/.pnpm, shims under node_modules/.bin
 // that name their target) and runs the check's command line on it, as the prepare stage does.
 
+import "./ralph-test-workspace.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";

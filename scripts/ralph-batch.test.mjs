@@ -4,6 +4,7 @@
 // sandbox run of `ralph-loop.sh --ticket NN`: it merges the ticket the way finalize_slice does,
 // or pauses, rejects, crashes, or kills the batch itself, as STUB_PLAN says per call.
 
+import "./ralph-test-workspace.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {

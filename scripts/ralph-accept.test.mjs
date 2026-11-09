@@ -5,6 +5,7 @@
 // The real importer runs on the host with a stub in place of the agent-free verify sandbox.
 // Every refusal must leave the host repository exactly as it was.
 
+import "./ralph-test-workspace.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {

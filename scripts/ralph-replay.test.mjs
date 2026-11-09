@@ -4,6 +4,7 @@
 // The replay itself is real; only the RED container is a stub that records what it was asked to
 // prove. Every refusal must leave main and the candidate exactly as they were.
 
+import "./ralph-test-workspace.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {

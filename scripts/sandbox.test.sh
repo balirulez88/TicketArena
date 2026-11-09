@@ -47,10 +47,11 @@ new_host_repo() {
     >"${dir}/docs/technical-debt.md"
   node "${dir}/scripts/ralph-debt.mjs" format "${dir}/docs/technical-debt.md"
 
-  # A project whose gate passes once feature.txt exists, so RED and GREEN are genuine, and so is
-  # the host's own re-run of the gate (`pnpm run check`). Its one workspace package owns the RED
-  # test; stub/vitest.mjs stands in for Vitest there and reports each test it is given as failing
-  # until feature.txt exists, as the RED check requires.
+  # A project shaped like a real one: its gate passes on the base, fails once a test for the missing
+  # feature exists, and passes again once feature.txt does, so the lead driver's baseline check, RED
+  # and GREEN are genuine, and so is the host's own re-run of the gate (`pnpm run check`). Its one
+  # workspace package owns the RED test; stub/vitest.mjs stands in for Vitest there and reports each
+  # test it is given as failing until feature.txt exists, as the RED check requires.
   printf '{"name":"fixture","private":true,"scripts":{"lint":"node -e 0","typecheck":"node -e 0","test":"node gate.mjs","check:debt":"node stub/register.mjs && node scripts/ralph-debt.mjs check docs/technical-debt.md","check":"pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run check:debt"}}\n' \
     >"${dir}/package.json"
   printf 'packages:\n  - "packages/*"\n' >"${dir}/pnpm-workspace.yaml"
@@ -79,8 +80,11 @@ process.exit(value === "ok" ? 0 : 1);
 EOF
   printf "lockfileVersion: '9.0'\n\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\n\nimporters:\n\n  .: {}\n\n  packages/demo: {}\n" \
     >"${dir}/pnpm-lock.yaml"
-  printf 'import { existsSync } from "node:fs";\nprocess.exit(existsSync("feature.txt") ? 0 : 1);\n' \
-    >"${dir}/gate.mjs"
+  cat >"${dir}/gate.mjs" <<'EOF'
+import { existsSync, readdirSync } from "node:fs";
+const tests = readdirSync("packages/demo/src").filter((file) => file.endsWith(".test.ts"));
+process.exit(tests.length === 0 || existsSync("feature.txt") ? 0 : 1);
+EOF
   cp "${SOURCE_ROOT}/scripts/ralph-stub-vitest.mjs" "${dir}/stub/vitest.mjs"
   # Says whether dependencies were installed when the register check ran: the agent-free re-gate
   # must run it before `pnpm install`.
@@ -284,7 +288,7 @@ check() {
 }
 # SANDBOX_TEST_ONLY=<scenario> runs one scenario: merge, reject, pause, forge-merge, forge-pause,
 # evil-test, evil-bin, host-review, dirty, red (the replay's RED stage), and the lead driver (ADR 0017): lead-merge,
-# lead-refused, lead-stop, lead-reject, lead-evil, lead-interrupt.
+# lead-refused, lead-red-base, lead-stop, lead-reject, lead-evil, lead-interrupt.
 wanted() { [[ -z "${SANDBOX_TEST_ONLY:-}" || "${SANDBOX_TEST_ONLY}" == "$1" ]]; }
 show_output() { ((failures == 0)) || sed 's/^/      | /' "$1.out" | tail -n 40; }
 
@@ -517,11 +521,19 @@ run_lead_sandbox() {
 }
 # The sessions a run started, from the logs the host imported.
 sessions_of() { cat "$1"/.ralph/logs/*/sessions.tsv 2>/dev/null || true; }
+# A run stopped by the baseline check also exits 1 and leaves the host unchanged, which is what
+# several scenarios assert, so each must first prove it got past that check and started the lead.
+check_lead_started() {
+  check "the base passed the baseline gate at the first attempt" \
+    "grep -q 'baseline: no verified result' '$1.out' && ! grep -q 'baseline: the gate failed' '$1.out'"
+  check "the lead session started" "grep -q 'running the lead session' '$1.out'"
+}
 
 if wanted lead-merge; then
 echo "lead driver: a merge passes the same host checks:"
 host="$(new_host_repo lead-merge)"
 code="$(run_lead_sandbox "${host}" ok lead --ticket 01)"
+check_lead_started "${host}"
 check "sandbox exits 0" "[[ ${code} == 0 ]]"
 check "slice merged into host main" "git -C '${host}' log --format=%s main | grep -q '^Merge slice/01-demo: Demo ticket'"
 check "the slice says it came from the lead driver" \
@@ -551,11 +563,29 @@ check "host repository unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
 show_output "${host}"
 fi
 
+if wanted lead-red-base; then
+echo "lead driver: a base that fails the gate stops the run before any lead session:"
+host="$(new_host_repo lead-red-base)"
+printf 'process.exit(1);\n' >"${host}/gate.mjs"
+git -C "${host}" add gate.mjs
+git -C "${host}" commit --quiet -m "break the base's gate"
+before="$(fingerprint "${host}")"
+code="$(run_lead_sandbox "${host}" ok lead --ticket 01)"
+check "sandbox exits 1" "[[ ${code} == 1 ]]"
+check "the baseline check tried the gate twice" "grep -q 'baseline: the gate failed once' '${host}.out'"
+check "stopped because the base is red" "grep -q 'main fails the gate before any work' '${host}.out'"
+check "no lead session started" "! grep -q 'running the lead session' '${host}.out'"
+check "host repository, refs and checkout unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
+check "the ticket is not blocked" "[[ \$(status_on '${host}' main) == ready-for-agent ]]"
+show_output "${host}"
+fi
+
 if wanted lead-stop; then
 echo "lead driver: a failed session stops safely, with no retry and no fallback:"
 host="$(new_host_repo lead-stop)"
 before="$(fingerprint "${host}")"
 code="$(run_lead_sandbox "${host}" fail lead --ticket 01)"
+check_lead_started "${host}"
 check "sandbox exits 1" "[[ ${code} == 1 ]]"
 check "host repository, refs and checkout unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
 check "the ticket is not blocked" "[[ \$(status_on '${host}' main) == ready-for-agent ]]"
@@ -571,6 +601,7 @@ if wanted lead-reject; then
 echo "lead driver: a candidate with no failing test is rejected like Ralph's:"
 host="$(new_host_repo lead-reject)"
 code="$(run_lead_sandbox "${host}" notest lead --ticket 01)"
+check_lead_started "${host}"
 check "sandbox exits 1" "[[ ${code} == 1 ]]"
 rejected="$(first_branch "${host}" 'rejected/*')"
 check "quarantine branch on host" "[[ '${rejected}' == rejected/01-demo-* ]]"
@@ -585,6 +616,7 @@ echo "lead driver: an agent that rewrites a protected host script is still refus
 host="$(new_host_repo lead-evil)"
 before="$(fingerprint "${host}")"
 code="$(run_lead_sandbox "${host}" evil lead --ticket 01)"
+check_lead_started "${host}"
 check "sandbox exits 3 (refused)" "[[ ${code} == 3 ]]"
 check "refused by the path rules" "grep -q 'scripts/ralph-ci.sh: protected' '${host}.out'"
 check "host repository, Git metadata and scripts unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
@@ -606,6 +638,7 @@ container="$(docker ps -q --filter ancestor=ticketarena-sandbox | head -n 1)"
 check "the lead is running in a container" "[[ -n '${container}' ]]"
 [[ -z "${container}" ]] || docker stop --time 120 "${container}" >/dev/null
 wait "${runner}" || true
+check_lead_started "${host}"
 check "sandbox exits 1 (a stopped run)" "[[ \$(cat '${host}.code') == 1 ]]"
 check "host repository, refs and checkout unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
 check "the ticket is not blocked" "[[ \$(status_on '${host}' main) == ready-for-agent ]]"

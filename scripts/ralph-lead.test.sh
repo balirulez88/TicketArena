@@ -481,6 +481,75 @@ run_lead "${d}" --ticket 01 --dry-run >"${d}.out" 2>&1 || code=$?
 expect "dry run on a blocked ticket: exit 1" test "${code}" = 1
 expect "dry run says BLOCKED" grep -q 'BLOCKED' "${d}.out"
 
+# ------------------------------------------------------------------------- the host's half
+# sandbox.sh with Docker and its two trusted steps stubbed: what is under test is what the host
+# does around them, with the default lead command, because that is what a real run has.
+scenario "the host checks readiness without the lead's command, and records only a passed verification"
+d="$(new_repo hostside)"
+cp "${SOURCE_ROOT}/scripts/sandbox.sh" "${d}/scripts/"
+echo 'process.exit(Number(process.env.STUB_VERIFY ?? 0));' >"${d}/scripts/ralph-verify.mjs"
+echo 'process.exit(0);' >"${d}/scripts/ralph-accept.mjs"
+git -C "${d}" -c user.name=t -c user.email=t@t add -A
+git -C "${d}" -c user.name=t -c user.email=t@t commit --quiet -m "host scripts"
+mkdir -p "${WORK}/hostbin"
+cat >"${WORK}/hostbin/docker" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" != run ]] || printf '%s\n' "$@" >>"${STUB_DOCKER_ARGS}"
+exit 0
+EOF
+# On PATH so the guard, not a missing binary, is what refuses it below. It must never run.
+cat >"${WORK}/hostbin/claude" <<'EOF'
+#!/usr/bin/env bash
+: >"${STUB_DOCKER_ARGS}.claude-ran"
+EOF
+chmod +x "${WORK}/hostbin/docker" "${WORK}/hostbin/claude"
+
+# Runs in a subshell so that clearing RALPH_* (the default lead command) stays here.
+on_host() {
+  (
+    cd "${d}"
+    while read -r name; do unset "${name}"; done < <(compgen -e | grep '^RALPH_' || true)
+    export PATH="${WORK}/hostbin:${PATH}" STUB_DOCKER_ARGS="${d}.docker"
+    export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+    "$@"
+  )
+}
+baseline_records() { find "${d}/.ralph/baseline" -type f 2>/dev/null | wc -l | tr -d ' '; }
+passed_to_container() { sed -n 's/^RALPH_BASELINE_VERIFIED=//p' "${d}.docker" | tail -n 1; }
+# Ralph's own agents are set to harmless commands, so the guard reached is the lead's.
+run_real_lead() {
+  RALPH_AGENT_CMD=true RALPH_REVIEW_CMD=true ANTHROPIC_API_KEY=stub bash scripts/ralph-lead.sh --ticket 01
+}
+run_sandbox_lead() {
+  RALPH_DRIVER=lead ANTHROPIC_API_KEY=stub bash scripts/sandbox.sh --ticket 01
+}
+
+code=0
+on_host run_sandbox_lead >"${d}.out" 2>&1 || code=$?
+expect "the default lead command passes the host's readiness step" test "${code}" = 0
+expect "the container ran" grep -q '^run$' "${d}.docker"
+expect "an unverified base is not reported as verified" test -z "$(passed_to_container)"
+
+code=0
+STUB_VERIFY=1 on_host bash scripts/sandbox.sh --verify >"${d}.out" 2>&1 || code=$?
+expect "a failed verification fails" test "${code}" = 1
+expect "a failed verification records nothing" test "$(baseline_records)" = 0
+
+code=0
+STUB_VERIFY=0 on_host bash scripts/sandbox.sh --verify >"${d}.out" 2>&1 || code=$?
+expect "a passed verification passes" test "${code}" = 0
+expect "a passed verification is recorded once" test "$(baseline_records)" = 1
+
+key="$(cd "${d}" && source scripts/ralph-driver.sh && ralph_baseline_key "${PWD}/scripts/ralph-preflight.mjs" HEAD)"
+on_host run_sandbox_lead >"${d}.out" 2>&1
+expect "the container is told the verified key" test "$(passed_to_container)" = "${key}"
+
+code=0
+on_host run_real_lead >"${d}.out" 2>&1 || code=$?
+expect "a real run outside the sandbox is still refused" test "${code}" != 0
+expect "the permission guard says why" grep -q 'refusing to run a permission-skipping lead' "${d}.out"
+expect "the lead never started" test ! -e "${d}.docker.claude-ran"
+
 if ((failures > 0)); then
   echo "${failures} check(s) failed" >&2
   exit 1

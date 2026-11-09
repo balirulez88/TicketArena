@@ -107,9 +107,10 @@ THE HARNESS JUDGES YOU AFTER THE SESSION; you cannot approve or merge your own w
   package does not declare ON THE BASE, or a non-test helper file fail to load and the ticket is
   rejected; a dependency added during this run does not count, in review fixes too. Import through
   modules that exist at the base and fail on an assertion or an error inside the test.
-- A hook reports such an import to the implementer as soon as it is written. If it cannot be
-  avoided, leave it, finish normally and name what the base needs in your final message. The
-  harness then stops before RED with NEEDS PREPARATION and keeps the work.
+- A hook reports such an import to the implementer as soon as it is written. If the implementer
+  reports that it cannot be avoided, stop there: no further work, no review and no handoff files,
+  and name what the base needs in your final message. The harness keeps the work and blocks
+  nothing; a human prepares the base first. More work on this ticket could not be accepted.
 - The full gate (\`pnpm run check\`) must pass on the final tree, including the debt rules below.
 - Then the host re-runs the gate in an isolated container and runs its own review.
 
@@ -330,7 +331,7 @@ lead_candidate_ready() {
   ((status == 0)) && return 0
   sed 's/^/  /' "${report}" >&2
   if ((status == 5)); then
-    LEAD_NOT_READY="NEEDS PREPARATION: the base lacks what the candidate's tests load; prepare the base, see ${report}"
+    LEAD_NOT_READY="NEEDS PREPARATION: the candidate cannot pass RED or the host's install as it stands; ${report} says what to change"
   else
     LEAD_NOT_READY="the check before RED could not run (status ${status}); nothing was judged, see ${report}"
   fi
@@ -499,17 +500,12 @@ lead_main() {
   [[ -z "${LEAD_BUDGET}" || "${LEAD_BUDGET}" =~ ^[0-9]+(\.[0-9]+)?$ ]] ||
     die "RALPH_LEAD_MAX_BUDGET_USD must be a number"
   preflight
-  local -a lead_argv
-  IFS=' ' read -r -a lead_argv <<<"${LEAD_CMD}"
-  command -v "${lead_argv[0]}" >/dev/null || die "lead command not found: ${lead_argv[0]}"
-  if [[ "${LEAD_CMD}" == *dangerously-skip-permissions* &&
-    "${RALPH_SANDBOX:-0}" != 1 && "${RALPH_ALLOW_HOST:-0}" != 1 ]]; then
-    die "refusing to run a permission-skipping lead outside the sandbox; use ./scripts/sandbox.sh"
-  fi
 
   local ticket
   if [[ "${DRY_RUN}" == true ]]; then
-    # sandbox.sh runs this before it builds anything, so a ticket that cannot start costs nothing.
+    # sandbox.sh runs this on the host before it builds anything, so a ticket that cannot start
+    # costs nothing. It starts no agent, so the checks below, which guard starting one, do not
+    # apply: the host has no reason to have the lead command, and is outside the sandbox.
     if ! ticket="$(next_ticket)"; then
       log "BLOCKED: ticket ${ONLY_TICKET} is not ready: status, blockers or the debt gate"
       exit 1
@@ -517,6 +513,13 @@ lead_main() {
     lead_ticket_ready "${ticket}"
     log "dry run: the lead would work ${ticket}"
     return 0
+  fi
+  local -a lead_argv
+  IFS=' ' read -r -a lead_argv <<<"${LEAD_CMD}"
+  command -v "${lead_argv[0]}" >/dev/null || die "lead command not found: ${lead_argv[0]}"
+  if [[ "${LEAD_CMD}" == *dangerously-skip-permissions* &&
+    "${RALPH_SANDBOX:-0}" != 1 && "${RALPH_ALLOW_HOST:-0}" != 1 ]]; then
+    die "refusing to run a permission-skipping lead outside the sandbox; use ./scripts/sandbox.sh"
   fi
   start_run
   # Refused before any agent runs: not ready-for-agent, blocked, or held by the debt gate.

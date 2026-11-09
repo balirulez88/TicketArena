@@ -31,7 +31,10 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { builtinModules } from "node:module";
 import { join, posix, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
+import { parseRegister } from "./ralph-debt.mjs";
 import { planRun, workspaceGlobs } from "./ralph-red.mjs";
+
+const DEBT_REGISTER = "docs/technical-debt.md";
 
 const env = process.env;
 const NEEDS_PREPARATION = 5;
@@ -490,7 +493,7 @@ function judgeSpecifier(rawSpec, file, owner, view, carried) {
       elsewhere.length > 0
         ? `the base declares it in ${elsewhere.join(", ")}: move the test there or reach it through that package`
         : "no package on the base declares it"
-    }. Adding it to package.json in this run does not help, because RED runs on the base. If neither works, leave the import and finish normally: the harness stops with NEEDS PREPARATION, keeps the work, and a human adds the dependency to the base first`,
+    }. Adding it to package.json in this run does not help, because RED runs on the base. If neither works, stop and report what the base needs: a human adds the dependency there first, and the work is kept`,
   };
 }
 
@@ -520,7 +523,8 @@ const unquote = (value) => value.replace(/^['"]|['"]$/g, "");
 
 function importerLines(lockText) {
   const lines = lockText.split(/\r?\n/);
-  const start = lines.indexOf("importers:");
+  // pnpm can write two YAML documents: the first locks only pnpm itself, the last the workspace.
+  const start = lines.lastIndexOf("importers:");
   if (start < 0) {
     return [];
   }
@@ -624,12 +628,13 @@ export function importFindings({ root, base, tree }) {
 const render = (findings) =>
   findings.map(({ file, problem, fix }) => `- ${file}: ${problem}.\n  Fix: ${fix}.`).join("\n");
 
-function report(findings) {
+function report(findings, notes = []) {
+  const noted = notes.map((note) => `Note: ${note}\n`).join("");
   if (findings.length === 0) {
-    process.stdout.write("READY\n");
+    process.stdout.write(`READY\n${noted}`);
     return 0;
   }
-  process.stdout.write(`NEEDS PREPARATION\n${render(findings)}\n`);
+  process.stdout.write(`NEEDS PREPARATION\n${render(findings)}\n${noted}`);
   return NEEDS_PREPARATION;
 }
 
@@ -658,7 +663,7 @@ function runHook(root) {
       return 0;
     }
     process.stderr.write(
-      `Preflight: these test files will fail the RED proof on the base (${base.slice(0, 12)}):\n${text}\n`,
+      `Preflight: this work cannot pass the harness's checks against the base (${base.slice(0, 12)}):\n${text}\n`,
     );
     return HOOK_FEEDBACK;
   } catch (error) {
@@ -675,7 +680,9 @@ const NAMES_PROOF = /\btests?\b|\bsabotage\b|\bassert|\bprove[sd]?\b|\bRESOLVED\
 export function ticketFindings(text, view, file) {
   const docs = [...text.matchAll(CRITERION)]
     .map(([, criterion]) => criterion)
-    .filter((criterion) => NAMES_DOCS.test(criterion) && !NAMES_PROOF.test(criterion))
+    // A parenthesis is an aside about the criterion, not what it asks for.
+    .filter((criterion) => NAMES_DOCS.test(criterion.replace(/\([^)]*\)/g, "")))
+    .filter((criterion) => !NAMES_PROOF.test(criterion))
     .map((criterion) => ({
       file,
       spec: "",
@@ -689,6 +696,20 @@ export function ticketFindings(text, view, file) {
     fix: "add the package's scaffold in its own reviewed ticket first",
   }));
   return [...docs, ...packages];
+}
+
+/** Open debt entries that say a test can flake: information for whoever reads a red run. */
+export function knownFlaky(registerText) {
+  if (registerText === null) {
+    return [];
+  }
+  return parseRegister(registerText)
+    .entries.filter(
+      ({ title, fields }) =>
+        fields.Status !== "RESOLVED" &&
+        /\bflak/i.test(`${title} ${fields.Problem ?? ""} ${fields.Impact ?? ""}`),
+    )
+    .map(({ id, title }) => `known flaky on the base, not this ticket's doing: ${id}: ${title}`);
 }
 
 function missingPackages(text, view) {
@@ -748,7 +769,8 @@ function main() {
   }
   if (command === "ticket" && argument && values.base) {
     const text = readFileSync(resolve(root, argument), "utf8");
-    return report(ticketFindings(text, baseView(root, values.base), argument));
+    const view = baseView(root, values.base);
+    return report(ticketFindings(text, view, argument), knownFlaky(view.read(DEBT_REGISTER)));
   }
   if (command === "baseline-key" && values.commit) {
     process.stdout.write(

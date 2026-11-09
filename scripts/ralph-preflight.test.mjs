@@ -324,6 +324,24 @@ describe("imports: an exact candidate, and the lockfile", () => {
       "importers:\n\n  .:\n    devDependencies:\n      '@a/b':\n        specifier: ^1.0.0\n        version: 1.0.0\n\npackages:\n\n  x: {}\n";
     assert.equal(lockedSpecifiers(lock).get(".").get("@a/b"), "^1.0.0");
   });
+
+  // What the repository's own lockfile looks like: pnpm locks itself in a document of its own.
+  const inTwoDocuments = (lock) =>
+    `---\nlockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    packageManagerDependencies:\n      pnpm:\n        specifier: 12.15.0\n        version: 12.15.0\n\n---\n${lock}`;
+
+  test("a lockfile of two YAML documents is read from the workspace's", () => {
+    const { root, base } = repo();
+    const lock = readFileSync(join(root, "pnpm-lock.yaml"), "utf8");
+    const importers = lockedSpecifiers(inTwoDocuments(lock));
+    assert.equal(importers.get("packages/driver-owner").get("driver"), "1.2.0");
+    write(root, {
+      "pnpm-lock.yaml": inTwoDocuments(lock.replace("specifier: 1.2.0", "specifier: 1.3.0")),
+      "packages/driver-owner/package.json": manifest("@demo/driver-owner", {
+        dependencies: { driver: "1.3.0" },
+      }),
+    });
+    assert.equal(run(root, "imports", "--base", base).status, 0);
+  });
 });
 
 describe("imports --hook", () => {
@@ -346,7 +364,7 @@ describe("imports --hook", () => {
     write(root, { "packages/service/src/a.test.ts": `import "driver";\n` });
     const first = hook(root, base);
     assert.equal(first.status, 2);
-    assert.match(first.stderr, /will fail the RED proof/);
+    assert.match(first.stderr, /cannot pass the harness's checks against the base/);
     assert.match(first.stderr, /Fix:/);
     assert.equal(hook(root, base).status, 0);
     write(root, { "packages/service/src/b.test.ts": `import "brand-new";\n` });
@@ -429,6 +447,38 @@ describe("ticket", () => {
       ticket(root, base, "**Documentation deliverable:**\n- `docs/limits.md` records it.").status,
       0,
     );
+  });
+
+  test("a behaviour criterion with an aside about documentation (ticket 13)", () => {
+    const { root, base } = repo();
+    assert.equal(
+      ticket(root, base, "- [ ] Releasing does not free the slot (documented; see ticket 30).")
+        .status,
+      0,
+    );
+  });
+
+  const register = (...entries) =>
+    `# Register\n\n<!-- ralph-debt:begin -->\n${entries.join("\n")}\n<!-- ralph-debt:end -->\n`;
+  const entry = (id, title, status, impact = "None.") =>
+    `### ${id}: ${title}\n\n- **Status:** ${status}\n- **Impact:** ${impact}\n`;
+
+  test("open entries about flaky tests are noted and do not change the verdict", () => {
+    const { root, base } = repo({
+      "docs/technical-debt.md": register(
+        entry("TD-001", "Slow query", "OPEN"),
+        entry("TD-002", "Worker race", "PLANNED", "The test can flake on a slow machine."),
+        entry("TD-003", "Old flaky test", "RESOLVED"),
+      ),
+    });
+    const result = ticket(root, base, "- [ ] A test passes.");
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /^READY\nNote: known flaky .*TD-002: Worker race\n$/);
+  });
+
+  test("a repository without a debt register has no notes", () => {
+    const { root, base } = repo();
+    assert.equal(ticket(root, base, "- [ ] A test passes.").stdout, "READY\n");
   });
 
   test("a workspace package the base lacks", () => {

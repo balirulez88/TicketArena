@@ -396,8 +396,9 @@ without `--ticket`, exit 2 before a container exists (`scripts/ralph-driver.sh`)
   `lead-work.patch`, exit 1.
 - **Readiness ([ADR 0019](../adr/0019-readiness-checks-for-the-lead-driver.md)).** Model-free
   checks in `scripts/ralph-preflight.mjs`, verdict `READY`, `NEEDS PREPARATION` (exit 5) or
-  `BLOCKED`. Before any image is built, `sandbox.sh` refuses a ticket that is not ready or that a
-  test cannot verify. Before the Lead starts, `run_gate` runs on the base unless the host has
+  `BLOCKED`. Before any image is built, `sandbox.sh` refuses a ticket that is not ready or that
+  has a criterion naming documentation and no test, and notes open debt entries about flaky tests.
+  Before the Lead starts, `run_gate` runs on the base unless the host has
   already verified this code (`.ralph/baseline/`). A hook in `.claude/settings.json` tells the
   agent as soon as a test imports what the base cannot load, in review fixes too, and the driver
   makes the same check on the exact candidate before RED, whether or not the hook ran. A finding

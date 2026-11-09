@@ -14,7 +14,8 @@
 # bundle and the host's resume state read-only, and writes only to a fresh run directory. What it
 # produces is untrusted until scripts/ralph-accept.mjs has validated it. That script, running on
 # the host, is the only thing that changes this repository. Exit codes: 0 accepted (merged, or
-# nothing to do), 75 paused, 1 rejected or failed, 3 refused as untrusted.
+# nothing to do), 75 paused, 1 rejected or failed, 3 refused as untrusted; before any container, for
+# the lead driver (ADR 0019): 5 needs preparation, 2 usage or a readiness check that could not run.
 set -Eeuo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

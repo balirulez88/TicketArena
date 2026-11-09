@@ -561,7 +561,9 @@ runs), a malicious agent whose tests attack the host's gate (they cannot
 rewrite another test, the runner or the dependencies, reach the network or the host, and the gate
 fails), a slice the agent's reviewers approve but the host's isolated reviewers block (not merged;
 the reviewer containers see exactly the candidate, read-only, with no output mount), and a dirty
-host checkout (refused before any container starts).
+host checkout (refused before any container starts). The fixture's gate passes on its base, as a
+real project's must, so each lead-driver scenario proves it passed the baseline check and started
+a session; a scenario with a failing base proves the run stops before any session.
 
 The threat model and the limitations that remain (prompt injection of the reviewers, shared state
 within one package's test run, network during install, hoisted modules, merged code running on

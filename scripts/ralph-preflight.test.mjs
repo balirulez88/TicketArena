@@ -473,7 +473,7 @@ describe("ticket", () => {
     });
     const result = ticket(root, base, "- [ ] A test passes.");
     assert.equal(result.status, 0);
-    assert.match(result.stdout, /^READY\nNote: known flaky .*TD-002: Worker race\n$/);
+    assert.match(result.stdout, /^READY\nNote: .*mentions flakiness in TD-002: Worker race\n$/);
   });
 
   test("a repository without a debt register has no notes", () => {

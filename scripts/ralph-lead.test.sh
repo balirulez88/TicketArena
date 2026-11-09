@@ -70,6 +70,11 @@ case "${STUB_LEAD:-ok}" in
     [[ "${STUB_LEAD}" != check-broken ]] || rm scripts/ralph-preflight.mjs
     printf '{"type":"result","is_error":false}\n'
     ;;
+  gave-up)
+    # Told that an import cannot be avoided: stops at once, with no handoff.
+    printf 'import "brand-new";\ntest("feature", () => {});\n' >feature.test.ts
+    printf '{"type":"result","is_error":false}\n'
+    ;;
   tamper)
     mkdir -p .ralph/lead
     echo "AC1" >.ralph/lead/checklist.md
@@ -413,6 +418,16 @@ expect "the work is kept as a patch" bash -c \
 expect "the session's lack of a hook is reported, and did not matter" \
   grep -q 'hook never fired' "${d}.out"
 
+scenario "a lead that stops on an unavoidable import is reported as that, not as an accident"
+d="$(new_repo gaveup)"
+code=0
+STUB_LEAD=gave-up run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "exit non-zero" test "${code}" != 0
+expect "says NEEDS PREPARATION" grep -q 'NEEDS PREPARATION' "${d}.out"
+expect "does not blame a background subagent" bash -c "! grep -q 'left running' '${d}.out'"
+expect "RED and the gate never ran" test ! -e "${d}.calls.red-ran" -a ! -e "${d}.calls.gate-ran"
+expect "the ticket is not blocked" test "$(main_status gaveup)" = ready-for-agent
+
 scenario "a check that cannot run stops the run; it is never read as a pass"
 d="$(new_repo checkbroken)"
 code=0
@@ -529,6 +544,14 @@ on_host run_sandbox_lead >"${d}.out" 2>&1 || code=$?
 expect "the default lead command passes the host's readiness step" test "${code}" = 0
 expect "the container ran" grep -q '^run$' "${d}.docker"
 expect "an unverified base is not reported as verified" test -z "$(passed_to_container)"
+
+# The host need not have the command at all: only the container runs it.
+run_sandbox_uninstalled() {
+  RALPH_LEAD_CMD=definitely-not-installed run_sandbox_lead
+}
+code=0
+on_host run_sandbox_uninstalled >"${d}.out" 2>&1 || code=$?
+expect "a lead command the host lacks passes the host's readiness step" test "${code}" = 0
 
 code=0
 STUB_VERIFY=1 on_host bash scripts/sandbox.sh --verify >"${d}.out" 2>&1 || code=$?

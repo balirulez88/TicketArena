@@ -31,7 +31,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { builtinModules } from "node:module";
 import { join, posix, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { parseRegister } from "./ralph-debt.mjs";
+import { isUnresolved, parseRegister } from "./ralph-debt.mjs";
 import { planRun, workspaceGlobs } from "./ralph-red.mjs";
 
 const DEBT_REGISTER = "docs/technical-debt.md";
@@ -698,18 +698,17 @@ export function ticketFindings(text, view, file) {
   return [...docs, ...packages];
 }
 
-/** Open debt entries that say a test can flake: information for whoever reads a red run. */
+/** Unresolved debt entries that mention a flaky test: a pointer for whoever reads a red run. */
 export function knownFlaky(registerText) {
   if (registerText === null) {
     return [];
   }
   return parseRegister(registerText)
-    .entries.filter(
-      ({ title, fields }) =>
-        fields.Status !== "RESOLVED" &&
-        /\bflak/i.test(`${title} ${fields.Problem ?? ""} ${fields.Impact ?? ""}`),
+    .entries.filter(isUnresolved)
+    .filter(({ title, fields }) =>
+      /\bflak/i.test(`${title} ${fields.Problem ?? ""} ${fields.Impact ?? ""}`),
     )
-    .map(({ id, title }) => `known flaky on the base, not this ticket's doing: ${id}: ${title}`);
+    .map(({ id, title }) => `the debt register mentions flakiness in ${id}: ${title}`);
 }
 
 function missingPackages(text, view) {

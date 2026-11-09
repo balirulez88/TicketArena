@@ -94,7 +94,8 @@ sandbox_run() {
 
 if [[ "${verify}" == true ]]; then
   # The host's own gate, in hardened, staged containers of this image (ADR 0015).
-  target="${2:-${BASE}}"
+  # One commit for the gate and the record: a branch can move while the gate runs.
+  target="$(git rev-parse --verify "${2:-${BASE}}^{commit}")"
   RALPH_IMAGE="${IMAGE}" node "${REPO_ROOT}/scripts/ralph-verify.mjs" "${target}" || exit $?
   # The later run on this same code need not repeat it (ADR 0019). Only a hint: losing it costs one
   # baseline run, and the importer's gate never reads it.

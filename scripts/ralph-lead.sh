@@ -326,8 +326,9 @@ lead_baseline_green() {
 # run also stops, because nothing then says the candidate is worth judging.
 lead_candidate_ready() {
   local base_sha=$1 candidate=$2 report=$3 status=0
-  node "${PREFLIGHT}" imports --base "${base_sha}" --candidate "${candidate}" >"${report}" 2>&1 ||
-    status=$?
+  local -a exact=()
+  [[ -z "${candidate}" ]] || exact=(--candidate "${candidate}")
+  node "${PREFLIGHT}" imports --base "${base_sha}" "${exact[@]}" >"${report}" 2>&1 || status=$?
   ((status == 0)) && return 0
   sed 's/^/  /' "${report}" >&2
   if ((status == 5)); then
@@ -453,6 +454,13 @@ lead_ticket() {
     return "${status}"
   fi
   if ! lead_handed_off; then
+    # An import nobody can avoid ends the session on purpose. Said plainly, or the operator reads
+    # an accident below and pays to run the same ticket into the same import.
+    if ! lead_candidate_ready "${base_sha}" "" "${LOG_DIR}/${slug}.lead.imports.log" &&
+      [[ "${LEAD_NOT_READY}" == "NEEDS PREPARATION"* ]]; then
+      lead_stop "${ticket}" "${branch}" "${base_sha}" "${LEAD_NOT_READY}"
+      return 1
+    fi
     lead_stop "${ticket}" "${branch}" "${base_sha}" \
       "the lead ended its session without handing off (no checklist.md and changeset.md); a subagent was probably left running in the background"
     return 1

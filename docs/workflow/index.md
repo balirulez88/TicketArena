@@ -51,6 +51,12 @@ warnings:
   dead: same host, and the process ID no longer matches the recorded name and start time. A
   session whose owner cannot be proven dead stays. `GIT_CEILING_DIRECTORIES` stops Git in a fixture
   from discovering the real repository above it.
+  Known limits: the bash suites (`scripts/ralph-*.test.sh`) make their directories with `mktemp`
+  and do not use this module, so they still follow the caller's `TEMP` and remove their own only
+  on a normal exit. The module has been exercised on the Windows host only, not inside the sandbox
+  container, so its Linux process identification and default root are unverified there. During
+  its verification on 2026-11-09, files in the system `TEMP` changed that were not traced to any
+  cause, so a run does not prove that `TEMP` was left untouched.
 
 ## Integration test infrastructure
 

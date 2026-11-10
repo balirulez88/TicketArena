@@ -48,10 +48,10 @@ new_host_repo() {
   node "${dir}/scripts/ralph-debt.mjs" format "${dir}/docs/technical-debt.md"
 
   # A project shaped like a real one: its gate passes on the base, fails once a test for the missing
-  # feature exists, and passes again once feature.txt does, so the lead driver's baseline check, RED
-  # and GREEN are genuine, and so is the host's own re-run of the gate (`pnpm run check`). Its one
-  # workspace package owns the RED test; stub/vitest.mjs stands in for Vitest there and reports each
-  # test it is given as failing until feature.txt exists, as the RED check requires.
+  # feature exists, and passes again once feature.txt does, so the lead driver's baseline check and
+  # the host's own re-run of the gate (`pnpm run check`) judge real states. Its one workspace package
+  # owns the RED test; stub/vitest.mjs stands in for Vitest there and reports each test it is given
+  # as failing, as the RED check requires.
   printf '{"name":"fixture","private":true,"scripts":{"lint":"node -e 0","typecheck":"node -e 0","test":"node gate.mjs","check:debt":"node stub/register.mjs && node scripts/ralph-debt.mjs check docs/technical-debt.md","check":"pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run check:debt"}}\n' \
     >"${dir}/package.json"
   printf 'packages:\n  - "packages/*"\n' >"${dir}/pnpm-workspace.yaml"
@@ -572,7 +572,7 @@ git -C "${host}" commit --quiet -m "break the base's gate"
 before="$(fingerprint "${host}")"
 code="$(run_lead_sandbox "${host}" ok lead --ticket 01)"
 check "sandbox exits 1" "[[ ${code} == 1 ]]"
-check "the baseline check tried the gate twice" "grep -q 'baseline: the gate failed once' '${host}.out'"
+check "the baseline check logged its retry" "grep -q 'baseline: the gate failed once' '${host}.out'"
 check "stopped because the base is red" "grep -q 'main fails the gate before any work' '${host}.out'"
 check "no lead session started" "! grep -q 'running the lead session' '${host}.out'"
 check "host repository, refs and checkout unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"

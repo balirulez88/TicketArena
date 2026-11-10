@@ -45,10 +45,11 @@ warnings:
   child processes go to one session folder under `RALPH_TEST_TMP_ROOT` (absolute; default
   `.ralph/tmp/harness`). There is no fallback to the system's temporary directory: an unusable root
   fails the run. A root may not contain the repository, or sit inside it anywhere but below
-  `.ralph/tmp`, or inside `failure-injection*` evidence. Each test's directories are removed after
+  `.ralph/tmp`, or in a `failure-injection*` folder directly below `.ralph/tmp`. Each test's directories are removed after
   it, passed or failed; `RALPH_TEST_KEEP_FAILED=1` moves a failed test's to `kept-failed/` for
   debugging, where it is never swept. Only `sessions/` is swept, so existing `failure-injection*`
-  evidence is left alone.
+  evidence is left alone. A test cannot designate other evidence: its directories survive only
+  with that flag.
   A hard kill runs no cleanup on Windows, so the next run removes the sessions of owners proven
   dead: same host, and the process ID no longer matches the recorded name and start time. A
   session whose owner cannot be proven dead stays, and only owners read before the process list
@@ -62,8 +63,8 @@ warnings:
   host only, never inside the sandbox container, so its Linux process identification, its default
   root and the cost of writing fixtures to the container's volume are unverified there. On Windows
   `SIGTERM` is a hard kill, so its signal handler has not been observed running; what has been
-  observed is the next run's recovery. The start-up race is tested by handing the judging step a
-  fixed list of owners, not reproduced between real processes. During verification on 2026-11-09,
+  observed is the next run's recovery. The start-up race is tested by having the process-listing step
+  plant a new owner, not reproduced between real processes. During verification on 2026-11-09,
   files in the system `TEMP` changed that were not traced to any cause, so a run does not prove
   that `TEMP` was left untouched.
 

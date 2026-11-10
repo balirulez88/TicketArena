@@ -1,7 +1,7 @@
 // Scenario tests for scripts/ralph-test-workspace.mjs. Each scenario runs a real child process
 // that imports the helper, under its own workspace root, and then inspects what is left on disk.
-// The public interface is the import and its two environment variables; recoverDeadSessions is
-// exported for the scenarios no sequence of real processes can stage.
+// The public interface is the import and its two environment variables; the recovery functions
+// are exported for the scenarios no sequence of real processes can stage.
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -19,7 +19,7 @@ import { hostname, tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { recoverDeadSessions } from "./ralph-test-workspace.mjs";
+import { recoverDeadSessions, recoverSessions } from "./ralph-test-workspace.mjs";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const repo = dirname(scriptsDir);
@@ -281,13 +281,18 @@ describe("ralph-test-workspace: live and unproven sessions", () => {
   const judged = (id) => [{ name: `session-${id}`, owner: DEAD_OWNER }];
   const sessionsOf = (root) => join(root, "sessions");
 
-  it("does not judge an owner that appeared after the processes were listed", () => {
+  it("does not judge an owner that appears while the processes are being listed", () => {
     const { root } = lab();
+    mkdirSync(sessionsOf(root), { recursive: true });
     const listed = plantSession(root, "listed", DEAD_OWNER);
-    const arrived = plantSession(root, "arrived", DEAD_OWNER);
-    recoverDeadSessions(sessionsOf(root), judged("listed"), new Map());
+    let arrived = "";
+    recoverSessions(sessionsOf(root), () => {
+      arrived = plantSession(root, "arrived", DEAD_OWNER);
+      return new Map();
+    });
     assert.equal(existsSync(listed), false, "the listed owner is absent from the table: dead");
     assert.ok(existsSync(arrived), "a session started meanwhile must not be taken for dead");
+    assert.ok(existsSync(`${arrived}.owner.json`), "nor lose its owner record");
   });
 
   it("removes nothing when the system could not be asked about its processes", () => {
@@ -323,18 +328,31 @@ describe("ralph-test-workspace: repeated runs", () => {
 });
 
 describe("ralph-test-workspace: evidence retention", () => {
-  it("leaves existing failure-injection artifacts beside the root alone", () => {
-    const { dir, root } = lab();
-    const evidence = join(dir, "failure-injection-2", "evidence");
-    mkdirSync(evidence, { recursive: true });
-    writeFileSync(join(evidence, "run.log"), "evidence");
-    const earlier = join(root, "evidence", "failure-injection-1");
-    mkdirSync(earlier, { recursive: true });
-    writeFileSync(join(earlier, "run.log"), "evidence");
-    runTests(dir, root, noop);
-    assert.equal(readFileSync(join(evidence, "run.log"), "utf8"), "evidence");
-    assert.equal(readFileSync(join(earlier, "run.log"), "utf8"), "evidence");
-  });
+  for (const keepFailed of ["0", "1"]) {
+    it(`leaves failure-injection artifacts alone through recovery and a failing run (RALPH_TEST_KEEP_FAILED=${keepFailed})`, () => {
+      const { dir, root } = lab();
+      const beside = join(dir, "failure-injection-2", "evidence");
+      mkdirSync(beside, { recursive: true });
+      writeFileSync(join(beside, "run.log"), "evidence");
+      initialiseRoot(root);
+      const inside = join(root, "failure-injection-1");
+      mkdirSync(inside);
+      writeFileSync(join(inside, "run.log"), "evidence");
+      const dead = plantSession(root, "dead", DEAD_OWNER);
+      const result = runTests(
+        dir,
+        root,
+        "it('fails', () => { scratch(); throw new Error('x'); });",
+        {
+          RALPH_TEST_KEEP_FAILED: keepFailed,
+        },
+      );
+      assert.equal(result.status, 1, result.stdout + result.stderr);
+      assert.equal(existsSync(dead), false, "recovery ran, so the evidence was within its reach");
+      assert.equal(readFileSync(join(beside, "run.log"), "utf8"), "evidence");
+      assert.equal(readFileSync(join(inside, "run.log"), "utf8"), "evidence");
+    });
+  }
 });
 
 describe("ralph-test-workspace: junction safety", () => {
@@ -383,10 +401,7 @@ describe("ralph-test-workspace: junction safety", () => {
     const target = realTarget(dir);
     const entry = join(root, "sessions", "session-linked");
     symlinkSync(target, entry, "junction");
-    writeFileSync(
-      `${entry}.owner.json`,
-      JSON.stringify({ pid: 999999, name: "node", startTime: "1", hostname: hostname() }),
-    );
+    writeFileSync(`${entry}.owner.json`, JSON.stringify(DEAD_OWNER));
     runScript(dir, root, "console.log(workspace.session);");
     assert.throws(() => lstatSync(entry), /ENOENT/);
     survived(target);

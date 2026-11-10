@@ -11,7 +11,8 @@
 //   RALPH_TEST_KEEP_FAILED  "1" keeps a failed test's directories under <root>/kept-failed.
 //
 // Layout under the root: sessions/ (swept) and kept-failed/ (never removed here). Nothing else
-// under the root is touched, so earlier failure-injection evidence kept there survives every run.
+// under the root is touched. The existing failure-injection evidence sits beside the default
+// root, in .ralph/tmp, which is never swept.
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -261,12 +262,21 @@ function listOwners(sessions) {
   });
 }
 
-function openSession(root) {
-  const sessions = join(root, "sessions");
+/**
+ * Removes what dead owners left. Owners are read once, before the processes are listed: an owner
+ * that appears meanwhile is not in the table and would otherwise be taken for dead.
+ */
+export function recoverSessions(sessions, identify = identifyProcesses) {
   const owners = listOwners(sessions);
   const others = owners.flatMap(({ owner }) => (owner === null ? [] : [owner.pid]));
-  const table = identifyProcesses([...new Set([process.pid, ...others])]);
+  const table = identify([...new Set([process.pid, ...others])]);
   recoverDeadSessions(sessions, owners, table);
+  return table;
+}
+
+function openSession(root) {
+  const sessions = join(root, "sessions");
+  const table = recoverSessions(sessions);
   const self = table?.get(process.pid);
   const name = `session-${process.pid}-${randomBytes(4).toString("hex")}`;
   // The owner is on disk before the directory, so no session ever exists without one.

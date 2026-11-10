@@ -40,7 +40,8 @@ warnings:
   (`scripts/ralph-stub-reviewer.mjs`), proving the merge policy, the evidence gate, the
   retention rules, provider-failure pause and resume, and bounded batches (all below).
   Every `scripts/*.test.mjs` that needs temporary files imports
-  `scripts/ralph-test-workspace.mjs`, and a test keeps it that way. Its fixtures and those of its
+  `scripts/ralph-test-workspace.mjs`. A test enforces that for files calling `tmpdir()`; it does
+  not see `mktemp` or a direct read of `TEMP`. Its fixtures and those of its
   child processes go to one session folder under `RALPH_TEST_TMP_ROOT` (absolute; default
   `.ralph/tmp/harness`). There is no fallback to the system's temporary directory: an unusable root
   fails the run. A root may not contain the repository, or sit inside it anywhere but below
@@ -49,14 +50,21 @@ warnings:
   debugging, and `preserveEvidence()` moves designated ones to `evidence/`. Neither is ever swept.
   A hard kill runs no cleanup on Windows, so the next run removes the sessions of owners proven
   dead: same host, and the process ID no longer matches the recorded name and start time. A
-  session whose owner cannot be proven dead stays. `GIT_CEILING_DIRECTORIES` stops Git in a fixture
-  from discovering the real repository above it.
-  Known limits: the bash suites (`scripts/ralph-*.test.sh`) make their directories with `mktemp`
-  and do not use this module, so they still follow the caller's `TEMP` and remove their own only
-  on a normal exit. The module has been exercised on the Windows host only, not inside the sandbox
-  container, so its Linux process identification and default root are unverified there. During
-  its verification on 2026-11-09, files in the system `TEMP` changed that were not traced to any
-  cause, so a run does not prove that `TEMP` was left untouched.
+  session whose owner cannot be proven dead stays, and only owners read before the process list
+  are judged, so a test file starting at that moment is not taken for dead.
+  `GIT_CEILING_DIRECTORIES` stops Git in a fixture from discovering the real repository above it,
+  and the module clears Git's repository-local variables (`GIT_DIR`, `GIT_WORK_TREE` and the
+  rest), which outrank discovery.
+  Known limits. The bash suites (`scripts/ralph-*.test.sh`) make their directories with `mktemp`
+  and do not use this module, so they follow the caller's `TEMP`, keep inherited Git variables,
+  and leave their directories behind after a hard kill. The module has been run on the Windows
+  host only, never inside the sandbox container, so its Linux process identification, its default
+  root and the cost of writing fixtures to the container's volume are unverified there. On Windows
+  `SIGTERM` is a hard kill, so its signal handler has not been observed running; what has been
+  observed is the next run's recovery. The start-up race is tested by handing the judging step a
+  fixed list of owners, not reproduced between real processes. During verification on 2026-11-09,
+  files in the system `TEMP` changed that were not traced to any cause, so a run does not prove
+  that `TEMP` was left untouched.
 
 ## Integration test infrastructure
 

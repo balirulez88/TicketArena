@@ -32,6 +32,26 @@ import { fileURLToPath } from "node:url";
 
 const REPOSITORY = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), ".."));
 const OWNER_FILE = /^(session-[\w-]+)\.owner\.json$/;
+// What Git calls repository-local variables (`git rev-parse --local-env-vars`). A hook or
+// `rebase -x` exports some of them, and they outrank discovery: with GIT_DIR set, a fixture's
+// `git commit` lands in the real repository whatever GIT_CEILING_DIRECTORIES says.
+const GIT_LOCAL_VARIABLES = [
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_CONFIG",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_COUNT",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_GRAFT_FILE",
+  "GIT_INDEX_FILE",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_REPLACE_REF_BASE",
+  "GIT_PREFIX",
+  "GIT_SHALLOW_FILE",
+  "GIT_COMMON_DIR",
+];
 
 const isStrictlyInside = (parent, child) => {
   const path = relative(parent, child);
@@ -40,7 +60,8 @@ const isStrictlyInside = (parent, child) => {
 
 /** Cleanup only ever runs below the root, so the root's position is what protects the repository. */
 function assertSafeRoot(root) {
-  if (root === REPOSITORY || isStrictlyInside(root, REPOSITORY)) {
+  // relative(), not ===: on Windows two spellings differing in case are the same directory.
+  if (relative(root, REPOSITORY) === "" || isStrictlyInside(root, REPOSITORY)) {
     throw new Error(`RALPH_TEST_TMP_ROOT ${root} is or contains the repository; choose another`);
   }
   if (!isStrictlyInside(REPOSITORY, root)) {
@@ -57,6 +78,24 @@ function assertSafeRoot(root) {
   }
 }
 
+/** Where a root that may not exist yet would really land, following any link on the way to it. */
+function resolveThroughLinks(path) {
+  const missing = [];
+  let current = path;
+  for (;;) {
+    try {
+      return join(realpathSync(current), ...missing);
+    } catch (error) {
+      const parent = dirname(current);
+      if (parent === current) {
+        throw error;
+      }
+      missing.unshift(basename(current));
+      current = parent;
+    }
+  }
+}
+
 function openRoot() {
   const { RALPH_TEST_TMP_ROOT: configured } = process.env;
   if (configured !== undefined && !isAbsolute(configured)) {
@@ -64,7 +103,9 @@ function openRoot() {
   }
   const requested =
     configured === undefined ? join(REPOSITORY, ".ralph", "tmp", "harness") : resolve(configured);
-  assertSafeRoot(requested);
+  // Before anything is created, and not only after: a link can make a root that looks external
+  // land in the repository, and mkdir would then write there.
+  assertSafeRoot(resolveThroughLinks(requested));
   let root;
   try {
     mkdirSync(join(requested, "sessions"), { recursive: true });
@@ -75,7 +116,7 @@ function openRoot() {
       `RALPH_TEST_TMP_ROOT ${requested} is unavailable, and the tests do not fall back to the system's temporary directory: ${reason}`,
     );
   }
-  // Again on the real path: a link can make a root that looks external land in the repository.
+  // Again now that the root exists: a link may have been created since the check above.
   assertSafeRoot(root);
   return root;
 }
@@ -190,12 +231,15 @@ function removeSession(sessions, name) {
 /**
  * Removes the sessions of processes proven dead. A hard kill runs no cleanup at all on Windows,
  * not even an exit handler, so this is the only recovery from one. Anything unproven stays.
+ *
+ * Judges exactly the owners the table was built from: an owner read afterwards has no entry, and
+ * no entry means dead, so another test file starting at this moment would lose its live session.
  */
-function recoverDeadSessions(sessions, table) {
+export function recoverDeadSessions(sessions, owners, table) {
   if (table === null) {
     return;
   }
-  for (const { name, owner } of listOwners(sessions)) {
+  for (const { name, owner } of owners) {
     if (owner === null || owner.startTime === null || owner.hostname !== hostname()) {
       continue;
     }
@@ -218,9 +262,10 @@ function listOwners(sessions) {
 
 function openSession(root) {
   const sessions = join(root, "sessions");
-  const others = listOwners(sessions).flatMap(({ owner }) => (owner === null ? [] : [owner.pid]));
+  const owners = listOwners(sessions);
+  const others = owners.flatMap(({ owner }) => (owner === null ? [] : [owner.pid]));
   const table = identifyProcesses([...new Set([process.pid, ...others])]);
-  recoverDeadSessions(sessions, table);
+  recoverDeadSessions(sessions, owners, table);
   const self = table?.get(process.pid);
   const name = `session-${process.pid}-${randomBytes(4).toString("hex")}`;
   // The owner is on disk before the directory, so no session ever exists without one.
@@ -253,6 +298,9 @@ const { GIT_CEILING_DIRECTORIES: inheritedCeiling, RALPH_TEST_KEEP_FAILED: keepF
 process.env.GIT_CEILING_DIRECTORIES = [portable(sessions), inheritedCeiling]
   .filter(Boolean)
   .join(delimiter);
+for (const name of GIT_LOCAL_VARIABLES) {
+  delete process.env[name];
+}
 
 let released = false;
 function release() {

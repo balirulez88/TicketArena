@@ -1,6 +1,7 @@
 // Scenario tests for scripts/ralph-test-workspace.mjs. Each scenario runs a real child process
 // that imports the helper, under its own workspace root, and then inspects what is left on disk.
-// The public interface is the import, its two environment variables, and preserveEvidence.
+// The public interface is the import, its two environment variables, and preserveEvidence;
+// recoverDeadSessions is exported for the scenarios no sequence of real processes can stage.
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -18,7 +19,7 @@ import { hostname, tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import "./ralph-test-workspace.mjs";
+import { recoverDeadSessions } from "./ralph-test-workspace.mjs";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const repo = dirname(scriptsDir);
@@ -101,7 +102,7 @@ function plantSession(root, id, owner) {
   return session;
 }
 
-/** This process's real identity, as a live session of it would have recorded. */
+/** Creates the root's layout through a real run of the helper. */
 function initialiseRoot(root) {
   const result = runScript(
     mkdtempSync(join(tmpdir(), "id-")),
@@ -116,6 +117,8 @@ function initialiseRoot(root) {
 const firstLine = (result) => result.stdout.split(/\r?\n/)[0].trim();
 
 const noop = "it('passes', () => { scratch(); });";
+
+const DEAD_OWNER = { pid: 999999, name: "node", startTime: "1", hostname: hostname() };
 
 describe("ralph-test-workspace: normal completion", () => {
   it("creates fixtures under the configured root and leaves nothing after a pass", () => {
@@ -248,7 +251,8 @@ describe("ralph-test-workspace: live and unproven sessions", () => {
   it("leaves a session alone when its owner cannot be proven dead", () => {
     const { dir, root } = lab();
     initialiseRoot(root);
-    const unknownName = plantSession(root, "foreign", {
+    const dead = plantSession(root, "dead", DEAD_OWNER);
+    const foreign = plantSession(root, "foreign", {
       pid: 1,
       name: "node",
       startTime: "1",
@@ -265,10 +269,40 @@ describe("ralph-test-workspace: live and unproven sessions", () => {
     writeFileSync(`${corrupt}.owner.json`, "{not json");
     const orphan = join(root, "sessions", "session-noowner");
     mkdirSync(join(orphan, "tmp"), { recursive: true });
-    runScript(dir, root, "console.log(workspace.session);");
-    for (const path of [unknownName, noStart, corrupt, orphan]) {
+    const result = runScript(dir, root, "console.log(workspace.session);");
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(existsSync(dead), false, "recovery ran, so what stays below was judged");
+    for (const path of [foreign, noStart, corrupt, orphan]) {
       assert.ok(existsSync(path), `${path} has no proof of death and must stay`);
     }
+  });
+
+  // Each of these needs a process table no real process can be made to produce on demand.
+  const judged = (id) => [{ name: `session-${id}`, owner: DEAD_OWNER }];
+  const sessionsOf = (root) => join(root, "sessions");
+
+  it("does not judge an owner that appeared after the processes were listed", () => {
+    const { root } = lab();
+    const listed = plantSession(root, "listed", DEAD_OWNER);
+    const arrived = plantSession(root, "arrived", DEAD_OWNER);
+    recoverDeadSessions(sessionsOf(root), judged("listed"), new Map());
+    assert.equal(existsSync(listed), false, "the listed owner is absent from the table: dead");
+    assert.ok(existsSync(arrived), "a session started meanwhile must not be taken for dead");
+  });
+
+  it("removes nothing when the system could not be asked about its processes", () => {
+    const { root } = lab();
+    const session = plantSession(root, "unasked", DEAD_OWNER);
+    recoverDeadSessions(sessionsOf(root), judged("unasked"), null);
+    assert.ok(existsSync(session));
+  });
+
+  it("leaves a session whose running process's start time could not be read", () => {
+    const { root } = lab();
+    const session = plantSession(root, "unreadable", DEAD_OWNER);
+    const table = new Map([[DEAD_OWNER.pid, { name: "other-program", startTime: "" }]]);
+    recoverDeadSessions(sessionsOf(root), judged("unreadable"), table);
+    assert.ok(existsSync(session));
   });
 });
 
@@ -365,7 +399,8 @@ describe("ralph-test-workspace: junction safety", () => {
     const { child, session } = await startLive(dir, root);
     symlinkSync(target, join(session, "tmp", "linked"), "junction");
     await stop(child);
-    runScript(dir, root, "console.log(workspace.session);");
+    const result = runScript(dir, root, "console.log(workspace.session);");
+    assert.equal(result.status, 0, result.stderr);
     assert.equal(existsSync(session), false);
     survived(target);
   });
@@ -407,6 +442,10 @@ describe("ralph-test-workspace: the boundary of the real repository", () => {
   it("refuses a root that is, contains or sits among the repository's protected paths", () => {
     refused(repo, /repository/);
     refused(dirname(repo), /repository/);
+    // Windows paths compare without case, so this spelling is the repository too.
+    if (process.platform === "win32") {
+      refused(repo.toLowerCase(), /repository/);
+    }
     refused(join(repo, ".ralph"), /\.ralph[/\\]tmp/);
     refused(join(repo, ".ralph", "tmp"), /\.ralph[/\\]tmp/);
     refused(join(repo, "scripts", "harness"), /\.ralph[/\\]tmp/);
@@ -419,6 +458,7 @@ describe("ralph-test-workspace: the boundary of the real repository", () => {
     const link = join(dir, "looks-outside");
     symlinkSync(repo, link, "junction");
     refused(link, /repository/);
+    assert.equal(existsSync(join(repo, "sessions")), false, "refused before creating anything");
   });
 
   it("stops Git discovery from a fixture directory reaching the real repository", () => {
@@ -431,6 +471,26 @@ describe("ralph-test-workspace: the boundary of the real repository", () => {
        console.log(r.status, r.stdout.trim());`,
     );
     assert.equal(firstLine(result), "128", result.stderr);
+  });
+
+  it("keeps inherited Git repository variables from redirecting a fixture's Git", () => {
+    const { dir, root } = lab();
+    const elsewhere = join(dir, "elsewhere");
+    assert.equal(spawnSync("git", ["init", "--quiet", elsewhere]).status, 0);
+    const result = runScript(
+      dir,
+      root,
+      `const made = scratch();
+       spawnSync("git", ["init", "--quiet"], { cwd: made });
+       const r = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: made, encoding: "utf8" });
+       console.log(r.stdout.trim());`,
+      {
+        GIT_DIR: join(elsewhere, ".git"),
+        GIT_WORK_TREE: elsewhere,
+        GIT_INDEX_FILE: join(elsewhere, ".git", "index"),
+      },
+    );
+    assert.equal(firstLine(result), ".git", result.stderr);
   });
 
   it("is imported by every test file that uses the system's temporary directory", () => {

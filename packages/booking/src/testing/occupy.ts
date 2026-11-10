@@ -14,7 +14,7 @@ export interface OccupyOptions {
   readonly deadlineMs?: number;
   /** Delays the occupier, not occupy's caller, so a test can prove callers wait for the signal. */
   readonly beforeStart?: () => Promise<void>;
-  /** Told each time a transaction could not start and is about to be tried again. */
+  /** Told each time an attempt failed before its signal and is about to be tried again. */
   readonly onStartFailure?: (error: unknown) => void;
 }
 
@@ -54,7 +54,7 @@ function startAttempt(db: PrismaClient, started: Promise<void>, maxWaitMs: numbe
         await gate;
       },
       // The client's own budget may be the short one under test; the occupier must not be bound
-      // by it. maxWait bounds a pending start, and timeout bounds a query that never returns.
+      // by it.
       { maxWait: maxWaitMs, timeout: OCCUPATION_TIMEOUT_MS },
     ),
   );
@@ -69,14 +69,25 @@ function startAttempt(db: PrismaClient, started: Promise<void>, maxWaitMs: numbe
   };
 }
 
+const TIMED_OUT = Symbol("timed out");
+
+function orTimeout<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), ms);
+  });
+  return Promise.race([work, expired]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Holds one of the client's connections in an open transaction. Resolves only after the
  * transaction's query has run, so a test on a one-connection pool knows that the pool is full,
  * instead of guessing with a sleep.
  *
  * A pool's acquire timeout also bounds opening its first connection, so a short one can fail the
- * occupier's own start on a loaded machine. Such a failure happens before the transaction does
- * anything, so it is retried until the deadline.
+ * occupier's own start on a loaded machine. Any failure before the signal is retried until the
+ * deadline: the occupier has not begun occupying, and the code under test has not run. A
+ * persistent failure ends at the deadline, with the last one as the error's cause.
  */
 export async function occupy(
   db: PrismaClient,
@@ -89,7 +100,13 @@ export async function occupy(
   for (let remaining = deadlineMs; remaining > 0; remaining = deadline - Date.now()) {
     const attempt = startAttempt(db, started, remaining);
     try {
-      return { backendPid: await attempt.ready, release: attempt.release };
+      const backendPid = await orTimeout(attempt.ready, remaining);
+      if (backendPid !== TIMED_OUT) {
+        return { backendPid, release: attempt.release };
+      }
+      // An attempt still pending at the deadline must not take the connection later and keep it.
+      attempt.release().catch(() => undefined);
+      break;
     } catch (error) {
       lastFailure = error;
       onStartFailure?.(error);

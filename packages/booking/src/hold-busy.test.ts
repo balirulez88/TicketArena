@@ -3,7 +3,7 @@ import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { type Buyer, createBookingService } from "./index";
-import { type OccupyOptions, occupy } from "./testing";
+import { type Occupation, type OccupyOptions, occupy } from "./testing";
 
 const database = setupTestDatabase();
 const NOW = new Date("2027-03-01T12:00:00.000Z");
@@ -26,6 +26,15 @@ beforeAll(async () => {
 afterAll(async () => {
   await seedClient?.$disconnect();
 });
+
+/** Releases the occupation however the work ends, so a failure cannot leave its transaction open. */
+async function held<T>(occupation: Occupation, work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } finally {
+    await occupation.release();
+  }
+}
 
 describe("BOOKING_BUSY", () => {
   async function expectHoldsRefusedAsBusy(occupyOptions?: OccupyOptions): Promise<void> {
@@ -60,18 +69,19 @@ describe("BOOKING_BUSY", () => {
     try {
       const occupation = await occupy(tight, occupyOptions);
 
-      const outcomes = await Promise.all(
-        [1, 2, 3].map((n) =>
-          service.holdSeats(buyer(n), event.id, seatIds).then(
-            () => "held",
-            (error: unknown) =>
-              typeof error === "object" && error !== null && "code" in error
-                ? String(error.code)
-                : "OTHER",
+      const outcomes = await held(occupation, () =>
+        Promise.all(
+          [1, 2, 3].map((n) =>
+            service.holdSeats(buyer(n), event.id, seatIds).then(
+              () => "held",
+              (error: unknown) =>
+                typeof error === "object" && error !== null && "code" in error
+                  ? String(error.code)
+                  : "OTHER",
+            ),
           ),
         ),
       );
-      await occupation.release();
 
       expect(outcomes).toEqual(["BOOKING_BUSY", "BOOKING_BUSY", "BOOKING_BUSY"]);
       await expect.poll(() => counted.filter((m) => m === "booking_busy").length).toBe(3);

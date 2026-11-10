@@ -60,7 +60,7 @@ describe("occupy", () => {
     expect(await tight.$queryRaw`SELECT 1 AS one`).toEqual([{ one: 1 }]);
   });
 
-  test("starts again when the transaction could not start, as on a cold pool under load", async () => {
+  test("starts again after an attempt fails before its signal", async () => {
     const tight = tightPool();
     const first = await occupy(tight);
     const failures: unknown[] = [];
@@ -89,5 +89,13 @@ describe("occupy", () => {
     );
 
     await first.release();
+  });
+
+  test("fails at its deadline even when the occupier never gets going", async () => {
+    const never = () => new Promise<void>(() => undefined);
+
+    await expect(occupy(tightPool(), { deadlineMs: 300, beforeStart: never })).rejects.toThrow(
+      "occupy: did not hold a connection within 300 ms",
+    );
   });
 });

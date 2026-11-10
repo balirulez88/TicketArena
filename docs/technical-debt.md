@@ -53,17 +53,17 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
 | OPEN          | 0        | 0    | 0      | 48  | 48    |
-| PLANNED       | 0        | 0    | 12     | 11  | 23    |
+| PLANNED       | 0        | 0    | 13     | 17  | 30    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 2    | 7      | 6   | 15    |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 | Risk            | OPEN | PLANNED | IN_PROGRESS | RESOLVED | ACCEPTED_RISK | Total |
 | --------------- | ---- | ------- | ----------- | -------- | ------------- | ----- |
-| CORRECTNESS     | 2    | 4       | 0           | 4        | 0             | 10    |
+| CORRECTNESS     | 2    | 5       | 0           | 4        | 0             | 11    |
 | CONCURRENCY     | 0    | 2       | 0           | 2        | 0             | 4     |
 | SECURITY        | 1    | 2       | 0           | 2        | 0             | 5     |
-| VERIFICATION    | 10   | 8       | 0           | 5        | 0             | 23    |
+| VERIFICATION    | 10   | 14      | 0           | 5        | 0             | 29    |
 | OPERABILITY     | 7    | 6       | 0           | 2        | 0             | 15    |
 | MAINTAINABILITY | 25   | 1       | 0           | 0        | 0             | 26    |
 | UNTRIAGED       | 3    | 0       | 0           | 0        | 0             | 3     |
@@ -2180,4 +2180,172 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `apps/web/src/server/upstash-metrics.ts#a-failed-resolution-is-cached-for-the-life-of-the-process`
 - **History:**
   - 2026-11-08: recorded: LOW unverified_assumption at `apps/web/src/server/upstash-metrics.ts:84`, standards axis; suggested risk VERIFICATION, awaiting triage (ticket 56 host review standards, run replay-20261108122117-29384)
+
+### TD-087: The workspace module's SIGTERM handler has never been observed running
+
+- **Status:** PLANNED
+- **Severity:** MEDIUM
+- **Risk:** VERIFICATION
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Components:** `scripts/ralph-test-workspace.mjs:314`
+- **Problem:** The only platform the module has run on is Windows, where SIGTERM is a hard kill. The SIGTERM scenario therefore passes through the next run's recovery, and it passes with the handler deleted.
+- **Impact:** The handler could be broken on Linux, the platform the sandbox gate uses, and no test would show it. Directories would then wait for the next run's recovery.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. Recovery by the next run is observed and covers the same directories, so the cost is delay, not lost isolation.
+- **Remediation:** Send SIGTERM to a child on Linux and assert the handler removed the session.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-test-workspace.mjs#sigterm-handler-never-observed`
+- **History:**
+  - 2026-11-10: recorded: MEDIUM missing_test at `scripts/ralph-test-workspace.mjs:314` (review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+
+### TD-088: The workspace module has never run inside the sandbox container
+
+- **Status:** PLANNED
+- **Severity:** LOW
+- **Risk:** VERIFICATION
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** review of the combined tree of the harness branches, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Components:** `scripts/ralph-test-workspace.mjs`; `scripts/ralph-verify.mjs:226`
+- **Problem:** Its Linux process identification and default root are unverified there, and the --tools stage now writes fixtures to the /workspace volume instead of tmpfs under an 1800 s limit that is shared with lint and typecheck. The sandbox suite does not exercise it, because the fixture's check has no test:harness.
+- **Impact:** A Linux-only failure or a timeout would first appear in a real gate run. It fails closed: it stops a merge and cannot pass bad work.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. Fails closed. Must be understood before the first production Ralph run after these branches merge.
+- **Remediation:** Run the module's tests inside the sandbox image and time the --tools stage.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-verify.mjs#workspace-module-never-run-in-container`
+- **History:**
+  - 2026-11-10: recorded: LOW unverified_assumption at `scripts/ralph-verify.mjs:226` (review of the combined tree of the harness branches, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+
+### TD-089: The guard for test files using the workspace module only sees tmpdir()
+
+- **Status:** PLANNED
+- **Severity:** LOW
+- **Risk:** VERIFICATION
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Components:** `scripts/ralph-test-workspace.test.mjs`
+- **Problem:** The guard flags a test file that calls tmpdir() without importing the module. A file using mktemp or reading TEMP directly escapes it, and a comment containing the module's path satisfies it. Every current file complies.
+- **Impact:** A future test file could write to the system temporary directory unnoticed, which is how C: filled before.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. All current files comply, and the docs state the guard's limit.
+- **Remediation:** Extend the guard to direct TEMP reads and mktemp, and match the import rather than any text.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-test-workspace.test.mjs#workspace-guard-only-sees-tmpdir`
+- **History:**
+  - 2026-11-10: recorded: LOW test_quality at `scripts/ralph-test-workspace.test.mjs:495` (review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+
+### TD-090: The Git discovery test can pass without the ceiling
+
+- **Status:** PLANNED
+- **Severity:** LOW
+- **Risk:** VERIFICATION
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Components:** `scripts/ralph-test-workspace.test.mjs`
+- **Problem:** With an external RALPH_TEST_TMP_ROOT no repository sits above the fixture, so the test passes even if GIT_CEILING_DIRECTORIES is not set.
+- **Impact:** The test proves the ceiling only when the root is inside the repository, which is the default.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. The default root does exercise the ceiling, and inherited Git variables have their own test.
+- **Remediation:** Create a repository above the fixture inside the test.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-test-workspace.test.mjs#git-discovery-test-can-pass-without-ceiling`
+- **History:**
+  - 2026-11-10: recorded: LOW test_quality at `scripts/ralph-test-workspace.test.mjs:440` (review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+
+### TD-091: The shell test suites keep inherited Git repository variables
+
+- **Status:** PLANNED
+- **Severity:** LOW
+- **Risk:** CORRECTNESS
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** The same exposure in the Node suites was rated HIGH by two reviewers and fixed; the reviewer's LOW here reflects only that no caller exports the variables today.
+- **Source:** review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Components:** `scripts/sandbox.test.sh`; `scripts/ralph-loop.test.sh`; `scripts/ralph-sessions.test.sh`; `scripts/ralph-resume.test.sh`; `scripts/ralph-lead.test.sh`
+- **Problem:** None of these suites clears GIT_DIR, GIT_WORK_TREE or the other repository-local variables, so an inherited GIT_DIR outranks discovery in their fixtures.
+- **Impact:** Running the suites from a Git hook or `git rebase -x` could send a fixture's commit to the real repository.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. No hook or workflow in the repository exports these variables, so it needs a manual invocation. The docs state the limit.
+- **Remediation:** Clear Git's repository-local variables at the start of each suite.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/sandbox.test.sh#shell-suites-keep-inherited-git-variables`
+- **History:**
+  - 2026-11-10: recorded: LOW unverified_assumption at `scripts/sandbox.test.sh:253` (review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: CORRECTNESS, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+
+### TD-092: Sandbox lead checks match log wording
+
+- **Status:** PLANNED
+- **Severity:** LOW
+- **Risk:** VERIFICATION
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Components:** `scripts/sandbox.test.sh:528`; `scripts/sandbox.test.sh:577`
+- **Problem:** check_lead_started and the red-base scenario match log prose although sessions_of exists. The negative grep for the session line would pass vacuously if the message were reworded.
+- **Impact:** A reworded log line can make the red-base check meaningless. check_lead_started in the same suite would catch that rewording.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. The same suite's positive check catches the rewording, so the gap is narrow.
+- **Remediation:** Assert on sessions_of in place of the log lines.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/sandbox.test.sh#sandbox-lead-checks-match-log-wording`
+- **History:**
+  - 2026-11-10: recorded: LOW test_quality at `scripts/sandbox.test.sh:577` (review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+
+### TD-093: The lead-interrupt scenario accepts and stops any container of the image
+
+- **Status:** PLANNED
+- **Severity:** LOW
+- **Risk:** VERIFICATION
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Components:** `scripts/sandbox.test.sh:637`
+- **Problem:** The check selects the first running container of the sandbox image and never asserts that lead-started appeared. This line predates the fixture change.
+- **Impact:** A concurrent sandbox run satisfies the check after a baseline stop, and docker stop then hits that other run. The suite still fails through check_lead_started.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. Sandbox runs on this host are not concurrent, and the suite still fails through check_lead_started.
+- **Remediation:** Assert the marker exists and select only this run's container.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/sandbox.test.sh#lead-interrupt-accepts-any-container`
+- **History:**
+  - 2026-11-10: recorded: LOW test_quality at `scripts/sandbox.test.sh:637` (review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
 <!-- ralph-debt:end -->

@@ -218,7 +218,7 @@ exec node stub/ralph-stub-reviewer.mjs "$@"
 EOF
 
   # The lead driver's stand-in for `claude` (ADR 0017). STUB_LEAD picks what it does: `ok` writes
-  # a failing-then-passing test and the feature, `fail` dies with work left behind, `notest`
+  # a test file the stub Vitest reports failing, and the feature, `fail` dies with work left behind, `notest`
   # writes no test, `evil` also rewrites a protected host script, `slow` signals that it runs
   # (into the output mount) and waits to be stopped.
   cat >"${dir}/stub/lead.sh" <<'EOF'

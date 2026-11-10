@@ -563,7 +563,7 @@ fails), a slice the agent's reviewers approve but the host's isolated reviewers 
 the reviewer containers see exactly the candidate, read-only, with no output mount), and a dirty
 host checkout (refused before any container starts). The fixture's gate passes on its base, as a
 real project's must, so each lead-driver scenario that reaches a session proves it passed the
-baseline check and started one; a scenario with a failing base proves the run stops before any
+baseline check and started one, with a stub in place of `claude`; a scenario with a failing base proves the run stops before any
 session.
 
 The threat model and the limitations that remain (prompt injection of the reviewers, shared state

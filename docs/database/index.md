@@ -95,6 +95,10 @@ Saturation: a `holdSeats` whose pool acquire (`pg` `connectionTimeoutMillis`) or
 `TOO_MANY_REQUESTS`) and counts `booking_busy`. `createPrismaClient` takes `poolMax`,
 `acquireTimeoutMs` and `transaction` so callers size pool and timeouts. Lock-timeout and deadlock
 retry, and the same mapping for `placeOrder`, are ticket 54 (TD-020).
+Tests fill a one-connection pool with `occupy` (`@ticketarena/booking/testing`, never the package's
+main entry): it resolves after a query has run inside the occupying transaction, and retries a
+transaction that could not start, up to a deadline, because a short acquire timeout also bounds
+opening the pool's first connection.
 
 Orders: `booking.placeOrder` (no admission required) and `booking.getOrder` (owner only, else
 `NOT_FOUND`). `placeOrder` runs one transaction with the lock order buyer lock (same key as `holdSeats`, taken after an unlocked read of the hold's event), hold `FOR UPDATE`, seats

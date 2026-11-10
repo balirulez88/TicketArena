@@ -53,9 +53,9 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
 | OPEN          | 0        | 0    | 0      | 48  | 48    |
-| PLANNED       | 0        | 0    | 12     | 12  | 24    |
+| PLANNED       | 0        | 0    | 12     | 11  | 23    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
-| RESOLVED      | 0        | 2    | 7      | 5   | 14    |
+| RESOLVED      | 0        | 2    | 7      | 6   | 15    |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 | Risk            | OPEN | PLANNED | IN_PROGRESS | RESOLVED | ACCEPTED_RISK | Total |
@@ -63,7 +63,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 | CORRECTNESS     | 2    | 4       | 0           | 4        | 0             | 10    |
 | CONCURRENCY     | 0    | 2       | 0           | 2        | 0             | 4     |
 | SECURITY        | 1    | 2       | 0           | 2        | 0             | 5     |
-| VERIFICATION    | 10   | 9       | 0           | 4        | 0             | 23    |
+| VERIFICATION    | 10   | 8       | 0           | 5        | 0             | 23    |
 | OPERABILITY     | 7    | 6       | 0           | 2        | 0             | 15    |
 | MAINTAINABILITY | 25   | 1       | 0           | 0        | 0             | 26    |
 | UNTRIAGED       | 3    | 0       | 0           | 0        | 0             | 3     |
@@ -1795,7 +1795,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-071: Saturation tests assume the occupier holds the only connection after a fixed 50 ms sleep
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
 - **Triage:** 2026-11-06: user decision to split ticket 12 after two rejected runs; owner moved to ticket 55
@@ -1810,13 +1810,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** ticket 55 (`issues/55-deterministic-transaction-tests.md`)
 - **Blocks:** none
 - **Acceptance:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** Both saturation tests occupy the pool with `occupy` from `@ticketarena/booking/testing`, which resolves only after a query has run inside the occupying transaction, and no test sleeps to order the occupier any more. The recorded cause was only half of it: the observed failures were the occupier's own transaction failing to start on a cold pool (`P2028` in booking, `Connection terminated due to connection timeout` in web) under the test's short budgets, so `occupy` also retries a failed start until an explicit deadline. Production code is unchanged.
+- **Verification:** `packages/booking/src/testing/occupy.test.ts::resolves only when Postgres shows its backend inside an open transaction`; `packages/booking/src/testing/occupy.test.ts::starts again when the transaction could not start, as on a cold pool under load`; `packages/booking/src/testing/occupy.test.ts::fails at its deadline, naming what it waited for`; `packages/booking/src/hold-busy.test.ts::holds wait for an occupier that is slow to start`; `apps/web/src/server/routers/booking.test.ts::the request waits for an occupier that is slow to start`
 - **Fingerprints:** `packages/booking/src/hold-busy.test.ts#saturation-tests-assume-the-occupier-holds-the-only-connecti`
 - **History:**
   - 2026-11-05: recorded: LOW missing_test at `packages/booking/src/hold-busy.test.ts:70`, standards axis (ticket 10 host review standards, run 20261105-153541-378)
   - 2026-11-06: triaged: VERIFICATION, owned by ticket 12, blocks no ticket (initial triage, ticket 53)
   - 2026-11-06: re-planned for ticket 55 (`issues/55-deterministic-transaction-tests.md`): ticket 12 was split into tickets 54-57 after rejected runs 20261106-132615 and 20261106-165157 (user decision, 2026-11-06)
+  - 2026-11-10: resolved on branch `fix/td-071-deterministic-saturation` (maintainer decision to fix before merging the harness branches, ahead of ticket 55): `occupy` replaces the 50 ms sleep; making it resolve before its query turns the delayed-occupier tests red (mutation check)
 
 ### TD-072: payment-flow tests share one durable consumer, so a test can receive an earlier test's unacked event
 

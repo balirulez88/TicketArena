@@ -4,6 +4,8 @@
 
 **Reference only:** two rejected attempts of ticket 12 (branches `rejected/12-lock-timeout-and-deadlock-retry-20261106-132615` and `-20261106-165157`) may be read; their code and reviews count for nothing here. Both were rejected because a test pattern was fixed in one file and left in another: every rule below applies to every file in scope, not only to files a review names.
 
+**Delivered early:** TD-071 is already `RESOLVED` (branch `fix/td-071-deterministic-saturation`, 2026-11-10): `occupy` lives in `packages/booking/src/testing/`, exported through `@ticketarena/booking/testing`, and the two saturation tests use it. Build the rest of the helper module around it, and keep its retry of a failed start: a cold pool's short acquire timeout otherwise fails the occupier itself.
+
 **Blocked by:** 54
 
 **Status:** ready-for-agent

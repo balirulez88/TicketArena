@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { type OccupyOptions, occupy } from "@ticketarena/booking/testing";
 import { silentLogger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
@@ -275,7 +276,7 @@ describe("booking.placeOrder / getOrder", () => {
 });
 
 describe("booking.holdSeats saturation", () => {
-  test("a database that cannot take the request in time is TOO_MANY_REQUESTS (BOOKING_BUSY)", async () => {
+  async function expectHoldRefusedAsBusy(occupyOptions?: OccupyOptions): Promise<void> {
     const { eventId, seatId } = await availableSeat();
     const tight = createPrismaClient({
       connectionString: database.url,
@@ -283,15 +284,7 @@ describe("booking.holdSeats saturation", () => {
       poolMax: 1,
       acquireTimeoutMs: 100,
     });
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const occupier = tight.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT 1`;
-      await gate;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const occupation = await occupy(tight, occupyOptions);
     try {
       await expect(
         createCaller({
@@ -303,9 +296,18 @@ describe("booking.holdSeats saturation", () => {
         }).booking.holdSeats({ eventId, seatIds: [seatId] }),
       ).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS", message: /BOOKING_BUSY/ });
     } finally {
-      release();
-      await occupier;
+      await occupation.release();
       await tight.$disconnect();
     }
+  }
+
+  test("a database that cannot take the request in time is TOO_MANY_REQUESTS (BOOKING_BUSY)", async () => {
+    await expectHoldRefusedAsBusy();
+  });
+
+  test("the request waits for an occupier that is slow to start", async () => {
+    await expectHoldRefusedAsBusy({
+      beforeStart: () => new Promise((resolve) => setTimeout(resolve, 150)),
+    });
   });
 });

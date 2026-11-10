@@ -10,7 +10,8 @@
 //                           fallback to the system's directory: an unusable root is an error.
 //   RALPH_TEST_KEEP_FAILED  "1" keeps a failed test's directories under <root>/kept-failed.
 //
-// Layout under the root: sessions/ (swept), kept-failed/ and evidence/ (never removed here).
+// Layout under the root: sessions/ (swept) and kept-failed/ (never removed here). Nothing else
+// under the root is touched, so earlier failure-injection evidence kept there survives every run.
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -346,22 +347,3 @@ afterEach((context) => {
     }
   }
 });
-
-/**
- * Moves a directory this session made to <root>/evidence, where no cleanup reaches it. Returns its
- * new path. Nothing from outside the session can be moved, so evidence cannot empty real files.
- */
-export function preserveEvidence(path, label) {
-  if (!/^[\w.-]+$/.test(label)) {
-    throw new Error(`evidence label must be letters, digits, dots or dashes, got "${label}"`);
-  }
-  const source = realpathSync(path);
-  if (!isStrictlyInside(realpathSync(tmp), source)) {
-    throw new Error(`cannot preserve ${path}: it is outside this session`);
-  }
-  const evidence = join(root, "evidence");
-  mkdirSync(evidence, { recursive: true });
-  const target = join(evidence, `${label}-${basename(source)}-${randomBytes(2).toString("hex")}`);
-  renameSync(source, target);
-  return target;
-}

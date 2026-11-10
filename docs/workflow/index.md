@@ -47,7 +47,8 @@ warnings:
   fails the run. A root may not contain the repository, or sit inside it anywhere but below
   `.ralph/tmp`, or inside `failure-injection*` evidence. Each test's directories are removed after
   it, passed or failed; `RALPH_TEST_KEEP_FAILED=1` moves a failed test's to `kept-failed/` for
-  debugging, and `preserveEvidence()` moves designated ones to `evidence/`. Neither is ever swept.
+  debugging, where it is never swept. Only `sessions/` is swept, so existing `failure-injection*`
+  evidence is left alone.
   A hard kill runs no cleanup on Windows, so the next run removes the sessions of owners proven
   dead: same host, and the process ID no longer matches the recorded name and start time. A
   session whose owner cannot be proven dead stays, and only owners read before the process list

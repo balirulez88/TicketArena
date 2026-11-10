@@ -1,7 +1,7 @@
 // Scenario tests for scripts/ralph-test-workspace.mjs. Each scenario runs a real child process
 // that imports the helper, under its own workspace root, and then inspects what is left on disk.
-// The public interface is the import, its two environment variables, and preserveEvidence;
-// recoverDeadSessions is exported for the scenarios no sequence of real processes can stage.
+// The public interface is the import and its two environment variables; recoverDeadSessions is
+// exported for the scenarios no sequence of real processes can stage.
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -30,7 +30,7 @@ import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
-import { preserveEvidence, workspace } from ${JSON.stringify(helperUrl)};
+import { workspace } from ${JSON.stringify(helperUrl)};
 const scratch = (name = "fixture-") => mkdtempSync(join(tmpdir(), name));
 `;
 
@@ -323,34 +323,6 @@ describe("ralph-test-workspace: repeated runs", () => {
 });
 
 describe("ralph-test-workspace: evidence retention", () => {
-  it("keeps designated evidence after the run, independently of RALPH_TEST_KEEP_FAILED", () => {
-    const { dir, root } = lab();
-    const result = runTests(
-      dir,
-      root,
-      `it("designates evidence and fails", () => {
-         const made = scratch("evidence-");
-         writeFileSync(join(made, "proof.txt"), "kept");
-         console.log("EVIDENCE=" + preserveEvidence(made, "failure-injection-demo"));
-         throw new Error("boom");
-       });`,
-    );
-    assert.equal(result.status, 1, result.stdout + result.stderr);
-    const path = /EVIDENCE=(.*)/.exec(result.stdout)[1].trim();
-    assert.equal(readFileSync(join(path, "proof.txt"), "utf8"), "kept");
-    assert.deepEqual(sessions(root), []);
-  });
-
-  it("refuses to move anything from outside the session", () => {
-    const { dir, root } = lab();
-    const outside = join(dir, "outside");
-    mkdirSync(outside);
-    const result = runScript(dir, root, `preserveEvidence(${JSON.stringify(outside)}, "x");`);
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /outside this session/);
-    assert.ok(existsSync(outside));
-  });
-
   it("leaves existing failure-injection artifacts beside the root alone", () => {
     const { dir, root } = lab();
     const evidence = join(dir, "failure-injection-2", "evidence");

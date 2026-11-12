@@ -2189,7 +2189,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
 - **Escalation:** none
 - **Source:** review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
-- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`; `.ralph/reviews/20261110-harness-branches/sandbox-image-run.txt`
 - **Components:** `scripts/ralph-test-workspace.mjs:314`
 - **Problem:** On Windows, the only platform with a signal scenario so far, SIGTERM is a hard kill, so that scenario passes through the next run's recovery and passes with the handler deleted. SIGINT has no scenario at all.
 - **Impact:** The handler could be broken on Linux, the platform the sandbox gate uses, and no test would show it. Directories would then wait for the next run's recovery.
@@ -2213,7 +2213,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
 - **Escalation:** none
 - **Source:** review of the combined tree of the harness branches, 2026-11-10, not a slice
-- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`; `.ralph/reviews/20261110-harness-branches/sandbox-image-run.txt`
 - **Components:** `scripts/ralph-test-workspace.mjs`; `scripts/ralph-verify.mjs:226`
 - **Problem:** The module's own tests pass in the sandbox image (27 of 27 in 6 s, no sessions left, run by hand on 2026-11-10 in the container's /tmp). What no run has measured is the full harness suite in the --tools stage, which now writes fixtures to the /workspace volume instead of tmpfs, under an 1800 s limit shared with lint and typecheck. The sandbox suite does not exercise this, because the fixture's check has no test:harness.
 - **Impact:** A timeout would first appear in a real gate run. It fails closed: it stops a merge and cannot pass bad work.

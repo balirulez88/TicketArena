@@ -18,6 +18,7 @@
 #     candidate, read-only, with no output mount.
 # Needs Docker. Not part of `pnpm run check`, which also runs inside the sandbox (no Docker).
 set -Eeuo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/test-git-isolation.sh"
 
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly SOURCE_ROOT

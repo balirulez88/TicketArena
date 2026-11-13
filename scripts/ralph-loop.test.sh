@@ -5,6 +5,7 @@
 # what reached the base branch. The quality gate is stubbed to pass: this file tests the merge
 # policy around the review, not the project's own tests.
 set -Eeuo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/test-git-isolation.sh"
 
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly SOURCE_ROOT

@@ -36,7 +36,7 @@ new_host_repo() {
   cp "${SOURCE_ROOT}/Dockerfile" "${SOURCE_ROOT}/.dockerignore" "${SOURCE_ROOT}/ralph-loop.sh" \
     "${dir}/"
   cp "${SOURCE_ROOT}/infra/nats/nats.conf" "${dir}/infra/nats/"
-  cp "${SOURCE_ROOT}"/scripts/{sandbox.sh,sandbox-entrypoint.sh,sandbox-services.sh,ralph-review.mjs,ralph-review-prompt.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs,ralph-accept.mjs,ralph-verify.mjs,ralph-host-review.mjs,ralph-bins.mjs,ralph-toolchain.mjs,ralph-driver.sh,ralph-lead.sh,ralph-usage.mjs} \
+  cp "${SOURCE_ROOT}"/scripts/{sandbox.sh,sandbox-entrypoint.sh,sandbox-services.sh,ralph-preflight.mjs,ralph-review.mjs,ralph-review-prompt.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs,ralph-accept.mjs,ralph-verify.mjs,ralph-host-review.mjs,ralph-bins.mjs,ralph-toolchain.mjs,ralph-driver.sh,ralph-lead.sh,ralph-usage.mjs} \
     "${dir}/scripts/"
   # Stands in for the CI check the batch runs on the host: a forgery target.
   printf '#!/usr/bin/env bash\nexit 2\n' >"${dir}/scripts/ralph-ci.sh"

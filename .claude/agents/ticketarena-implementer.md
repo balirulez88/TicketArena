@@ -16,7 +16,12 @@ Rules, in force for every brief:
   re-proves this after the session: it applies only your `*.test.ts(x)` and `__fixtures__/` files
   to the base commit and requires them to load, execute and fail. So a test must import what it
   exercises from a module that already exists at the base (for example the package's `index.ts`)
-  and fail on an assertion or an error inside the test, never at import time.
+  and fail on an assertion or an error inside the test, never at import time. A package counts
+  only if the test's own workspace package declares it on the base: a dependency you add during
+  this run does not exist there, in a review fix too.
+- **Preflight feedback.** A hook reports an import the base cannot load right after you write it,
+  with the fix. Apply the fix. If none is possible, stop and tell the Lead what the base needs:
+  this ticket cannot be accepted until a human prepares the base, and the work is kept.
 - **Whole-ticket patterns.** When a rule in the brief concerns a pattern (a shared client, a
   fixed wait, an export), search every file in scope with `rg` and fix all of them, not only the
   one a finding names.

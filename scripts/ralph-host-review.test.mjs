@@ -3,6 +3,7 @@
 // (RALPH_HOST_REVIEWER), which records what each reviewer was given. End-to-end behaviour, as the
 // importer applies it, is in scripts/ralph-accept.test.mjs; real containers in sandbox.test.sh.
 
+import "./ralph-test-workspace.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {

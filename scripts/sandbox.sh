@@ -14,7 +14,8 @@
 # bundle and the host's resume state read-only, and writes only to a fresh run directory. What it
 # produces is untrusted until scripts/ralph-accept.mjs has validated it. That script, running on
 # the host, is the only thing that changes this repository. Exit codes: 0 accepted (merged, or
-# nothing to do), 75 paused, 1 rejected or failed, 3 refused as untrusted.
+# nothing to do), 75 paused, 1 rejected or failed, 3 refused as untrusted; before any container, for
+# the lead driver (ADR 0019): 5 needs preparation, 2 usage or a readiness check that could not run.
 set -Eeuo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -42,10 +43,12 @@ git() { command git -C "${REPO_ROOT}" "$@"; }
 
 verify=false
 [[ "${1:-}" != "--verify" ]] || verify=true
+# shellcheck source=ralph-driver.sh
+source "${REPO_ROOT}/scripts/ralph-driver.sh"
+readonly PREFLIGHT="${REPO_ROOT}/scripts/ralph-preflight.mjs"
+readonly BASELINE_DIR="${REPO_ROOT}/.ralph/baseline"
 if [[ "${verify}" == false ]]; then
   # A bad RALPH_DRIVER, or the lead without --ticket, is refused before any container exists.
-  # shellcheck source=ralph-driver.sh
-  source "${REPO_ROOT}/scripts/ralph-driver.sh"
   ralph_driver_check "${RALPH_DRIVER:-}" "$@" || exit 2
   [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] || {
     echo "sandbox: export ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN first" >&2
@@ -60,6 +63,10 @@ if [[ "${verify}" == false ]]; then
     echo "sandbox: the working tree is not clean; commit or stash first" >&2
     exit 1
   }
+  # Readiness (ADR 0019): a ticket that cannot start costs no image, container or session.
+  if [[ "${RALPH_DRIVER:-}" == lead ]]; then
+    bash "${REPO_ROOT}/scripts/ralph-lead.sh" "$@" --dry-run || exit $?
+  fi
 fi
 
 docker build --quiet --tag "${IMAGE}" "${REPO_ROOT}" >/dev/null
@@ -87,10 +94,20 @@ sandbox_run() {
 
 if [[ "${verify}" == true ]]; then
   # The host's own gate, in hardened, staged containers of this image (ADR 0015).
-  RALPH_IMAGE="${IMAGE}" exec node "${REPO_ROOT}/scripts/ralph-verify.mjs" "${2:-${BASE}}"
+  # One commit for the gate and the record: a branch can move while the gate runs.
+  target="$(git rev-parse --verify "${2:-${BASE}}^{commit}")"
+  RALPH_IMAGE="${IMAGE}" node "${REPO_ROOT}/scripts/ralph-verify.mjs" "${target}" || exit $?
+  # The later run on this same code need not repeat it (ADR 0019). Only a hint: losing it costs one
+  # baseline run, and the importer's gate never reads it.
+  if key="$(ralph_baseline_key "${PREFLIGHT}" "${target}")"; then
+    mkdir -p "${BASELINE_DIR}" && git rev-parse "${target}" >"${BASELINE_DIR}/${key}" || true
+  fi
+  exit 0
 fi
 
 base_sha="$(git rev-parse "refs/heads/${BASE}")"
+baseline_verified="$(ralph_baseline_key "${PREFLIGHT}" "${base_sha}" 2>/dev/null || true)"
+[[ -n "${baseline_verified}" && -f "${BASELINE_DIR}/${baseline_verified}" ]] || baseline_verified=""
 mapfile -t parked < <(git for-each-ref --format='%(refname)' 'refs/heads/ralph/paused/')
 git bundle create --quiet "${run_dir}/in/repo.bundle" "refs/heads/${BASE}" "${parked[@]}"
 # Resume state the host holds. The container cannot write it: a pause comes back as output and
@@ -116,6 +133,7 @@ sandbox_run \
   --env CLAUDE_CODE_OAUTH_TOKEN \
   --env RALPH_AGENT_CMD \
   --env RALPH_DRIVER \
+  --env RALPH_BASELINE_VERIFIED="${baseline_verified}" \
   --env RALPH_LEAD_CMD \
   --env RALPH_LEAD_TIMEOUT \
   --env RALPH_LEAD_MAX_BUDGET_USD \

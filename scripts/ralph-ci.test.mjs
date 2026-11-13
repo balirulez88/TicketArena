@@ -1,6 +1,7 @@
 // scripts/ralph-ci.sh against a stub `gh` that answers `gh run list` with STUB_GH's lines, one
 // per call (the last one repeats). Only a completed, successful run may count as a pass.
 
+import "./ralph-test-workspace.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";

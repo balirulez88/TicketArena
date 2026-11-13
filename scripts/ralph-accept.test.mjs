@@ -5,6 +5,7 @@
 // The real importer runs on the host with a stub in place of the agent-free verify sandbox.
 // Every refusal must leave the host repository exactly as it was.
 
+import "./ralph-test-workspace.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
@@ -1974,6 +1975,7 @@ function leadHost() {
   for (const script of [
     "ralph-lead.sh",
     "ralph-driver.sh",
+    "ralph-preflight.mjs",
     "ralph-usage.mjs",
     "ralph-red.mjs",
     "ralph-provider.mjs",
@@ -2007,6 +2009,9 @@ function runLeadDriver(host, ws, { lead = "ok", red = "pass" } = {}) {
       RALPH_LEAD_CMD: "bash stub/lead.sh",
       RALPH_LOG_ROOT: join(run, "out", "logs"),
       RALPH_STATE_DIR: join(run, "out", "state-in"),
+      // Inside the sandbox an agent runs this suite with the entrypoint's own value, which would
+      // make the driver push to this scenario's checked-out `main`.
+      RALPH_PUSH_REMOTE: "",
       STUB_LEAD: lead,
     },
   });

@@ -47,6 +47,9 @@ readonly LEAD_CMD="${RALPH_LEAD_CMD:-claude -p --dangerously-skip-permissions --
 readonly LEAD_TIMEOUT="${RALPH_LEAD_TIMEOUT:-7200}"
 readonly LEAD_BUDGET="${RALPH_LEAD_MAX_BUDGET_USD:-}"
 readonly USAGE_REPORT="${LEAD_DIR}/ralph-usage.mjs"
+readonly PREFLIGHT="${LEAD_DIR}/ralph-preflight.mjs"
+# shellcheck source=ralph-driver.sh
+source "${LEAD_DIR}/ralph-driver.sh"
 
 LEAD_PID=""
 LEAD_INTERRUPTED=""
@@ -56,6 +59,8 @@ LEAD_SLUG=""
 LEAD_BRANCH=""
 LEAD_BASE=""
 LEAD_CANDIDATE=""
+# Why the check before RED stopped the run (set by lead_candidate_ready).
+LEAD_NOT_READY=""
 
 # ---------------------------------------------------------------------------------------------
 # Prompt
@@ -98,9 +103,14 @@ PLAN
 THE HARNESS JUDGES YOU AFTER THE SESSION; you cannot approve or merge your own work:
 - RED is re-proved. The harness resets to the base commit, applies ONLY your \`*.test.ts(x)\` and
   \`__fixtures__/\` files, and requires lint to pass, those tests to load and execute, and at
-  least one to fail. Tests that import a module the base lacks, or that need a non-test helper
-  file, fail to load and the ticket is rejected. Import through modules that exist at the base
-  and fail on an assertion or an error inside the test.
+  least one to fail. Tests that import a module the base lacks, a package their own workspace
+  package does not declare ON THE BASE, or a non-test helper file fail to load and the ticket is
+  rejected; a dependency added during this run does not count, in review fixes too. Import through
+  modules that exist at the base and fail on an assertion or an error inside the test.
+- A hook reports such an import to the implementer as soon as it is written. If the implementer
+  reports that it cannot be avoided, stop there: no further work, no review and no handoff files,
+  and name what the base needs in your final message. The harness keeps the work and blocks
+  nothing; a human prepares the base first. More work on this ticket could not be accepted.
 - The full gate (\`pnpm run check\`) must pass on the final tree, including the debt rules below.
 - Then the host re-runs the gate in an isolated container and runs its own review.
 
@@ -216,7 +226,7 @@ lead_session() {
   # In the background so a signal reaches this shell's trap while the Lead is running; the trap
   # (installed by lead_ticket) stops the Lead and this function reports 130/143.
   CLAUDE_CONFIG_DIR="${config}" CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 RALPH_SESSION_ID="${session}" \
-    RALPH_TICKET="$(ticket_number "${ticket}")" RALPH_PHASE=lead \
+    RALPH_TICKET="$(ticket_number "${ticket}")" RALPH_PHASE=lead RALPH_BASE_SHA="${LEAD_BASE}" \
     "${argv[@]}" "${prompt}" >"${out}" 2>"${err}" &
   LEAD_PID=$!
   wait "${LEAD_PID}" || status=$?
@@ -279,6 +289,54 @@ lead_failure_reason() {
       *) echo "the lead session exited with status ${status}" ;;
     esac
   fi
+}
+
+# ---------------------------------------------------------------------------------------------
+# Readiness (ADR 0019): model-free checks that stop a run before it is paid for or judged
+# ---------------------------------------------------------------------------------------------
+
+# What the ticket's text alone can tell. Exits with the check's own status: 5 NEEDS PREPARATION.
+lead_ticket_ready() {
+  local status=0
+  node "${PREFLIGHT}" ticket "$1" --base "$(git rev-parse HEAD)" >&2 || status=$?
+  ((status == 0)) || exit "${status}"
+}
+
+# A red base would be blamed on the ticket after a paid session. The host says when this exact code
+# has already passed its hardened gate (RALPH_BASELINE_VERIFIED, set by sandbox.sh), and then nothing
+# runs twice. Otherwise the gate runs once; one failure followed by a pass is reported as flaky, not
+# held against the ticket.
+lead_baseline_green() {
+  local log_file="${LOG_DIR}/$(ticket_slug "$1").baseline.log" key
+  key="$(ralph_baseline_key "${PREFLIGHT}" HEAD)"
+  if [[ -n "${RALPH_BASELINE_VERIFIED:-}" && "${key}" == "${RALPH_BASELINE_VERIFIED}" ]]; then
+    log "  baseline: this code already passed the host's hardened gate, not running it again"
+    return 0
+  fi
+  log "  baseline: no verified result for this code, running the gate once on ${BASE_BRANCH}"
+  run_gate "${log_file}" && return 0
+  log "  baseline: the gate failed once, trying once more (${log_file})"
+  run_gate "${log_file%.log}.retry.log" || return 1
+  log "  baseline: FLAKY, failed once and then passed; see ${log_file}"
+}
+
+# The last check before RED, and mandatory: unlike the Implementer's hook it does not depend on the
+# agent's tooling. It reads the exact candidate commit. It only ever stops the run: the work is
+# kept, the ticket is not blocked, and RED and every later gate still decide. A check that could not
+# run also stops, because nothing then says the candidate is worth judging.
+lead_candidate_ready() {
+  local base_sha=$1 candidate=$2 report=$3 status=0
+  local -a exact=()
+  [[ -z "${candidate}" ]] || exact=(--candidate "${candidate}")
+  node "${PREFLIGHT}" imports --base "${base_sha}" "${exact[@]}" >"${report}" 2>&1 || status=$?
+  ((status == 0)) && return 0
+  sed 's/^/  /' "${report}" >&2
+  if ((status == 5)); then
+    LEAD_NOT_READY="NEEDS PREPARATION: the candidate cannot pass RED or the host's install as it stands; ${report} says what to change"
+  else
+    LEAD_NOT_READY="the check before RED could not run (status ${status}); nothing was judged, see ${report}"
+  fi
+  return 1
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -385,6 +443,8 @@ lead_ticket() {
     status=$?
   lead_export_handoff
   report_usage
+  [[ -s .ralph/lead/preflight-hook.log ]] ||
+    log "  note: the implementer's import hook never fired; the check before RED still runs"
   if grep -qiE "${CONTEXT_EXHAUSTED}" "${out}" "${err}" 2>/dev/null; then
     log "  the lead session ran out of context: the ticket is probably too large; split it"
   fi
@@ -394,6 +454,13 @@ lead_ticket() {
     return "${status}"
   fi
   if ! lead_handed_off; then
+    # An import nobody can avoid ends the session on purpose. Said plainly, or the operator reads
+    # an accident below and pays to run the same ticket into the same import.
+    if ! lead_candidate_ready "${base_sha}" "" "${LOG_DIR}/${slug}.lead.imports.log" &&
+      [[ "${LEAD_NOT_READY}" == "NEEDS PREPARATION"* ]]; then
+      lead_stop "${ticket}" "${branch}" "${base_sha}" "${LEAD_NOT_READY}"
+      return 1
+    fi
     lead_stop "${ticket}" "${branch}" "${base_sha}" \
       "the lead ended its session without handing off (no checklist.md and changeset.md); a subagent was probably left running in the background"
     return 1
@@ -410,6 +477,10 @@ lead_ticket() {
   fi
   candidate="$(git rev-parse HEAD)"
   LEAD_CANDIDATE="${candidate}"
+  if ! lead_candidate_ready "${base_sha}" "${candidate}" "${LOG_DIR}/${slug}.lead.imports.log"; then
+    lead_stop "${ticket}" "${branch}" "${base_sha}" "${LEAD_NOT_READY}"
+    return 1
+  fi
   if ! lead_prove_red "${base_sha}" "${candidate}" "${LOG_DIR}/${slug}.lead.red.log"; then
     reject_slice "${ticket}" "${branch}" "RED not re-proved: the candidate's tests do not fail on the base"
     return 1
@@ -437,6 +508,20 @@ lead_main() {
   [[ -z "${LEAD_BUDGET}" || "${LEAD_BUDGET}" =~ ^[0-9]+(\.[0-9]+)?$ ]] ||
     die "RALPH_LEAD_MAX_BUDGET_USD must be a number"
   preflight
+
+  local ticket
+  if [[ "${DRY_RUN}" == true ]]; then
+    # sandbox.sh runs this on the host before it builds anything, so a ticket that cannot start
+    # costs nothing. It starts no agent, so the checks below, which guard starting one, do not
+    # apply: the host has no reason to have the lead command, and is outside the sandbox.
+    if ! ticket="$(next_ticket)"; then
+      log "BLOCKED: ticket ${ONLY_TICKET} is not ready: status, blockers or the debt gate"
+      exit 1
+    fi
+    lead_ticket_ready "${ticket}"
+    log "dry run: the lead would work ${ticket}"
+    return 0
+  fi
   local -a lead_argv
   IFS=' ' read -r -a lead_argv <<<"${LEAD_CMD}"
   command -v "${lead_argv[0]}" >/dev/null || die "lead command not found: ${lead_argv[0]}"
@@ -444,20 +529,13 @@ lead_main() {
     "${RALPH_SANDBOX:-0}" != 1 && "${RALPH_ALLOW_HOST:-0}" != 1 ]]; then
     die "refusing to run a permission-skipping lead outside the sandbox; use ./scripts/sandbox.sh"
   fi
-
-  local ticket
-  if [[ "${DRY_RUN}" == true ]]; then
-    if ticket="$(next_ticket)"; then
-      log "dry run: the lead would work ${ticket}"
-    else
-      log "dry run: ticket ${ONLY_TICKET} is not ready"
-    fi
-    return 0
-  fi
   start_run
   # Refused before any agent runs: not ready-for-agent, blocked, or held by the debt gate.
   ticket="$(next_ticket)" ||
     die "ticket ${ONLY_TICKET} is not ready: status, blockers or the debt gate (nothing was run)"
+  lead_ticket_ready "${ticket}"
+  lead_baseline_green "${ticket}" ||
+    die "BLOCKED: ${BASE_BRANCH} fails the gate before any work (nothing was run or blocked)"
   lead_ticket "${ticket}" || exit $?
 }
 

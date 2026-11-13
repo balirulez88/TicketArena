@@ -53,18 +53,18 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
 | OPEN          | 0        | 0    | 0      | 48  | 48    |
-| PLANNED       | 0        | 0    | 12     | 11  | 23    |
+| PLANNED       | 0        | 0    | 14     | 18  | 32    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 2    | 7      | 6   | 15    |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 | Risk            | OPEN | PLANNED | IN_PROGRESS | RESOLVED | ACCEPTED_RISK | Total |
 | --------------- | ---- | ------- | ----------- | -------- | ------------- | ----- |
-| CORRECTNESS     | 2    | 4       | 0           | 4        | 0             | 10    |
+| CORRECTNESS     | 2    | 6       | 0           | 4        | 0             | 12    |
 | CONCURRENCY     | 0    | 2       | 0           | 2        | 0             | 4     |
 | SECURITY        | 1    | 2       | 0           | 2        | 0             | 5     |
-| VERIFICATION    | 10   | 8       | 0           | 5        | 0             | 23    |
-| OPERABILITY     | 7    | 6       | 0           | 2        | 0             | 15    |
+| VERIFICATION    | 10   | 14      | 0           | 5        | 0             | 29    |
+| OPERABILITY     | 7    | 7       | 0           | 2        | 0             | 16    |
 | MAINTAINABILITY | 25   | 1       | 0           | 0        | 0             | 26    |
 | UNTRIAGED       | 3    | 0       | 0           | 0        | 0             | 3     |
 
@@ -1818,6 +1818,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-06: triaged: VERIFICATION, owned by ticket 12, blocks no ticket (initial triage, ticket 53)
   - 2026-11-06: re-planned for ticket 55 (`issues/55-deterministic-transaction-tests.md`): ticket 12 was split into tickets 54-57 after rejected runs 20261106-132615 and 20261106-165157 (user decision, 2026-11-06)
   - 2026-11-10: resolved on branch `fix/td-071-deterministic-saturation` (maintainer decision to fix before merging the harness branches, ahead of ticket 55): `occupy` replaces the 50 ms sleep; making it resolve before its query turns the delayed-occupier tests red (mutation check)
+  - 2026-11-13: resolution verified: quality gate green and independent review approved on the combined tree of the harness branches (`TM-integration` at 4461c41; reviews in `.ralph/reviews/20261110-harness-branches/`, review findings fixed in 0e2b12c; maintainer accepted the combined verification results, 2026-11-13)
 
 ### TD-072: payment-flow tests share one durable consumer, so a test can receive an earlier test's unacked event
 
@@ -2180,4 +2181,221 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `apps/web/src/server/upstash-metrics.ts#a-failed-resolution-is-cached-for-the-life-of-the-process`
 - **History:**
   - 2026-11-08: recorded: LOW unverified_assumption at `apps/web/src/server/upstash-metrics.ts:84`, standards axis; suggested risk VERIFICATION, awaiting triage (ticket 56 host review standards, run replay-20261108122117-29384)
+
+### TD-087: The workspace module's signal handlers have never been observed running
+
+- **Status:** PLANNED
+- **Severity:** MEDIUM
+- **Risk:** VERIFICATION
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`; `.ralph/reviews/20261110-harness-branches/sandbox-image-run.txt`
+- **Components:** `scripts/ralph-test-workspace.mjs:314`
+- **Problem:** On Windows, the only platform with a signal scenario so far, SIGTERM is a hard kill, so that scenario passes through the next run's recovery and passes with the handler deleted. SIGINT has no scenario at all.
+- **Impact:** The handler could be broken on Linux, the platform the sandbox gate uses, and no test would show it. Directories would then wait for the next run's recovery.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. Recovery by the next run covers the same directories, so the cost is delay, not lost isolation. That recovery is observed on Windows; on Linux the module's tests pass in the sandbox image (2026-11-10), but no scenario separates the handler from recovery there.
+- **Remediation:** Send SIGTERM and SIGINT to a child on Linux and assert the handler, not a later run, removed the session.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-test-workspace.mjs#sigterm-handler-never-observed`
+- **History:**
+  - 2026-11-10: recorded: MEDIUM missing_test at `scripts/ralph-test-workspace.mjs:314` (review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+
+### TD-088: The harness suite's cost on the sandbox volume is unmeasured
+
+- **Status:** PLANNED
+- **Severity:** LOW
+- **Risk:** VERIFICATION
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** review of the combined tree of the harness branches, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`; `.ralph/reviews/20261110-harness-branches/sandbox-image-run.txt`
+- **Components:** `scripts/ralph-test-workspace.mjs`; `scripts/ralph-verify.mjs:226`
+- **Problem:** The module's own tests pass in the sandbox image (27 of 27 in 6 s, no sessions left, run by hand on 2026-11-10 in the container's /tmp). What no run has measured is the full harness suite in the --tools stage, which now writes fixtures to the /workspace volume instead of tmpfs, under an 1800 s limit shared with lint and typecheck. The sandbox suite does not exercise this, because the fixture's check has no test:harness.
+- **Impact:** A timeout would first appear in a real gate run. It fails closed: it stops a merge and cannot pass bad work.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. Fails closed, and the module itself is now proven on Linux, so what remains is duration. It blocks no ticket: a slow stage would stop a run visibly, and the first production run will show the timing.
+- **Remediation:** Time the --tools stage on the sandbox volume, and pass an external root such as /tmp/harness if it nears the limit.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-verify.mjs#workspace-module-never-run-in-container`
+- **History:**
+  - 2026-11-10: recorded: LOW unverified_assumption at `scripts/ralph-verify.mjs:226` (review of the combined tree of the harness branches, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+
+### TD-089: The guard for test files using the workspace module only sees tmpdir()
+
+- **Status:** PLANNED
+- **Severity:** LOW
+- **Risk:** VERIFICATION
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Components:** `scripts/ralph-test-workspace.test.mjs`
+- **Problem:** The guard flags a test file that calls tmpdir() without importing the module. A file using mktemp or reading TEMP directly escapes it, and a comment containing the module's path satisfies it. Every current file complies.
+- **Impact:** A future test file could write to the system temporary directory unnoticed, which is how C: filled before.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. All current files comply, and the docs state the guard's limit.
+- **Remediation:** Extend the guard to direct TEMP reads and mktemp, and match the import rather than any text.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-test-workspace.test.mjs#workspace-guard-only-sees-tmpdir`
+- **History:**
+  - 2026-11-10: recorded: LOW test_quality at `scripts/ralph-test-workspace.test.mjs:495` (review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+
+### TD-090: The Git discovery test can pass without the ceiling
+
+- **Status:** PLANNED
+- **Severity:** LOW
+- **Risk:** VERIFICATION
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Components:** `scripts/ralph-test-workspace.test.mjs`
+- **Problem:** With an external RALPH_TEST_TMP_ROOT no repository sits above the fixture, so the test passes even if GIT_CEILING_DIRECTORIES is not set.
+- **Impact:** The test proves the ceiling only when the root is inside the repository, which is the default.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. The default root does exercise the ceiling, and inherited Git variables have their own test.
+- **Remediation:** Create a repository above the fixture inside the test.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-test-workspace.test.mjs#git-discovery-test-can-pass-without-ceiling`
+- **History:**
+  - 2026-11-10: recorded: LOW test_quality at `scripts/ralph-test-workspace.test.mjs:440` (review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+
+### TD-091: The shell test suites keep inherited Git repository variables
+
+- **Status:** PLANNED
+- **Severity:** MEDIUM
+- **Risk:** CORRECTNESS
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Components:** `scripts/sandbox.test.sh`; `scripts/ralph-loop.test.sh`; `scripts/ralph-sessions.test.sh`; `scripts/ralph-resume.test.sh`; `scripts/ralph-lead.test.sh`
+- **Problem:** None of these suites clears GIT_DIR, GIT_WORK_TREE or the other repository-local variables, so an inherited GIT_DIR outranks discovery in their fixtures.
+- **Impact:** Running the suites from a Git hook or `git rebase -x` could send a fixture's commit to the real repository.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. No hook or workflow in the repository exports these variables, so it needs a manual invocation. The docs state the limit.
+- **Remediation:** Clear Git's repository-local variables at the start of each suite.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/sandbox.test.sh#shell-suites-keep-inherited-git-variables`
+- **History:**
+  - 2026-11-10: recorded: MEDIUM unverified_assumption at `scripts/sandbox.test.sh:253` (review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: CORRECTNESS, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+  - 2026-11-10: rated MEDIUM, not the reviewer's LOW: the same exposure in the Node suites was rated HIGH by two reviewers and MEDIUM by one, and `test:harness` runs both (confirmation review of the combined tree)
+
+### TD-092: Sandbox lead checks match log wording
+
+- **Status:** PLANNED
+- **Severity:** LOW
+- **Risk:** VERIFICATION
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Components:** `scripts/sandbox.test.sh:528`; `scripts/sandbox.test.sh:577`
+- **Problem:** check_lead_started and the red-base scenario match log prose although sessions_of exists. The negative grep for the session line would pass vacuously if the message were reworded.
+- **Impact:** A reworded log line can make the red-base check meaningless. check_lead_started in the same suite would catch that rewording.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. The same suite's positive check catches the rewording, so the gap is narrow.
+- **Remediation:** Assert on sessions_of in place of the log lines.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/sandbox.test.sh#sandbox-lead-checks-match-log-wording`
+- **History:**
+  - 2026-11-10: recorded: LOW test_quality at `scripts/sandbox.test.sh:577` (review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+
+### TD-093: The lead-interrupt scenario accepts and stops any container of the image
+
+- **Status:** PLANNED
+- **Severity:** LOW
+- **Risk:** VERIFICATION
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
+- **Components:** `scripts/sandbox.test.sh:637`
+- **Problem:** The check selects the first running container of the sandbox image and never asserts that lead-started appeared. This line predates the fixture change.
+- **Impact:** A concurrent sandbox run satisfies the check after a baseline stop, and docker stop then hits that other run. The suite still fails through check_lead_started.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. Sandbox runs on this host are not concurrent, and the suite still fails through check_lead_started.
+- **Remediation:** Assert the marker exists and select only this run's container.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/sandbox.test.sh#lead-interrupt-accepts-any-container`
+- **History:**
+  - 2026-11-10: recorded: LOW test_quality at `scripts/sandbox.test.sh:637` (review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+
+### TD-094: A root spelled with an 8.3 short name passes the repository check
+
+- **Status:** PLANNED
+- **Severity:** LOW
+- **Risk:** CORRECTNESS
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** confirmation review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/confirmation-review.txt`
+- **Components:** `scripts/ralph-test-workspace.mjs:88`
+- **Problem:** realpathSync keeps 8.3 short names on Windows, so E:\Balazs\TICKET~1 is not recognised as the repository, and neither is a failure-injection folder reached that way.
+- **Impact:** A root so spelled creates sessions/ inside the repository or evidence folder. Deletion stays confined to sessions/session-*, so no real file is lost.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. Needs a deliberately short-named root, and deletion stays confined.
+- **Remediation:** Resolve with realpathSync.native, which expands short names, and test it on a volume with 8.3 names.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-test-workspace.mjs#workspace-root-8-3-name-passes-repository-check`
+- **History:**
+  - 2026-11-10: recorded: LOW unverified_assumption at `scripts/ralph-test-workspace.mjs:88` (confirmation review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: CORRECTNESS, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+
+### TD-095: A root on a missing drive fails with a raw ENOENT
+
+- **Status:** PLANNED
+- **Severity:** LOW
+- **Risk:** OPERABILITY
+- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Escalation:** none
+- **Source:** confirmation review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/confirmation-review.txt`
+- **Components:** `scripts/ralph-test-workspace.mjs:109`
+- **Problem:** resolveThroughLinks can throw ENOENT outside the try that names RALPH_TEST_TMP_ROOT, so the error does not say which setting is at fault.
+- **Impact:** The run still fails with no fallback to the system's temporary directory; only the message is less helpful.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. It still fails closed.
+- **Remediation:** Wrap the call so the error names RALPH_TEST_TMP_ROOT, and test a missing drive.
+- **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
+- **Blocks:** none
+- **Acceptance:** none
+- **Resolution:** none
+- **Verification:** none
+- **Fingerprints:** `scripts/ralph-test-workspace.mjs#workspace-root-missing-drive-raw-enoent`
+- **History:**
+  - 2026-11-10: recorded: LOW missing_test at `scripts/ralph-test-workspace.mjs:109` (confirmation review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice)
+  - 2026-11-10: triaged: OPERABILITY, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
 <!-- ralph-debt:end -->

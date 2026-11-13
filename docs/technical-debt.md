@@ -1818,6 +1818,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-06: triaged: VERIFICATION, owned by ticket 12, blocks no ticket (initial triage, ticket 53)
   - 2026-11-06: re-planned for ticket 55 (`issues/55-deterministic-transaction-tests.md`): ticket 12 was split into tickets 54-57 after rejected runs 20261106-132615 and 20261106-165157 (user decision, 2026-11-06)
   - 2026-11-10: resolved on branch `fix/td-071-deterministic-saturation` (maintainer decision to fix before merging the harness branches, ahead of ticket 55): `occupy` replaces the 50 ms sleep; making it resolve before its query turns the delayed-occupier tests red (mutation check)
+  - 2026-11-13: resolution verified: quality gate green and independent review approved on the combined tree of the harness branches (`TM-integration` at 4461c41; reviews in `.ralph/reviews/20261110-harness-branches/`, review findings fixed in 0e2b12c; maintainer accepted the combined verification results, 2026-11-13)
 
 ### TD-072: payment-flow tests share one durable consumer, so a test can receive an earlier test's unacked event
 

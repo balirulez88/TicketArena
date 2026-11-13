@@ -1,0 +1,55 @@
+import type { AddressInfo } from "node:net";
+import { afterEach, describe, expect, it } from "vitest";
+import { createDashboardServer } from "./server";
+import { buildState, type DashboardState } from "./state";
+import { snapshot, ticket } from "./testing/fixtures";
+
+let close: (() => Promise<void>) | undefined;
+
+async function serve(load: () => Promise<DashboardState>): Promise<string> {
+  const server = createDashboardServer({ load, refreshSeconds: 0 });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  close = () => new Promise((resolve) => server.close(() => resolve()));
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+afterEach(async () => {
+  await close?.();
+  close = undefined;
+});
+
+const state = () =>
+  buildState(snapshot({ tickets: [ticket("13", "release-hold", "ready-for-agent")] }), {
+    staleAfterMs: 60_000,
+    failureLimit: 25,
+  });
+
+describe("dashboard server", () => {
+  it("serves the page and the JSON state", async () => {
+    const base = await serve(state);
+    const page = await fetch(`${base}/`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toContain("text/html");
+    expect(await page.text()).toContain("release hold");
+
+    const api = await fetch(`${base}/api/state`);
+    const body = (await api.json()) as { tickets: { number: string; status: string }[] };
+    expect(body.tickets.map((t) => [t.number, t.status])).toEqual([["13", "ready-for-agent"]]);
+  });
+
+  it("refuses every method that could change something, and unknown paths", async () => {
+    const base = await serve(state);
+    for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
+      const response = await fetch(`${base}/api/state`, { method });
+      expect(response.status).toBe(405);
+    }
+    expect((await fetch(`${base}/api/run`)).status).toBe(404);
+  });
+
+  it("answers 500 with the reason when the artifacts cannot be read", async () => {
+    const base = await serve(() => Promise.reject(new Error("disk gone")));
+    const response = await fetch(`${base}/`);
+    expect(response.status).toBe(500);
+    expect(await response.text()).toContain("disk gone");
+  });
+});

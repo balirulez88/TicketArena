@@ -449,6 +449,13 @@ without `--ticket`, exit 2 before a container exists (`scripts/ralph-driver.sh`)
 - `RALPH_LEAD_CMD`, `RALPH_LEAD_TIMEOUT` (default 7200 s) and `RALPH_LEAD_MAX_BUDGET_USD` (optional
   cap) tune a run.
 
+## Control Center (read-only dashboard)
+
+`pnpm control-center` serves a local, read-only view of the artifacts below and of the tickets and
+debt gate on `main`: [`apps/control-center`](../../apps/control-center/README.md). It writes
+nothing and runs only Git read commands, so it is safe beside a live run. A run counts as live only
+while `run.json` says `active` and its files are recent; process liveness is not checked.
+
 ## Run artifacts
 
 `scripts/ralph-artifacts.mjs` owns their lifecycle; `ralph-loop.sh` calls it when a run starts

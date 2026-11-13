@@ -63,13 +63,15 @@ warnings:
   sources it; no suite has been run end to end with an inherited `GIT_DIR`.
   Known limits. The bash suites make their directories with `mktemp` and do not use this module,
   so they follow the caller's `TEMP` and leave their directories behind after a hard kill. The
-  module has been run on the Windows host only, never inside the sandbox container, so its Linux
-  process identification, its default root and the cost of writing fixtures to the container's
-  volume are unverified there. On Windows `SIGTERM` is a hard kill, so its signal handler has not
-  been observed running; what has been observed is the next run's recovery. The start-up race is
-  tested by having the process-listing step plant a new owner, not reproduced between real
-  processes. During verification on 2026-11-09, files in the system `TEMP` changed that were not
-  traced to any cause, so a run does not prove that `TEMP` was left untouched.
+  module also runs inside the sandbox container: its own tests passed there on 2026-11-10, and on
+  2026-11-13 the host's gate ran the whole harness suite in the `--tools` stage, with the module's
+  default root on the `/workspace` volume, in 323 s of the stage's 1800 s (TD-088; the same suite
+  takes about 91 minutes on the Windows host). On Windows `SIGTERM` is a hard kill, and no run has
+  shown its signal handler running on either system; what has been observed is the next run's
+  recovery. The start-up race is tested by having the process-listing step plant a new owner, not
+  reproduced between real processes. During verification on 2026-11-09, files in the system
+  `TEMP` changed that were not traced to any cause, so a run does not prove that `TEMP` was left
+  untouched.
 
 ## Integration test infrastructure
 

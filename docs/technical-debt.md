@@ -2187,7 +2187,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Status:** PLANNED
 - **Severity:** MEDIUM
 - **Risk:** VERIFICATION
-- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Triage:** 2026-11-13: maintainer approved the classification Claude drafted on 2026-11-10, after Claude's independent review of it
 - **Escalation:** none
 - **Source:** review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
 - **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`; `.ralph/reviews/20261110-harness-branches/sandbox-image-run.txt`
@@ -2205,20 +2205,21 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-10: recorded: MEDIUM missing_test at `scripts/ralph-test-workspace.mjs:314` (review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice)
   - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+  - 2026-11-13: triage approved: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer decision, 2026-11-13, after Claude's independent review of the drafted classification)
 
 ### TD-088: The harness suite's cost on the sandbox volume is unmeasured
 
 - **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
-- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Triage:** 2026-11-13: maintainer approved the classification Claude drafted on 2026-11-10, after Claude's independent review of it
 - **Escalation:** none
 - **Source:** review of the combined tree of the harness branches, 2026-11-10, not a slice
-- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`; `.ralph/reviews/20261110-harness-branches/sandbox-image-run.txt`
+- **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`; `.ralph/reviews/20261110-harness-branches/sandbox-image-run.txt`; `.ralph/reviews/20261110-harness-branches/tools-stage-timing.txt`
 - **Components:** `scripts/ralph-test-workspace.mjs`; `scripts/ralph-verify.mjs:226`
-- **Problem:** The module's own tests pass in the sandbox image (27 of 27 in 6 s, no sessions left, run by hand on 2026-11-10 in the container's /tmp). What no run has measured is the full harness suite in the --tools stage, which now writes fixtures to the /workspace volume instead of tmpfs, under an 1800 s limit shared with lint and typecheck. The sandbox suite does not exercise this, because the fixture's check has no test:harness.
+- **Problem:** The --tools stage runs the register check, lint, typecheck and the full harness suite (`test:harness`: every `scripts/*.test.mjs` and the four bash suites) in one container under an 1800 s limit, writing fixtures to the /workspace volume. One hand-run of the gate on 2026-11-13 measured it at 323 s (typecheck 30 s, Node tests 139 s, bash suites about 2 min); the same suite takes about 91 minutes on the Windows host, a cost of process start-up there that the container does not pay. Nothing guards that margin: the sandbox suite's fixture has no test:harness, so a harness grown slower would first show as a timeout in a real gate run.
 - **Impact:** A timeout would first appear in a real gate run. It fails closed: it stops a merge and cannot pass bad work.
-- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. Fails closed, and the module itself is now proven on Linux, so what remains is duration. It blocks no ticket: a slow stage would stop a run visibly, and the first production run will show the timing.
+- **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. Fails closed, and the measured stage uses 18 % of its limit, so there is no mismatch to fix now. What remains is a regression check, owned by ticket 58.
 - **Remediation:** Time the --tools stage on the sandbox volume, and pass an external root such as /tmp/harness if it nears the limit.
 - **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
 - **Blocks:** none
@@ -2229,13 +2230,15 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-10: recorded: LOW unverified_assumption at `scripts/ralph-verify.mjs:226` (review of the combined tree of the harness branches, 2026-11-10, not a slice)
   - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+  - 2026-11-13: triage approved: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer decision, 2026-11-13, after Claude's independent review of the drafted classification)
+  - 2026-11-13: measured: the host's gate on the harness integration (d1ba737) passed with the --tools stage at 323 s of 1800 s; no limit changed; the regression scenario stays with ticket 58 (maintainer's instruction of 2026-11-13 to investigate the timeout; measured by Claude)
 
 ### TD-089: The guard for test files using the workspace module only sees tmpdir()
 
 - **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
-- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Triage:** 2026-11-13: maintainer approved the classification Claude drafted on 2026-11-10, after Claude's independent review of it
 - **Escalation:** none
 - **Source:** review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
 - **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
@@ -2253,13 +2256,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-10: recorded: LOW test_quality at `scripts/ralph-test-workspace.test.mjs:495` (review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice)
   - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+  - 2026-11-13: triage approved: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer decision, 2026-11-13, after Claude's independent review of the drafted classification)
 
 ### TD-090: The Git discovery test can pass without the ceiling
 
 - **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
-- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Triage:** 2026-11-13: maintainer approved the classification Claude drafted on 2026-11-10, after Claude's independent review of it
 - **Escalation:** none
 - **Source:** review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
 - **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
@@ -2277,6 +2281,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-10: recorded: LOW test_quality at `scripts/ralph-test-workspace.test.mjs:440` (review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice)
   - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+  - 2026-11-13: triage approved: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer decision, 2026-11-13, after Claude's independent review of the drafted classification)
 
 ### TD-091: The shell test suites keep inherited Git repository variables
 
@@ -2304,13 +2309,15 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-10: rated MEDIUM, not the reviewer's LOW: the same exposure in the Node suites was rated HIGH by two reviewers and MEDIUM by one, and `test:harness` runs both (confirmation review of the combined tree)
   - 2026-11-13: rated HIGH and owned by the branch that fixes it ahead of ticket 58 (maintainer decision, 2026-11-13, after Claude's independent review of the triage): the Node twin was rated HIGH, and a hook in a linked worktree was observed to export GIT_DIR and GIT_INDEX_FILE
   - 2026-11-13: resolved on branch `fix/td-091-shell-suite-git-isolation`: the suites source `scripts/test-git-isolation.sh` first; removing its `unset`, or the source line from any suite, turns the named tests red (sabotage check)
+  - 2026-11-13: resolution accepted: the maintainer approved the HIGH rating, the fix and its verification (test:harness and test:sandbox green on the integration tree e3732f7)
+  - 2026-11-13: the host's gate failed on the fix in the sandbox image: its Git 2.39 lists GIT_INTERNAL_SUPER_PREFIX, and with that variable inherited the helper's own `git rev-parse` exited 128; fixed in d1ba737 (Git is asked in a clean environment), the test red before and green after in the sandbox image
 
 ### TD-092: Sandbox lead checks match log wording
 
 - **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
-- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Triage:** 2026-11-13: maintainer approved the classification Claude drafted on 2026-11-10, after Claude's independent review of it
 - **Escalation:** none
 - **Source:** review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice
 - **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
@@ -2328,13 +2335,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-10: recorded: LOW test_quality at `scripts/sandbox.test.sh:577` (review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice)
   - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+  - 2026-11-13: triage approved: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer decision, 2026-11-13, after Claude's independent review of the drafted classification)
 
 ### TD-093: The lead-interrupt scenario accepts and stops any container of the image
 
 - **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
-- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Triage:** 2026-11-13: maintainer approved the classification Claude drafted on 2026-11-10, after Claude's independent review of it
 - **Escalation:** none
 - **Source:** review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice
 - **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
@@ -2352,13 +2360,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-10: recorded: LOW test_quality at `scripts/sandbox.test.sh:637` (review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice)
   - 2026-11-10: triaged: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+  - 2026-11-13: triage approved: VERIFICATION, owned by ticket 58, blocks no ticket (maintainer decision, 2026-11-13, after Claude's independent review of the drafted classification)
 
 ### TD-094: A root spelled with an 8.3 short name passes the repository check
 
 - **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** CORRECTNESS
-- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Triage:** 2026-11-13: maintainer approved the classification Claude drafted on 2026-11-10, after Claude's independent review of it
 - **Escalation:** none
 - **Source:** confirmation review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
 - **Evidence:** `.ralph/reviews/20261110-harness-branches/confirmation-review.txt`
@@ -2376,13 +2385,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-10: recorded: LOW unverified_assumption at `scripts/ralph-test-workspace.mjs:88` (confirmation review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice)
   - 2026-11-10: triaged: CORRECTNESS, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+  - 2026-11-13: triage approved: CORRECTNESS, owned by ticket 58, blocks no ticket (maintainer decision, 2026-11-13, after Claude's independent review of the drafted classification)
 
 ### TD-095: A root on a missing drive fails with a raw ENOENT
 
 - **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** OPERABILITY
-- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
+- **Triage:** 2026-11-13: maintainer approved the classification Claude drafted on 2026-11-10, after Claude's independent review of it
 - **Escalation:** none
 - **Source:** confirmation review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice
 - **Evidence:** `.ralph/reviews/20261110-harness-branches/confirmation-review.txt`
@@ -2400,4 +2410,5 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-10: recorded: LOW missing_test at `scripts/ralph-test-workspace.mjs:109` (confirmation review of branch `harness/test-workspace-isolation`, 2026-11-10, not a slice)
   - 2026-11-10: triaged: OPERABILITY, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
+  - 2026-11-13: triage approved: OPERABILITY, owned by ticket 58, blocks no ticket (maintainer decision, 2026-11-13, after Claude's independent review of the drafted classification)
 <!-- ralph-debt:end -->

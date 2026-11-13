@@ -87,6 +87,8 @@ describe("test-git-isolation.sh", () => {
   });
 
   it("clears every repository-local variable the running Git names", () => {
+    // Every name inherited at once, including any that makes Git itself refuse: Git 2.39 (the
+    // sandbox image's) lists GIT_INTERNAL_SUPER_PREFIX, and `rev-parse` exits 128 when it is set.
     const names = git(scripts, "rev-parse", "--local-env-vars").split("\n");
     const env = { ...process.env, ...Object.fromEntries(names.map((name) => [name, "inherited"])) };
     const result = spawnSync(

@@ -41,12 +41,12 @@ warnings:
   retention rules, provider-failure pause and resume, and bounded batches (all below).
   Every `scripts/*.test.mjs` that needs temporary files imports
   `scripts/ralph-test-workspace.mjs`. A test enforces that for files calling `tmpdir()`; it does
-  not see `mktemp` or a direct read of `TEMP`. Its fixtures and those of its
-  child processes go to one session folder under `RALPH_TEST_TMP_ROOT` (absolute; default
-  `.ralph/tmp/harness`). There is no fallback to the system's temporary directory: an unusable root
-  fails the run. A root may not contain the repository, or sit inside it anywhere but below
-  `.ralph/tmp`, or in a `failure-injection*` folder directly below `.ralph/tmp`. Each test's directories are removed after
-  it, passed or failed; `RALPH_TEST_KEEP_FAILED=1` moves a failed test's to `kept-failed/` for
+  not see `mktemp` or a direct read of `TEMP`. Its fixtures and those of its child processes go to
+  one session folder under `RALPH_TEST_TMP_ROOT` (absolute; default `.ralph/tmp/harness`). There
+  is no fallback to the system's temporary directory: an unusable root fails the run. A root may
+  not contain the repository, or sit inside it anywhere but below `.ralph/tmp`, or in a
+  `failure-injection*` folder directly below `.ralph/tmp`. Each test's directories are removed
+  after it, passed or failed; `RALPH_TEST_KEEP_FAILED=1` moves a failed test's to `kept-failed/` for
   debugging, where it is never swept. Only `sessions/` is swept, so existing `failure-injection*`
   evidence is left alone. A test cannot designate other evidence: its directories survive only
   with that flag.
@@ -63,8 +63,8 @@ warnings:
   host only, never inside the sandbox container, so its Linux process identification, its default
   root and the cost of writing fixtures to the container's volume are unverified there. On Windows
   `SIGTERM` is a hard kill, so its signal handler has not been observed running; what has been
-  observed is the next run's recovery. The start-up race is tested by having the process-listing step
-  plant a new owner, not reproduced between real processes. During verification on 2026-11-09,
+  observed is the next run's recovery. The start-up race is tested by having the process-listing
+  step plant a new owner, not reproduced between real processes. During verification on 2026-11-09,
   files in the system `TEMP` changed that were not traced to any cause, so a run does not prove
   that `TEMP` was left untouched.
 
@@ -425,12 +425,12 @@ without `--ticket`, exit 2 before a container exists (`scripts/ralph-driver.sh`)
 - **Readiness ([ADR 0019](../adr/0019-readiness-checks-for-the-lead-driver.md)).** Model-free
   checks in `scripts/ralph-preflight.mjs`, verdict `READY`, `NEEDS PREPARATION` (exit 5) or
   `BLOCKED`. Before any image is built, `sandbox.sh` refuses a ticket that is not ready or that
-  has a criterion naming documentation and no test, and notes unresolved debt entries that mention flakiness.
-  Before the Lead starts, `run_gate` runs on the base unless the host has
-  already verified this code (`.ralph/baseline/`). A hook in `.claude/settings.json` tells the
-  agent as soon as a test imports what the base cannot load (observed for a `Write`; the ADR says
-  what has not been), and the driver
-  makes the same check on the exact candidate before RED, whether or not the hook ran. A finding
+  has a criterion naming documentation and no test, and notes unresolved debt entries that mention
+  flakiness. Before the Lead starts, `run_gate` runs on the base unless the host has already
+  verified this code (`.ralph/baseline/`). A hook in `.claude/settings.json` tells the agent as
+  soon as a test imports what the base cannot load (observed for a `Write`; the ADR says what has
+  not been), and the driver makes the same check on the exact candidate before RED, whether or not
+  the hook ran. A finding
   stops the run like an unfinished session: nothing judged or blocked, the work kept as
   `lead-work.patch`. RED and the importer are unchanged.
 - **Tests and the host.** `pnpm test:harness` (`scripts/ralph-lead.test.sh`, plus the importer
@@ -591,8 +591,8 @@ fails), a slice the agent's reviewers approve but the host's isolated reviewers 
 the reviewer containers see exactly the candidate, read-only, with no output mount), and a dirty
 host checkout (refused before any container starts). The fixture's gate passes on its base, as a
 real project's must, so each lead-driver scenario that reaches a session proves it passed the
-baseline check and started one, with a stub in place of `claude`; a scenario with a failing base proves the run stops before any
-session.
+baseline check and started one, with a stub in place of `claude`; a scenario with a failing base
+proves the run stops before any session.
 
 The threat model and the limitations that remain (prompt injection of the reviewers, shared state
 within one package's test run, network during install, hoisted modules, merged code running on

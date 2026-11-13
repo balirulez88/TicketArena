@@ -10,6 +10,7 @@
 # until the agent has written the feature, so an attempt lost to the provider shows as a failure.
 # RALPH_UNDER_TEST=<path> runs the scenarios against another harness (e.g. an older one).
 set -Eeuo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/test-git-isolation.sh"
 
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly SOURCE_ROOT

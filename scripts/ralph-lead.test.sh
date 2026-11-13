@@ -8,6 +8,7 @@
 # retry, no fallback, interruption), not the project's tests. That what the driver leaves behind
 # passes the real host importer is in scripts/ralph-accept.test.mjs.
 set -Eeuo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/test-git-isolation.sh"
 
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly SOURCE_ROOT

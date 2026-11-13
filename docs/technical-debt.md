@@ -53,14 +53,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
 | OPEN          | 0        | 0    | 0      | 48  | 48    |
-| PLANNED       | 0        | 0    | 14     | 18  | 32    |
+| PLANNED       | 0        | 0    | 13     | 18  | 31    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
-| RESOLVED      | 0        | 2    | 7      | 6   | 15    |
+| RESOLVED      | 0        | 3    | 7      | 6   | 16    |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 | Risk            | OPEN | PLANNED | IN_PROGRESS | RESOLVED | ACCEPTED_RISK | Total |
 | --------------- | ---- | ------- | ----------- | -------- | ------------- | ----- |
-| CORRECTNESS     | 2    | 6       | 0           | 4        | 0             | 12    |
+| CORRECTNESS     | 2    | 5       | 0           | 5        | 0             | 12    |
 | CONCURRENCY     | 0    | 2       | 0           | 2        | 0             | 4     |
 | SECURITY        | 1    | 2       | 0           | 2        | 0             | 5     |
 | VERIFICATION    | 10   | 14      | 0           | 5        | 0             | 29    |
@@ -2280,28 +2280,30 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-091: The shell test suites keep inherited Git repository variables
 
-- **Status:** PLANNED
-- **Severity:** MEDIUM
+- **Status:** RESOLVED
+- **Severity:** HIGH
 - **Risk:** CORRECTNESS
-- **Triage:** 2026-11-10: maintainer's instruction to triage the harness branches' review findings; classification drafted by Claude for the maintainer's review of this commit
-- **Escalation:** none
+- **Triage:** 2026-11-13: maintainer decision to rate it HIGH and fix it before the harness branches merge, after reviewing the classification Claude drafted on 2026-11-10
+- **Escalation:** Rated HIGH by the maintainer on 2026-11-13: the same exposure in the Node suites was rated HIGH by two of three reviewers and fixed, and a real trigger was observed. Git 2.45 exports an absolute GIT_DIR and GIT_INDEX_FILE to a hook running in a linked worktree, which this repository uses. As a HIGH it blocks the merge, so it was fixed instead of deferred.
 - **Source:** review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice
 - **Evidence:** `.ralph/reviews/20261110-harness-branches/first-review.txt`
 - **Components:** `scripts/sandbox.test.sh`; `scripts/ralph-loop.test.sh`; `scripts/ralph-sessions.test.sh`; `scripts/ralph-resume.test.sh`; `scripts/ralph-lead.test.sh`
 - **Problem:** None of these suites clears GIT_DIR, GIT_WORK_TREE or the other repository-local variables, so an inherited GIT_DIR outranks discovery in their fixtures.
-- **Impact:** Running the suites from a Git hook or `git rebase -x` could send a fixture's commit to the real repository.
+- **Impact:** Running the suites from a Git hook in a linked worktree sends a fixture's `git add` and `commit` to the real repository and its index. `git rebase -x`, the first review's example, does not export GIT_DIR on Git 2.45 (observed 2026-11-13).
 - **Justification:** Not blocking under the merge policy, and no product ticket relies on it: it concerns the harness's own tests. No hook or workflow in the repository exports these variables, so it needs a manual invocation. The docs state the limit.
 - **Remediation:** Clear Git's repository-local variables at the start of each suite.
 - **Target:** ticket 58 (`issues/58-harness-test-workspace-hardening.md`)
 - **Blocks:** none
 - **Acceptance:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** Every `scripts/*.test.sh` sources `scripts/test-git-isolation.sh` on the line after `set -Eeuo pipefail`, before any fixture exists. It unsets the variables `git rev-parse --local-env-vars` names, the same list `scripts/ralph-test-workspace.mjs` clears for the Node suites, and stops the suite if Git cannot name them. No suite was run end to end with an inherited GIT_DIR: the helper's behaviour is proven on a decoy repository, and each suite's use of it by a wiring check.
+- **Verification:** `scripts/test-git-isolation.test.mjs::without it, a fixture commit lands in the repository the caller's GIT_DIR names`; `scripts/test-git-isolation.test.mjs::keeps a fixture's commit in the fixture when the caller exports GIT_DIR and GIT_INDEX_FILE`; `scripts/test-git-isolation.test.mjs::clears every repository-local variable the running Git names`; `scripts/test-git-isolation.test.mjs::is sourced by every bash test suite before anything else runs`
 - **Fingerprints:** `scripts/sandbox.test.sh#shell-suites-keep-inherited-git-variables`
 - **History:**
   - 2026-11-10: recorded: MEDIUM unverified_assumption at `scripts/sandbox.test.sh:253` (review of branch `fix/sandbox-lead-baseline-fixture`, 2026-11-10, not a slice)
   - 2026-11-10: triaged: CORRECTNESS, owned by ticket 58, blocks no ticket (maintainer's instruction of 2026-11-10; classification drafted by Claude)
   - 2026-11-10: rated MEDIUM, not the reviewer's LOW: the same exposure in the Node suites was rated HIGH by two reviewers and MEDIUM by one, and `test:harness` runs both (confirmation review of the combined tree)
+  - 2026-11-13: rated HIGH and owned by the branch that fixes it ahead of ticket 58 (maintainer decision, 2026-11-13, after Claude's independent review of the triage): the Node twin was rated HIGH, and a hook in a linked worktree was observed to export GIT_DIR and GIT_INDEX_FILE
+  - 2026-11-13: resolved on branch `fix/td-091-shell-suite-git-isolation`: the suites source `scripts/test-git-isolation.sh` first; removing its `unset`, or the source line from any suite, turns the named tests red (sabotage check)
 
 ### TD-092: Sandbox lead checks match log wording
 

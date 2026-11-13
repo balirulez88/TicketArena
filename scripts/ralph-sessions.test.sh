@@ -6,6 +6,7 @@
 # (scripts/ralph-fake-claude.mjs), so the checks see the real launch configuration: arguments,
 # environment and config directory of every process. The quality gate is stubbed to pass.
 set -Eeuo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/test-git-isolation.sh"
 
 SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly SOURCE_ROOT

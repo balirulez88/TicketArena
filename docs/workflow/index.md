@@ -56,17 +56,20 @@ warnings:
   are judged, so a test file starting at that moment is not taken for dead.
   `GIT_CEILING_DIRECTORIES` stops Git in a fixture from discovering the real repository above it,
   and the module clears Git's repository-local variables (`GIT_DIR`, `GIT_WORK_TREE` and the
-  rest), which outrank discovery.
-  Known limits. The bash suites (`scripts/ralph-*.test.sh`) make their directories with `mktemp`
-  and do not use this module, so they follow the caller's `TEMP`, keep inherited Git variables,
-  and leave their directories behind after a hard kill. The module has been run on the Windows
-  host only, never inside the sandbox container, so its Linux process identification, its default
-  root and the cost of writing fixtures to the container's volume are unverified there. On Windows
-  `SIGTERM` is a hard kill, so its signal handler has not been observed running; what has been
-  observed is the next run's recovery. The start-up race is tested by having the process-listing
-  step plant a new owner, not reproduced between real processes. During verification on 2026-11-09,
-  files in the system `TEMP` changed that were not traced to any cause, so a run does not prove
-  that `TEMP` was left untouched.
+  rest), which outrank discovery. The bash suites (`scripts/*.test.sh`) clear the same variables
+  by sourcing `scripts/test-git-isolation.sh` first (TD-091): a hook in a linked worktree exports
+  an absolute `GIT_DIR` and `GIT_INDEX_FILE`, which would send a fixture's commit to the real
+  repository. Its test proves the helper on a decoy repository and checks that every suite
+  sources it; no suite has been run end to end with an inherited `GIT_DIR`.
+  Known limits. The bash suites make their directories with `mktemp` and do not use this module,
+  so they follow the caller's `TEMP` and leave their directories behind after a hard kill. The
+  module has been run on the Windows host only, never inside the sandbox container, so its Linux
+  process identification, its default root and the cost of writing fixtures to the container's
+  volume are unverified there. On Windows `SIGTERM` is a hard kill, so its signal handler has not
+  been observed running; what has been observed is the next run's recovery. The start-up race is
+  tested by having the process-listing step plant a new owner, not reproduced between real
+  processes. During verification on 2026-11-09, files in the system `TEMP` changed that were not
+  traced to any cause, so a run does not prove that `TEMP` was left untouched.
 
 ## Integration test infrastructure
 

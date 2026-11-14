@@ -1,3 +1,4 @@
+import { request } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDashboardServer } from "./server";
@@ -73,5 +74,25 @@ describe("dashboard server", () => {
     const response = await fetch(`${base}/`);
     expect(response.status).toBe(500);
     expect(await response.text()).toContain("disk gone");
+  });
+
+  it("refuses a request whose Host is not this loopback address (DNS rebinding)", async () => {
+    const base = await serve(state);
+    const port = new URL(base).port;
+    const statusFor = (host: string) =>
+      new Promise<number>((resolve, reject) => {
+        const req = request(`${base}/api/state`, { headers: { host } }, (response) => {
+          response.resume();
+          resolve(response.statusCode ?? 0);
+        });
+        req.on("error", reject);
+        req.end();
+      });
+    for (const host of ["evil.example", `evil.example:${port}`, "127.0.0.1:1", "localhost"]) {
+      expect(await statusFor(host)).toBe(421);
+    }
+    for (const host of [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`]) {
+      expect(await statusFor(host)).toBe(200);
+    }
   });
 });

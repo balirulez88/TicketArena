@@ -77,6 +77,7 @@ export function run(runId: string, overrides: Partial<RunFiles> = {}): RunFiles 
     sessionRecords: [],
     decisions: [],
     lastActivity: NOW - 600 * MINUTE,
+    unlisted: [],
     ...overrides,
   };
 }
@@ -98,6 +99,8 @@ export function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     batch: { state: null, lock: null },
     pauses: [],
     branches: [],
+    // Every listing succeeded: an empty collection above is a real "none".
+    incomplete: { runs: [], hostReviews: [], pauses: [], lock: [] },
     gaps: [],
     ...overrides,
   };

@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { takeSnapshot } from "./snapshot";
-import { createSources } from "./sources";
+import { createGitRunner, createSources, type GitRunner } from "./sources";
 import { buildState } from "./state";
 import { debtEntry, register, triagedLow } from "./testing/fixtures";
 
@@ -145,7 +145,7 @@ describe("takeSnapshot", () => {
     ]);
     expect(snap.batch).toEqual({ state: null, lock: { owner: '{"pid":4242,"host":"devbox"}' } });
     expect(snap.pauses.map((p) => p.name)).toEqual(["01-first.pause"]);
-    expect(snap.branches.map((b) => b.name)).toEqual(["rejected/01-first-20261108-175232"]);
+    expect(snap.branches?.map((b) => b.name)).toEqual(["rejected/01-first-20261108-175232"]);
   });
 
   it("changes nothing in the repository, its .git or its artifacts", async () => {
@@ -171,6 +171,152 @@ describe("takeSnapshot", () => {
     expect(snap.commit).toBeNull();
     expect(snap.tickets).toBeNull();
     expect(snap.gaps.map((gap) => gap.source)).toEqual(["git ref nope", ".ralph/"]);
+    // Without .ralph/ nothing below it is known, so no collection may read as empty.
+    expect(snap.incomplete.runs).toHaveLength(1);
+    expect(snap.incomplete.lock).toHaveLength(1);
+  });
+
+  it("keeps an active run's state unknown when its activity listing fails", async () => {
+    // The run directory lists once (its files are read) and then fails when its activity time is
+    // taken: a transient EACCES between two reads of the same directory.
+    const real = createSources(root);
+    const path = ".ralph/logs/20261113-110000";
+    let calls = 0;
+    const sources = {
+      ...real,
+      list(dir: string) {
+        if (dir === path && ++calls > 1) {
+          throw new Error(`EACCES: permission denied, scandir '${dir}'`);
+        }
+        return real.list(dir);
+      },
+    };
+    // Two hours on: by its directory's own time alone the run would look quiet.
+    const later = Date.now() + 120 * 60_000;
+    const snap = takeSnapshot(sources, { root, ref: "main", now: later });
+    expect(snap.runs.find((r) => r.runId === "20261113-110000")?.unlisted).toEqual([
+      expect.stringContaining("EACCES"),
+    ]);
+    const state = await buildState(snap, { staleAfterMs: 60_000, failureLimit: 25 });
+    const view = state.runs.find((r) => r.runId === "20261113-110000");
+    expect(view?.liveness).toBe("unknown");
+    expect(view?.sessionsIncomplete).toContain("EACCES");
+  });
+
+  it("keeps a file that exists but cannot be read apart from a missing one", async () => {
+    // A directory where a file belongs: readFile fails with EISDIR, a real I/O error.
+    mkdirSync(join(root, ".ralph/logs/20261113-110000/sessions.tsv"));
+    const snap = takeSnapshot(createSources(root), { root, ref: "main", now: NOW });
+    expect(snap.runs[0]?.sessionsTsv).toEqual({ unreadable: expect.stringContaining("EISDIR") });
+    const state = await buildState(snap, { staleAfterMs: 60_000, failureLimit: 25 });
+    // Not "not merged yet": the per-process record must not stand in for the final one.
+    expect(state.runs.find((r) => r.runId === "20261113-110000")?.sessionsIncomplete).toContain(
+      "EISDIR",
+    );
+  });
+});
+
+// Git failures are reported with Git's own words. A ref Git cannot find is "not found when read",
+// never "does not exist": a concurrent update can hide it for a moment, and nothing is retried.
+describe("git failures", () => {
+  const gitFailure = (status: number, stderr: string) =>
+    Object.assign(new Error(`Command failed: git\n${stderr}`), {
+      status,
+      stderr: Buffer.from(stderr),
+    });
+  const failing = (command: string, error: Error, calls: string[][] = []): GitRunner => {
+    const real = createGitRunner(root);
+    return (args, input) => {
+      calls.push([...args]);
+      if (args[0] === command) {
+        throw error;
+      }
+      return real(args, input);
+    };
+  };
+
+  it("says a missing ref was not found when read, with Git's message", () => {
+    const snap = takeSnapshot(createSources(root), { root, ref: "nope", now: NOW });
+    const gap = snap.gaps.find((g) => g.source === "git ref nope");
+    expect(gap?.reason).toContain("not found when read");
+    expect(gap?.reason).toContain("fatal: Needed a single revision");
+    expect(gap?.reason).not.toContain("does not exist");
+  });
+
+  it("reports a permission error as a Git failure, not as a missing ref", () => {
+    const denied = gitFailure(128, "fatal: couldn't read .git/packed-refs: Permission denied\n");
+    const snap = takeSnapshot(createSources(root, failing("rev-parse", denied)), {
+      root,
+      ref: "main",
+      now: NOW,
+    });
+    const gap = snap.gaps.find((g) => g.source === "git ref main");
+    expect(gap?.reason).toBe(
+      "git rev-parse failed (exit 128): fatal: couldn't read .git/packed-refs: Permission denied",
+    );
+    expect(snap.commit).toBeNull();
+  });
+
+  it("surfaces a transient failure once, without a retry or a fallback, and recovers next time", () => {
+    const calls: string[][] = [];
+    const busy = gitFailure(128, "fatal: unable to read tree 0123abc\n");
+    const first = takeSnapshot(createSources(root, failing("ls-tree", busy, calls)), {
+      root,
+      ref: "main",
+      now: NOW,
+    });
+    expect(calls.filter((args) => args[0] === "ls-tree")).toHaveLength(2);
+    expect(first.tickets).toBeNull();
+    expect(first.register).toBeNull();
+    expect(first.gaps).toContainEqual({
+      source: "issues/ at main",
+      reason: "git ls-tree failed (exit 128): fatal: unable to read tree 0123abc",
+    });
+    const second = takeSnapshot(createSources(root), { root, ref: "main", now: NOW });
+    expect(second.tickets).toHaveLength(3);
+  });
+
+  it("reports a branch listing failure with Git's message", () => {
+    const locked = gitFailure(
+      128,
+      "fatal: unable to read refs: Resource temporarily unavailable\n",
+    );
+    const snap = takeSnapshot(createSources(root, failing("for-each-ref", locked)), {
+      root,
+      ref: "main",
+      now: NOW,
+    });
+    expect(snap.branches).toBeNull();
+    expect(snap.gaps).toContainEqual({
+      source: "git branches rejected/* and ralph/paused/*",
+      reason:
+        "git for-each-ref failed (exit 128): fatal: unable to read refs: Resource temporarily unavailable",
+    });
+  });
+
+  it("reads tickets and the register from the one commit it resolved, even if main moves", () => {
+    const before = git(root, "rev-parse", "main");
+    // Another process (a merge, a fetch) advances main between the snapshot's reads.
+    git(root, "switch", "--quiet", "main");
+    write("issues/01-first.md", ticketText("01", "done"));
+    write("docs/technical-debt.md", register());
+    git(root, "commit", "--quiet", "-am", "advance");
+    const after = git(root, "rev-parse", "main");
+    git(root, "update-ref", "refs/heads/main", before);
+    const real = createGitRunner(root);
+    const moving: GitRunner = (args, input) => {
+      const output = real(args, input);
+      if (args[0] === "rev-parse") {
+        git(root, "update-ref", "refs/heads/main", after);
+      }
+      return output;
+    };
+    const snap = takeSnapshot(createSources(root, moving), { root, ref: "main", now: NOW });
+    expect(snap.commit).toBe(before);
+    expect(snap.tickets?.find((t) => t.path === "issues/01-first.md")?.text).toContain(
+      "**Status:** ready-for-agent",
+    );
+    expect(snap.register).toContain("### TD-001");
   });
 });
 

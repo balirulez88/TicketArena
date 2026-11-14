@@ -24,6 +24,16 @@ export const CONTENT_SECURITY_POLICY = [
 
 const SCRIPT_PATH = "/assets/dashboard.js";
 
+// Loopback binding is the only access control, and DNS rebinding defeats it: a page on another
+// site can point its own name at 127.0.0.1 and read the state same-origin. The browser still sends
+// that name as Host, so only the loopback names on the port actually served are answered.
+function loopbackHost(host: string | undefined, port: number | undefined): boolean {
+  return (
+    port !== undefined &&
+    ["127.0.0.1", "localhost", "[::1]"].some((name) => host?.toLowerCase() === `${name}:${port}`)
+  );
+}
+
 // The state holds only plain data (no Map), so it serializes as-is.
 const json = (value: unknown): string => JSON.stringify(value, null, 2);
 
@@ -33,6 +43,11 @@ const json = (value: unknown): string => JSON.stringify(value, null, 2);
  */
 export function createDashboardServer(deps: ServerDeps): Server {
   return createServer((request, response) => {
+    if (!loopbackHost(request.headers.host, request.socket.localPort)) {
+      response.writeHead(421, { "content-type": "text/plain" });
+      response.end("misdirected request: open the dashboard by its loopback address\n");
+      return;
+    }
     const path = new URL(request.url ?? "/", "http://localhost").pathname;
     if (request.method !== "GET" && request.method !== "HEAD") {
       response.writeHead(405, { allow: "GET, HEAD", "content-type": "text/plain" });

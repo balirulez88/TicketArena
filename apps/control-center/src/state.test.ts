@@ -320,7 +320,7 @@ describe("recent failures", () => {
       ["batch rejected", "12"],
       ["sandbox untrusted", "11"],
     ]);
-    expect(state.current.pausedBranches.map((b) => b.name)).toEqual(["ralph/paused/12-x"]);
+    expect(state.current.pausedBranches?.map((b) => b.name)).toEqual(["ralph/paused/12-x"]);
   });
 
   it("does not count a batch that stopped normally", async () => {

@@ -14,19 +14,31 @@ export interface DirEntry {
 }
 
 export interface Sources {
-  /** Entries of `<root>/<path>`, or null when it does not exist or is not a directory. */
+  /** Entries of `<root>/<path>`; null when it does not exist or is not a directory; else throws. */
   list(path: string): DirEntry[] | null;
-  /** Contents of `<root>/<path>`, or null when it does not exist or cannot be read. */
+  /** Contents of `<root>/<path>`; null when it does not exist; throws when it cannot be read. */
   read(path: string): string | null;
-  /** Newest modification time (ms) of `<root>/<path>` and the files directly inside it. */
+  /**
+   * Newest modification time (ms) of `<root>/<path>` and the files directly inside it; null when
+   * it does not exist; throws when it is a directory that cannot be listed.
+   */
   lastModified(path: string): number | null;
-  /** Commit the ref names, or null when the ref does not exist. */
-  commitOf(ref: string): string | null;
-  /** Every file at `ref` below `prefix`, with its contents. Throws when Git fails. */
-  filesAt(ref: string, prefix: string): Map<string, string>;
-  /** Local branches below `refs/heads/<prefix>`. */
+  /** The commit the ref names right now, or why Git could not resolve it (in Git's words). */
+  commitOf(ref: string): CommitLookup;
+  /** Every file at `revision` below `prefix`, with its contents. Throws when Git fails. */
+  filesAt(revision: string, prefix: string): Map<string, string>;
+  /** Local branches below `refs/heads/<prefix>`. Throws when Git fails. */
   branches(prefix: string): GitBranch[];
 }
+
+export type CommitLookup = { ok: true; commit: string } | { ok: false; reason: string };
+
+/**
+ * Runs one Git command in the repository and returns its stdout. Fails like `execFileSync`: an
+ * error carrying the exit `status` and the `stderr` Git wrote. The process boundary, injectable so
+ * tests can stand in for a Git that fails.
+ */
+export type GitRunner = (args: readonly string[], input?: string) => Buffer;
 
 // Git's repository-local variables outrank `-C`: a hook in a linked worktree exports an absolute
 // GIT_DIR (TD-091), which would make every read below answer for some other repository.
@@ -51,6 +63,11 @@ function gitEnvironment(): NodeJS.ProcessEnv {
 
 const MAX_BUFFER = 64 * 1024 * 1024;
 
+// "Does not exist" is an answer; a permission or I/O error is not, and must not read as one.
+const ABSENT = ["ENOENT", "ENOTDIR"];
+const isAbsent = (error: unknown): boolean =>
+  error instanceof Error && "code" in error && ABSENT.includes(String(error.code));
+
 // `git cat-file --batch` output: `<sha> blob <size>\n<content>\n` per object, in request order.
 function splitBatch(output: Buffer, paths: string[]): Map<string, string> {
   const files = new Map<string, string>();
@@ -68,15 +85,39 @@ function splitBatch(output: Buffer, paths: string[]): Map<string, string> {
   return files;
 }
 
-export function createSources(root: string): Sources {
+export function createGitRunner(root: string): GitRunner {
   const env = gitEnvironment();
-  const git = (args: string[], input?: string): Buffer =>
+  return (args, input) =>
     execFileSync("git", ["-C", root, ...args], {
       env,
       maxBuffer: MAX_BUFFER,
       stdio: ["pipe", "pipe", "pipe"],
       ...(input === undefined ? {} : { input }),
     });
+}
+
+/** `git <command> failed (exit N): <what Git wrote>`, on one line, keeping Git's own words. */
+function describeGitFailure(args: readonly string[], error: unknown): string {
+  const status = error instanceof Error && "status" in error ? error.status : null;
+  const stderr = error instanceof Error && "stderr" in error ? String(error.stderr ?? "") : "";
+  const said = stderr.trim().split(/\r?\n/).join(" ");
+  const message = error instanceof Error ? (error.message.split("\n")[0] ?? "") : String(error);
+  return `git ${args[0] ?? ""} failed (exit ${typeof status === "number" ? status : "unknown"}): ${said || message}`;
+}
+
+// What `rev-parse --verify` writes when the name resolves to nothing. On Windows a ref that another
+// process is rewriting (a merge, `pack-refs`) can briefly resolve to nothing too, so this is "not
+// found when read", never "does not exist". Nothing retries it: the next refresh reads again.
+const NOT_FOUND = /Needed a single revision/;
+
+export function createSources(root: string, runGit: GitRunner = createGitRunner(root)): Sources {
+  const git = (args: readonly string[], input?: string): Buffer => {
+    try {
+      return runGit(args, input);
+    } catch (error) {
+      throw new Error(describeGitFailure(args, error));
+    }
+  };
   const stat = (path: string) => {
     try {
       return statSync(join(root, path));
@@ -85,53 +126,67 @@ export function createSources(root: string): Sources {
     }
   };
 
+  const absentOr = <T>(read: () => T): T | null => {
+    try {
+      return read();
+    } catch (error) {
+      if (isAbsent(error)) {
+        return null;
+      }
+      throw error;
+    }
+  };
+
   return {
     list(path) {
-      try {
-        return readdirSync(join(root, path), { withFileTypes: true }).map((entry) => ({
+      return absentOr(() =>
+        readdirSync(join(root, path), { withFileTypes: true }).map((entry) => ({
           name: entry.name,
           isDirectory: entry.isDirectory(),
-        }));
-      } catch {
-        return null;
-      }
+        })),
+      );
     },
     read(path) {
-      try {
-        return readFileSync(join(root, path), "utf8");
-      } catch {
-        return null;
-      }
+      return absentOr(() => readFileSync(join(root, path), "utf8"));
     },
     lastModified(path) {
       const own = stat(path);
       if (own === null) {
         return null;
       }
-      const children = this.list(path) ?? [];
+      // A directory that exists but cannot be listed throws: its own time alone could make a run
+      // that is writing files look quiet, and the caller must report that as unknown instead.
+      const children: DirEntry[] = own.isDirectory() ? (this.list(path) ?? []) : [];
       return Math.max(
         own.mtimeMs,
         ...children.map((child) => stat(join(path, child.name))?.mtimeMs ?? 0),
       );
     },
     commitOf(ref) {
+      // No --quiet: it would hide Git's message, and the message is what tells a missing ref
+      // apart from a permission or repository error.
+      const args = ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`];
       try {
-        return git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])
-          .toString()
-          .trim();
-      } catch {
-        return null;
+        return { ok: true, commit: runGit(args).toString().trim() };
+      } catch (error) {
+        const reason = describeGitFailure(args, error);
+        return NOT_FOUND.test(reason)
+          ? {
+              ok: false,
+              reason: `not found when read (missing, or being rewritten by another Git process at that moment); ${reason}`,
+            }
+          : { ok: false, reason };
       }
     },
-    filesAt(ref, prefix) {
-      const paths = git(["ls-tree", "-r", "--name-only", "-z", ref, "--", prefix])
+    filesAt(revision, prefix) {
+      const paths = git(["ls-tree", "-r", "--name-only", "-z", revision, "--", prefix])
         .toString("utf8")
         .split("\0")
         .filter((path) => path !== "");
       if (paths.length === 0) {
         return new Map();
       }
-      const request = paths.map((path) => `${ref}:${path}`).join("\n");
+      const request = paths.map((path) => `${revision}:${path}`).join("\n");
       return splitBatch(git(["cat-file", "--batch"], `${request}\n`), paths);
     },
     branches(prefix) {

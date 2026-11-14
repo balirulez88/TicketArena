@@ -23,6 +23,7 @@ import {
   type PipelineView,
   pipelinesOf,
   type RunSummary,
+  reviewsUncertain,
   STAGE_TITLE,
   summarizeRun,
 } from "./present";
@@ -57,11 +58,18 @@ const sessionMs = (session: Session): number | null => {
   return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
 };
 
+const sessionsUnavailable = (run: RunView) =>
+  run.sessionsIncomplete === null
+    ? ""
+    : h`<p class="small">${provenance("unavailable")} <span class="muted">Some session records could not be read: ${run.sessionsIncomplete}</span></p>`;
+
 export function sessionTimeline(run: RunView) {
   if (run.sessions.length === 0) {
-    return h`<p class="muted small">No session records in this run.</p>`;
+    return run.sessionsIncomplete === null
+      ? h`<p class="muted small">No session records in this run.</p>`
+      : sessionsUnavailable(run);
   }
-  return h`<ol class="timeline">${run.sessions.map(
+  return h`${sessionsUnavailable(run)}<ol class="timeline">${run.sessions.map(
     (session) => h`<li class="tl-item">
       ${dot(session.status === "ok" ? "ok" : session.status === "running" ? "live" : "bad")}
       <span class="mono small muted">${when(session.started)}</span>
@@ -83,7 +91,7 @@ function liveRunCard(run: RunView, state: DashboardState, now: number) {
       <span class="muted">${run.origin}</span>
     </div>
     ${run.liveness === "stale" ? h`<p class="note warn">run.json still says <code>active</code>, but nothing changed for over ${state.staleAfterMinutes} min. A killed run stays <code>active</code> forever; process liveness is not checked.</p>` : ""}
-    ${pipelines.length === 0 ? h`<p class="muted small">No ticket session recorded yet.</p>` : pipelines.map(pipeline)}
+    ${pipelines.length === 0 ? (run.sessionsIncomplete === null ? h`<p class="muted small">No ticket session recorded yet.</p>` : sessionsUnavailable(run)) : pipelines.map(pipeline)}
     <details class="disclosure" data-key="${`agents-tl-${domKey(run.runId)}`}"><summary>Session timeline (${run.sessions.length})</summary>${sessionTimeline(run)}</details>
   </section>`;
 }
@@ -97,21 +105,35 @@ export function agentsView(state: DashboardState, now: number) {
           "No run is active",
           h`No <code>run.json</code> claims <code>active</code>. The pipelines below are finished records.`,
         )}</section>`
-      : execution.runs.map((run) => liveRunCard(run, state, now));
+      : execution.kind === "unknown"
+        ? h`<section class="card">${empty(
+            "Run state unknown",
+            `Run artifacts could not be fully read, so a run may be active: ${execution.reason ?? ""}`,
+            "bad",
+          )}</section>${execution.runs.map((run) => liveRunCard(run, state, now))}`
+        : execution.runs.map((run) => liveRunCard(run, state, now));
+  const nowTag = {
+    idle: "historical",
+    unknown: "unavailable",
+    live: "live",
+    stale: "live",
+  } as const;
   return h`<div class="view-head"><div><h2>Agent Activity</h2>
       <p class="muted">Stages come from session labels in run logs: <code>red</code> → Testing; <code>green</code>, <code>refactor</code>, <code>docs</code> → Implementation; <code>review-*</code> → Review; a completion record naming the run → Merge. Ralph records no planning step.</p></div></div>
     <div class="legend">${(["active", "completed", "failed", "stale", "unknown"] as const).map((s) => h`<span>${dot(STAGE_TONE[s])} ${STAGE_STATE_LABEL[s]}</span>`)}</div>
-    <h3 class="section-title">Now ${execution.kind === "idle" ? provenance("historical") : provenance("live")}</h3>
+    <h3 class="section-title">Now ${provenance(nowTag[execution.kind])}</h3>
     <div class="stack">${current}</div>
-    <h3 class="section-title">Recent runs ${provenance("historical")}</h3>
+    <h3 class="section-title">Recent runs ${provenance("historical")}${state.runsIncomplete === null ? "" : h` ${provenance("unavailable")}`}</h3>
     <div class="stack">${
       recent.length === 0
-        ? h`<p class="muted">No other runs in <code>.ralph/logs</code> or sandboxes.</p>`
+        ? state.runsIncomplete === null
+          ? h`<p class="muted">No other runs in <code>.ralph/logs</code> or sandboxes.</p>`
+          : h`<p class="muted">Run logs unavailable: ${state.runsIncomplete}</p>`
         : recent.map(
             (
               run,
             ) => h`<details class="card disclosure run-collapse" data-key="${`agents-${domKey(run.runId)}`}">
-              <summary><span class="mono">${run.runId}</span> ${liveness(run.liveness)} <span class="muted">${run.tickets.map((t) => `#${t}`).join(" ") || "no ticket sessions"}</span></summary>
+              <summary><span class="mono">${run.runId}</span> ${liveness(run.liveness)} <span class="muted">${run.tickets.map((t) => `#${t}`).join(" ") || (run.sessionsIncomplete === null ? "no ticket sessions" : "tickets unknown")}</span></summary>
               ${pipelinesOf(run, state).map(pipeline)}
               <h4>Session timeline</h4>${sessionTimeline(run)}
             </details>`,
@@ -127,11 +149,22 @@ const OUTCOME_TONE: Record<string, "ok" | "bad" | "warn" | "live" | "muted"> = {
   stale: "warn",
 };
 
-function runItem(summary: RunSummary) {
+function runItem(summary: RunSummary, state: DashboardState) {
   const { run } = summary;
   const tone = OUTCOME_TONE[summary.outcome] ?? "muted";
   const approved = summary.reviews.filter((r) => r.decision.verdict === "approved").length;
   const rejected = summary.reviews.length - approved;
+  const reviewsMissing = reviewsUncertain(state, { kind: "loop", run: run.runId });
+  const reviewCounts =
+    summary.reviews.length > 0
+      ? h`<span class="small">${approved > 0 ? badge(`${approved} approved`, "ok") : ""} ${rejected > 0 ? badge(`${rejected} rejected`, "bad") : ""}</span>`
+      : reviewsMissing === null
+        ? h`<span class="muted small">no reviews</span>`
+        : "";
+  const sessions =
+    run.sessionsIncomplete === null
+      ? h`<span class="muted small">${run.sessions.length} sessions</span>`
+      : badge("session records unavailable", "bad", run.sessionsIncomplete);
   return h`<li class="history-item">
     <span class="history-dot t-${tone}" aria-hidden="true"></span>
     <details class="card disclosure" data-key="${`run-${domKey(run.runId)}`}">
@@ -141,8 +174,8 @@ function runItem(summary: RunSummary) {
         <span class="muted">${formatDuration(summary.durationMs)}</span>
         <span class="chips">${run.tickets.map((t) => h`<span class="chip mono">#${t}</span>`)}</span>
         <span class="spacer"></span>
-        ${summary.reviews.length > 0 ? h`<span class="small">${approved > 0 ? badge(`${approved} approved`, "ok") : ""} ${rejected > 0 ? badge(`${rejected} rejected`, "bad") : ""}</span>` : h`<span class="muted small">no reviews</span>`}
-        <span class="muted small">${run.sessions.length} sessions</span>
+        ${reviewCounts}${reviewsMissing === null ? "" : badge("reviews unavailable", "bad", reviewsMissing)}
+        ${sessions}
       </summary>
       <div class="history-body">
         <dl class="kv">
@@ -188,10 +221,24 @@ export function runsView(state: DashboardState, now: number) {
   const reviewsWithoutRun = state.reviews.filter(
     (review) => !state.runs.some((run) => run.runId === review.run),
   );
+  // Counts over an incomplete list would read as totals; show what was read and say why it is not
+  // everything instead.
+  const incomplete = state.runsIncomplete;
+  const chips =
+    incomplete === null
+      ? h`${badge(`${counts.succeeded} succeeded`, "ok")} ${badge(`${counts.failed} failed`, "bad")} ${badge(`${counts.other} other`, "muted")}`
+      : h`${provenance("unavailable")} <span class="muted small">${summaries.length} runs read; the list is incomplete</span>`;
+  const list =
+    summaries.length > 0
+      ? h`<ol class="history">${summaries.map((s) => runItem(s, state))}</ol>`
+      : incomplete === null
+        ? card("No runs", empty("Nothing on record", "No run directories were found."))
+        : card(h`Run history ${provenance("unavailable")}`, h`<p class="muted">${incomplete}</p>`);
   return h`<div class="view-head"><div><h2>Run History</h2>
     <p class="muted">Runs in <code>.ralph/logs</code> and live sandboxes, newest first. Logs are kept 30 days.</p></div>
-    <div class="chips">${badge(`${counts.succeeded} succeeded`, "ok")} ${badge(`${counts.failed} failed`, "bad")} ${badge(`${counts.other} other`, "muted")}</div></div>
-    ${summaries.length === 0 ? card("No runs", empty("Nothing on record", "No run directories were found.")) : h`<ol class="history">${summaries.map(runItem)}</ol>`}
+    <div class="chips">${chips}</div></div>
+    ${incomplete !== null && summaries.length > 0 ? h`<p class="muted small">Run list incomplete: ${incomplete}</p>` : ""}
+    ${list}
     ${
       reviewsWithoutRun.length > 0
         ? h`<details class="card disclosure" data-key="host-reviews"><summary>Host reviews of sandbox runs (${reviewsWithoutRun.length})</summary>

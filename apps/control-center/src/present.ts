@@ -287,18 +287,60 @@ export function pipelinesOf(run: RunView, state: DashboardState): PipelineView[]
   return run.tickets.map((number) => pipelineFor(run, number, tickets.get(number), state.reviews));
 }
 
-export type ExecutionKind = "live" | "stale" | "idle";
+export type ExecutionKind = "live" | "stale" | "idle" | "unknown";
 
 /**
- * `live` while at least one run is active and recently written; `stale` when runs only claim to be
- * active; `idle` when no run claims to be active at all.
+ * `live` while at least one run is active and recently written. Otherwise `unknown`, with the
+ * reason, when the run list could not be fully read (a run nobody could list may be the live one),
+ * an active run's files could not all be listed (it may be writing them), or a run that may still
+ * be working has no usable run.json. Then `stale` when runs only claim to be active, and `idle`
+ * when no run claims to be active at all.
  */
-export function executionStatus(state: DashboardState): { kind: ExecutionKind; runs: RunView[] } {
+export function executionStatus(state: DashboardState): {
+  kind: ExecutionKind;
+  runs: RunView[];
+  reason: string | null;
+} {
   const runs = state.current.runs;
   if (runs.some((run) => run.liveness === "live")) {
-    return { kind: "live", runs };
+    return { kind: "live", runs, reason: null };
   }
-  return { kind: runs.length > 0 ? "stale" : "idle", runs };
+  const unchecked = runs.find((run) => run.liveness === "unknown");
+  const reason =
+    state.runsIncomplete ??
+    (unchecked
+      ? `run ${unchecked.runId}: ${unchecked.statusProblem ?? unchecked.sessionsIncomplete ?? "activity unknown"}`
+      : null);
+  if (reason !== null) {
+    return { kind: "unknown", runs, reason };
+  }
+  return { kind: runs.length > 0 ? "stale" : "idle", runs, reason: null };
+}
+
+/**
+ * Why a review of this kind may be missing for the run or ticket slug given; null when every
+ * review that could apply was read. A gap with no run or slug covers all of them.
+ */
+export function reviewsUncertain(
+  state: DashboardState,
+  scope: { kind: "loop" | "host"; run?: string; slug?: string },
+): string | null {
+  const gap = state.reviewGaps.find(
+    (g) =>
+      g.kind === scope.kind &&
+      (scope.run === undefined || g.run === null || g.run === scope.run) &&
+      (scope.slug === undefined || g.slug === null || g.slug === scope.slug),
+  );
+  return gap?.reason ?? null;
+}
+
+/** Why a ticket's latest agent phase may be missing: some run or session list is incomplete. */
+export function phasesUncertain(state: DashboardState): string | null {
+  if (state.runsIncomplete !== null) {
+    return state.runsIncomplete;
+  }
+  const run = state.runs.find((r) => r.sessionsIncomplete !== null);
+  return run ? `run ${run.runId}: ${run.sessionsIncomplete}` : null;
 }
 
 const time = (iso: string | null): number | null => {
@@ -349,7 +391,8 @@ export function runOutcome(run: RunView): string {
   if (run.liveness === "stale") {
     return "stale";
   }
-  return run.status ?? "unknown";
+  // An active run whose files could not all be listed: neither running, stale nor finished.
+  return run.liveness === "unknown" ? "unknown" : (run.status ?? "unknown");
 }
 
 export interface RunSummary {
@@ -404,10 +447,22 @@ const SESSION_TONE: Record<(typeof SESSION_STATUSES)[number], Tone> = {
 const sessionTone = (status: string): Tone =>
   (SESSION_TONE as Record<string, Tone | undefined>)[status] ?? "muted";
 
+const ACTIVITY_RUNS = 5;
+
+/** Why the activity feed may lack events; null when every source behind it was read. */
+export function activityIncomplete(state: DashboardState): string | null {
+  const run = state.runs.slice(0, ACTIVITY_RUNS).find((r) => r.sessionsIncomplete !== null);
+  return (
+    state.runsIncomplete ??
+    state.failuresIncomplete ??
+    (run ? `run ${run.runId}: ${run.sessionsIncomplete}` : null)
+  );
+}
+
 /** Newest first: sessions of the most recent runs, and recorded failures. Only timed events. */
 export function recentActivity(state: DashboardState, limit: number): ActivityItem[] {
   const items: ActivityItem[] = [];
-  for (const run of state.runs.slice(0, 5)) {
+  for (const run of state.runs.slice(0, ACTIVITY_RUNS)) {
     for (const session of run.sessions) {
       items.push({
         at: session.finished ?? session.started,

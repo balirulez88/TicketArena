@@ -25,13 +25,14 @@ import type {
   Gap,
   GitBranch,
   LockOwner,
+  Parsed,
   PauseState,
   Provenance,
   ReviewDecision,
   Session,
   Ticket,
 } from "./model";
-import type { RunFiles, Snapshot } from "./snapshot";
+import type { FileText, RunFiles, Snapshot } from "./snapshot";
 import { parseTicketFile } from "./tickets";
 
 export type Liveness = "live" | "stale" | "finished" | "unknown";
@@ -48,8 +49,25 @@ export interface RunView {
   startedAt: string | null;
   finishedAt: string | null;
   sessions: Session[];
-  /** The newest session still recorded as `running` (live or stale runs only). */
+  /** Why run.json gave no status (missing, unreadable or malformed); null when it did. */
+  statusProblem: string | null;
+  /** Whether a listing inside the run failed, so its file activity time may be too old. */
+  unlisted: boolean;
+  /** Why `sessions` may lack records (one unreadable or malformed); null when all were read. */
+  sessionsIncomplete: string | null;
+  /** The newest session still recorded as `running` (runs run.json calls active only). */
   current: Session | null;
+}
+
+/**
+ * A review decision that exists, or may exist, but could not be used. A null `run` or `slug`
+ * means any: a failed listing hides every review below it.
+ */
+export interface ReviewGap {
+  kind: "loop" | "host";
+  run: string | null;
+  slug: string | null;
+  reason: string;
 }
 
 export interface ReviewView {
@@ -102,18 +120,27 @@ export interface DashboardState {
   current: {
     runs: RunView[];
     batch: { provenance: Provenance; value: BatchState | null };
-    lock: { held: boolean; owner: LockOwner | null };
+    /** `held` is null when the lock directory could not be checked. */
+    lock: { held: boolean | null; owner: LockOwner | null };
     pauses: PauseState[];
-    pausedBranches: GitBranch[];
+    /** Why `pauses` may lack a pause record; null when every one was read. */
+    pausesIncomplete: string | null;
+    /** Null when Git could not list the branches. */
+    pausedBranches: GitBranch[] | null;
   };
   runs: RunView[];
+  /** Why `runs` may lack run directories (no .ralph/, a failed listing); null when complete. */
+  runsIncomplete: string | null;
   reviews: ReviewView[];
+  reviewGaps: ReviewGap[];
   debt: {
     entries: DebtEntry[];
     summary: Record<string, Record<string, number>>;
     held: { ticket: string; verdict: DebtVerdict }[];
   } | null;
   failures: FailureView[];
+  /** Why `failures` may lack entries (a source it is built from was unusable); null when complete. */
+  failuresIncomplete: string | null;
   gaps: Gap[];
 }
 
@@ -134,28 +161,77 @@ const newestFirst =
   (a: T, b: T) =>
     key(b).localeCompare(key(a));
 
-function sessionsOf(run: RunFiles, gaps: Gap[]): Session[] {
+const joined = (reasons: string[]): string | null =>
+  reasons.length === 0 ? null : [...new Set(reasons)].join("; ");
+
+/**
+ * Parses a file that may be absent (null) or unreadable. An unreadable file fails like a malformed
+ * one: its content is unknown either way, and the caller must not treat it as absent.
+ */
+function parseFile<T>(file: FileText, parse: (text: string) => Parsed<T>): Parsed<T> | null {
+  if (file === null) {
+    return null;
+  }
+  return typeof file === "string"
+    ? parse(file)
+    : { ok: false, reason: `unreadable: ${file.unreadable}` };
+}
+
+function sessionsOf(run: RunFiles, gaps: Gap[]): { sessions: Session[]; problems: string[] } {
   // sessions.tsv is the merged, final record; until the run ends only the per-process records
-  // exist, and a `running` one there is the session in progress.
+  // exist, and a `running` one there is the session in progress. An unreadable sessions.tsv is
+  // not "not merged yet": falling back to the per-process records would show a stale picture.
   const sources = run.sessionsTsv === null ? run.sessionRecords : [run.sessionsTsv];
   const sessions: Session[] = [];
-  for (const text of sources) {
-    const parsed = parseSessionsTsv(text);
-    if (parsed.ok) {
+  const problems = [...run.unlisted];
+  for (const file of sources) {
+    const parsed = parseFile(file, parseSessionsTsv);
+    if (parsed?.ok) {
       sessions.push(...parsed.value);
-    } else {
+    } else if (parsed) {
       gaps.push({ source: `run ${run.runId} session records`, reason: parsed.reason });
+      problems.push(parsed.reason);
     }
   }
-  return sessions.sort((a, b) => a.started.localeCompare(b.started));
+  return { sessions: sessions.sort((a, b) => a.started.localeCompare(b.started)), problems };
 }
 
 function livenessOf(status: string | null, run: RunFiles, now: number, staleAfterMs: number) {
   if (status === "active") {
-    const quiet = run.lastActivity === null || now - run.lastActivity > staleAfterMs;
-    return quiet ? "stale" : "live";
+    const recent = run.lastActivity !== null && now - run.lastActivity <= staleAfterMs;
+    if (recent) {
+      return "live";
+    }
+    // Quiet is a claim about every file in the run: with a listing failed, a file being written
+    // right now may be the one nobody saw, so the run is neither stale nor finished but unknown.
+    return run.unlisted.length > 0 ? "unknown" : "stale";
   }
   return status !== null && FINISHED_RUN.includes(status) ? "finished" : "unknown";
+}
+
+/**
+ * Every run run.json calls active (including one whose activity could not be checked), every run
+ * whose run.json exists but could not be read or parsed (it may say active; a live run can be
+ * quiet for a whole agent session), and every run without run.json that may still be working: one
+ * written to recently (run.json is written right after its directory), or one whose files could
+ * not all be listed. A fully listed run without run.json, quiet past the stale threshold, cannot
+ * be the live one and does not hold the execution status at unknown.
+ */
+const MISSING = "missing";
+const MISSING_RUN_JSON = `run.json ${MISSING}`;
+
+function mayBeActive(run: RunView, now: number, staleAfterMs: number): boolean {
+  if (run.status === "active") {
+    return true;
+  }
+  if (run.status !== null) {
+    return false;
+  }
+  if (run.statusProblem !== MISSING_RUN_JSON) {
+    return true;
+  }
+  const recent = run.lastActivity !== null && now - run.lastActivity <= staleAfterMs;
+  return recent || run.unlisted;
 }
 
 const PROVENANCE: Record<Liveness, Provenance> = {
@@ -166,14 +242,13 @@ const PROVENANCE: Record<Liveness, Provenance> = {
 };
 
 export function mapRun(run: RunFiles, now: number, staleAfterMs: number, gaps: Gap[]): RunView {
-  const record = run.runJson === null ? null : parseRunJson(run.runJson);
-  if (record === null) {
-    gaps.push({ source: `run ${run.runId} run.json`, reason: "missing" });
-  } else if (!record.ok) {
-    gaps.push({ source: `run ${run.runId} run.json`, reason: record.reason });
+  const record = parseFile(run.runJson, parseRunJson);
+  const statusProblem = record === null ? MISSING : record.ok ? null : record.reason;
+  if (statusProblem !== null) {
+    gaps.push({ source: `run ${run.runId} run.json`, reason: statusProblem });
   }
   const status = record?.ok ? record.value.status : null;
-  const sessions = sessionsOf(run, gaps);
+  const { sessions, problems } = sessionsOf(run, gaps);
   const liveness = livenessOf(status, run, now, staleAfterMs);
   const running = sessions.filter((session) => session.status === "running");
   const tickets = [
@@ -192,21 +267,33 @@ export function mapRun(run: RunFiles, now: number, staleAfterMs: number, gaps: G
     startedAt: sessions[0]?.started ?? (record?.ok ? record.value.startedAt : null),
     finishedAt: record?.ok && liveness === "finished" ? record.value.finishedAt : null,
     sessions,
-    current: liveness === "live" || liveness === "stale" ? (running.at(-1) ?? null) : null,
+    statusProblem: statusProblem === null ? null : `run.json ${statusProblem}`,
+    unlisted: run.unlisted.length > 0,
+    sessionsIncomplete: joined(problems),
+    current: status === "active" ? (running.at(-1) ?? null) : null,
   };
 }
 
-function collectReviews(snapshot: Snapshot, gaps: Gap[]): ReviewView[] {
+// The host writes decision.json last; a folder without one is a review in progress or one that
+// stopped before deciding. Either way it is not "no review".
+const NO_HOST_DECISION = "no decision.json (review still running, or it stopped before deciding)";
+
+function collectReviews(snapshot: Snapshot, gaps: Gap[]) {
   const reviews: ReviewView[] = [];
-  const add = (view: Omit<ReviewView, "decision">, text: string, source: string) => {
-    const decision = parseDecision(text);
+  const reviewGaps: ReviewGap[] = [];
+  const add = (view: Omit<ReviewView, "decision">, file: FileText, source: string) => {
+    const decision = parseFile(file, parseDecision) ?? { ok: false, reason: NO_HOST_DECISION };
     if (decision.ok) {
       reviews.push({ ...view, decision: decision.value });
     } else {
       gaps.push({ source, reason: decision.reason });
+      reviewGaps.push({ kind: view.kind, run: view.run, slug: view.slug, reason: decision.reason });
     }
   };
   for (const run of snapshot.runs) {
+    for (const reason of run.unlisted) {
+      reviewGaps.push({ kind: "loop", run: run.runId, slug: null, reason });
+    }
     for (const { name, text } of run.decisions) {
       const match = /^(.+)\.review-(\d+)\.decision\.json$/.exec(name);
       if (match?.[1] && match[2]) {
@@ -215,12 +302,21 @@ function collectReviews(snapshot: Snapshot, gaps: Gap[]): ReviewView[] {
       }
     }
   }
+  for (const reason of snapshot.incomplete.runs) {
+    reviewGaps.push({ kind: "loop", run: null, slug: null, reason });
+  }
+  for (const reason of snapshot.incomplete.hostReviews) {
+    reviewGaps.push({ kind: "host", run: null, slug: null, reason });
+  }
   for (const { run, slug, text } of snapshot.hostReviews) {
     add({ kind: "host", run, slug, round: null }, text, `host review ${run}/${slug}`);
   }
-  return reviews.sort(
-    (a, b) => timeKey(b.run).localeCompare(timeKey(a.run)) || (b.round ?? 0) - (a.round ?? 0),
-  );
+  return {
+    reviews: reviews.sort(
+      (a, b) => timeKey(b.run).localeCompare(timeKey(a.run)) || (b.round ?? 0) - (a.round ?? 0),
+    ),
+    reviewGaps,
+  };
 }
 
 function collectTickets(snapshot: Snapshot): Ticket[] | null {
@@ -315,15 +411,16 @@ function runFailures(runs: RunView[]): FailureView[] {
   return failures;
 }
 
-function sandboxFailures(snapshot: Snapshot, gaps: Gap[]): FailureView[] {
+function sandboxFailures(snapshot: Snapshot, gaps: Gap[], problems: string[]): FailureView[] {
   const failures: FailureView[] = [];
   for (const sandbox of snapshot.sandboxes) {
-    if (sandbox.verdict === null) {
+    const verdict = parseFile(sandbox.verdict, parseSandboxVerdict);
+    if (verdict === null) {
       continue;
     }
-    const verdict = parseSandboxVerdict(sandbox.verdict);
     if (!verdict.ok) {
       gaps.push({ source: `sandbox ${sandbox.id} verdict.json`, reason: verdict.reason });
+      problems.push(`sandbox ${sandbox.id} verdict.json: ${verdict.reason}`);
     } else if (verdict.value.exit !== 0) {
       failures.push({
         // The verdict file's own time: sandbox ids are host-local timestamps without a zone.
@@ -374,13 +471,18 @@ function batchFailure(batch: BatchState | null): FailureView[] {
 const byTimeNewestFirst = (a: FailureView, b: FailureView): number =>
   (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0);
 
-function readBatch(snapshot: Snapshot, gaps: Gap[]): DashboardState["current"]["batch"] {
-  if (snapshot.batch.state === null) {
+function readBatch(
+  snapshot: Snapshot,
+  gaps: Gap[],
+  problems: string[],
+): DashboardState["current"]["batch"] {
+  const parsed = parseFile(snapshot.batch.state, parseBatchState);
+  if (parsed === null) {
     return { provenance: "unavailable", value: null };
   }
-  const parsed = parseBatchState(snapshot.batch.state);
   if (!parsed.ok) {
     gaps.push({ source: ".ralph/batch/state.json", reason: parsed.reason });
+    problems.push(`.ralph/batch/state.json: ${parsed.reason}`);
     return { provenance: "unavailable", value: null };
   }
   // ralph-batch.mjs leaves a resumable batch `running` after it stops (a pause, a killed host), so
@@ -392,23 +494,27 @@ function readBatch(snapshot: Snapshot, gaps: Gap[]): DashboardState["current"]["
 function readLock(snapshot: Snapshot, gaps: Gap[]): DashboardState["current"]["lock"] {
   const { lock } = snapshot.batch;
   if (lock === null) {
-    return { held: false, owner: null };
+    return { held: snapshot.incomplete.lock.length > 0 ? null : false, owner: null };
   }
-  const owner = lock.owner === null ? null : parseLockOwner(lock.owner);
+  const owner = parseFile(lock.owner, parseLockOwner);
   if (owner !== null && !owner.ok) {
     gaps.push({ source: ".ralph/batch/lock/owner.json", reason: owner.reason });
   }
   return { held: true, owner: owner?.ok ? owner.value : null };
 }
 
-function readPauses(snapshot: Snapshot, gaps: Gap[]): PauseState[] {
-  return snapshot.pauses.flatMap(({ name, text }) => {
-    const parsed = parsePause(text);
+function readPauses(snapshot: Snapshot, gaps: Gap[]) {
+  const problems = [...snapshot.incomplete.pauses];
+  const pauses = snapshot.pauses.flatMap(({ name, text }) => {
+    // Listed, so never absent: a null here would only mean it vanished, which is unknown too.
+    const parsed = parseFile(text, parsePause) ?? { ok: false, reason: "missing" };
     if (!parsed.ok) {
       gaps.push({ source: `.ralph/state/${name}`, reason: parsed.reason });
+      problems.push(`.ralph/state/${name}: ${parsed.reason}`);
     }
     return parsed.ok ? [parsed.value] : [];
   });
+  return { pauses, incomplete: joined(problems) };
 }
 
 async function readDebt(snapshot: Snapshot, tickets: Ticket[] | null, gaps: Gap[]) {
@@ -435,9 +541,22 @@ export async function buildState(
   const runs = snapshot.runs
     .map((run) => mapRun(run, now, options.staleAfterMs, gaps))
     .sort(newestFirst((run) => timeKey(run.runId)));
-  const reviews = collectReviews(snapshot, gaps);
-  const batch = readBatch(snapshot, gaps);
-  const pauses = readPauses(snapshot, gaps);
+  const { reviews, reviewGaps } = collectReviews(snapshot, gaps);
+  // Every source the failure list is built from that could not be fully used.
+  const failureProblems = [...snapshot.incomplete.runs];
+  for (const run of runs) {
+    if (run.sessionsIncomplete !== null) {
+      failureProblems.push(`run ${run.runId} sessions: ${run.sessionsIncomplete}`);
+    }
+    if (run.status === null) {
+      failureProblems.push(`run ${run.runId} run.json unusable`);
+    }
+  }
+  if (snapshot.branches === null) {
+    failureProblems.push("git branches rejected/* could not be listed");
+  }
+  const batch = readBatch(snapshot, gaps, failureProblems);
+  const { pauses, incomplete: pausesIncomplete } = readPauses(snapshot, gaps);
   const tickets = collectTickets(snapshot);
   const debt = await readDebt(snapshot, tickets, gaps);
 
@@ -450,8 +569,8 @@ export async function buildState(
   };
   const failures = [
     ...runFailures(runs),
-    ...sandboxFailures(snapshot, gaps),
-    ...branchFailures(snapshot.branches),
+    ...sandboxFailures(snapshot, gaps, failureProblems),
+    ...branchFailures(snapshot.branches ?? []),
     ...batchFailure(batch.value),
   ]
     .sort(byTimeNewestFirst)
@@ -463,14 +582,17 @@ export async function buildState(
     staleAfterMinutes: Math.round(options.staleAfterMs / 60_000),
     tickets: tickets?.map((ticket) => viewTicket(ticket, context)) ?? null,
     current: {
-      runs: runs.filter((run) => run.liveness === "live" || run.liveness === "stale"),
+      runs: runs.filter((run) => mayBeActive(run, now, options.staleAfterMs)),
       batch,
       lock: readLock(snapshot, gaps),
       pauses,
-      pausedBranches: snapshot.branches.filter((b) => b.name.startsWith("ralph/paused/")),
+      pausesIncomplete,
+      pausedBranches: snapshot.branches?.filter((b) => b.name.startsWith("ralph/paused/")) ?? null,
     },
     runs,
+    runsIncomplete: joined(snapshot.incomplete.runs),
     reviews,
+    reviewGaps,
     debt: debt && {
       entries: debt.entries,
       summary: summarize(debt.entries),
@@ -480,6 +602,7 @@ export async function buildState(
         .sort((a, b) => a.ticket.localeCompare(b.ticket)),
     },
     failures,
+    failuresIncomplete: joined(failureProblems),
     gaps,
   };
 }

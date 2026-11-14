@@ -21,6 +21,7 @@ import {
 } from "./components";
 import { domKey, type Html, h, raw } from "./html";
 import {
+  activityIncomplete,
   boardColumns,
   DEBT_STATUSES,
   debtCounts,
@@ -29,9 +30,11 @@ import {
   eligibilityOf,
   executionStatus,
   formatDuration,
+  phasesUncertain,
   pipelinesOf,
   prioritizedDebt,
   recentActivity,
+  reviewsUncertain,
   severityDistribution,
   summarizeRun,
   ticketCounts,
@@ -59,8 +62,17 @@ const OUTCOME_TONE: Record<string, BadgeTone> = {
   stale: "warn",
 };
 
-const EXECUTION_TONE = { live: "live", stale: "warn", idle: "muted" } as const;
-const EXECUTION_LABEL = { live: "Run active", stale: "Run stale", idle: "Idle" } as const;
+const EXECUTION_TONE = { live: "live", stale: "warn", idle: "muted", unknown: "bad" } as const;
+const EXECUTION_LABEL = {
+  live: "Run active",
+  stale: "Run stale",
+  idle: "Idle",
+  unknown: "Run state unknown",
+} as const;
+
+/** A value that could not be read: the UNAVAILABLE tag and why, never a stand-in like "none". */
+const unavailable = (reason: string) =>
+  h`${provenance("unavailable")} <span class="muted small">${reason}</span>`;
 
 // ---------------------------------------------------------------------------------------------
 // Overview
@@ -108,7 +120,30 @@ function executionCard(state: DashboardState, now: number) {
       text: `No file changed for over ${state.staleAfterMinutes} min. It may have been killed; process liveness is not checked.`,
     },
     idle: { title: "No run is active", text: "No run.json claims active." },
+    unknown: {
+      title: "Run state unknown",
+      text: `Run artifacts could not be fully read, so a run may be active: ${execution.reason ?? ""}`,
+    },
   }[execution.kind];
+  const lockText =
+    lock.held === null
+      ? unavailable("the lock directory could not be checked")
+      : lock.held
+        ? h`${badge("held", "live")} pid ${lock.owner?.pid ?? "unknown"} on ${lock.owner?.host ?? "unknown host"} <span class="muted small">(holder not verified)</span>`
+        : h`<span class="muted">not held</span>`;
+  const pausesText = h`${pauses.map((p) => h`<div>${ticketLink(p.ticket)} ${p.reason} in ${p.phase} <span class="muted small">run ${p.run}</span></div>`)}${
+    state.current.pausesIncomplete !== null
+      ? unavailable(state.current.pausesIncomplete)
+      : pauses.length === 0
+        ? h`<span class="muted">none</span>`
+        : ""
+  }`;
+  const branchesText =
+    pausedBranches === null
+      ? unavailable("Git could not list the branches")
+      : pausedBranches.length === 0
+        ? h`<span class="muted">none</span>`
+        : pausedBranches.map((b) => h`<div><code>${b.name}</code></div>`);
   return h`<section class="card hero hero-${execution.kind}">
     <div class="hero-main">
       <span class="pulse t-${EXECUTION_TONE[execution.kind]}" aria-hidden="true"></span>
@@ -119,25 +154,30 @@ function executionCard(state: DashboardState, now: number) {
         h`<div class="hero-run"><span class="mono">${run.runId}</span> ${liveness(run.liveness)} ${run.current ? h`<code>${run.current.label}</code> ${sessionStatus(run.current.status)}` : ""} <span class="muted small">files changed ${ago(run.lastActivity, now)}</span></div>`,
     )}
     <dl class="kv compact">
-      <dt>Batch lock</dt><dd>${lock.held ? h`${badge("held", "live")} pid ${lock.owner?.pid ?? "unknown"} on ${lock.owner?.host ?? "unknown host"} <span class="muted small">(holder not verified)</span>` : h`<span class="muted">not held</span>`}</dd>
+      <dt>Batch lock</dt><dd>${lockText}</dd>
       <dt>Last batch</dt><dd>${batch.value ? h`${provenance(batch.provenance)} <code>${batch.value.batch}</code> <code>${batch.value.status}</code>${batch.value.stop ? h` · stopped <code>${batch.value.stop.reason}</code>` : ""}` : provenance("unavailable")}</dd>
-      <dt>Paused</dt><dd>${pauses.length === 0 ? h`<span class="muted">none</span>` : pauses.map((p) => h`<div>${ticketLink(p.ticket)} ${p.reason} in ${p.phase} <span class="muted small">run ${p.run}</span></div>`)}</dd>
-      <dt>Parked branches</dt><dd>${pausedBranches.length === 0 ? h`<span class="muted">none</span>` : pausedBranches.map((b) => h`<div><code>${b.name}</code></div>`)}</dd>
+      <dt>Paused</dt><dd>${pausesText}</dd>
+      <dt>Parked branches</dt><dd>${branchesText}</dd>
     </dl>
   </section>`;
 }
 
 function latestRunCard(state: DashboardState, now: number) {
   const run = state.runs[0];
+  // With an incomplete run list, the newest run read is not necessarily the latest run.
+  const incomplete = state.runsIncomplete;
   if (run === undefined) {
-    return card("Latest run", empty("No runs on record", "Nothing in .ralph/logs or sandboxes."));
+    return incomplete === null
+      ? card("Latest run", empty("No runs on record", "Nothing in .ralph/logs or sandboxes."))
+      : card(h`Latest run ${provenance("unavailable")}`, h`<p class="muted">${incomplete}</p>`);
   }
   const summary = summarizeRun(run, state, now);
+  const reviewsMissing = reviewsUncertain(state, { kind: "loop", run: run.runId });
   return card(
-    h`Latest run <span class="mono muted">${run.runId}</span>`,
-    h`<div class="meta-row">${badge(summary.outcome, OUTCOME_TONE[summary.outcome] ?? "muted")}
+    h`Latest run <span class="mono muted">${run.runId}</span>${incomplete === null ? "" : h` ${provenance("unavailable")}`}`,
+    h`${incomplete === null ? "" : h`<p class="muted small">Newest run read; the run list is incomplete: ${incomplete}</p>`}<div class="meta-row">${badge(summary.outcome, OUTCOME_TONE[summary.outcome] ?? "muted")}
       <span class="muted">duration ${summary.outcome === "running" ? "so far " : ""}${formatDuration(summary.durationMs)}</span>
-      <span class="muted">${summary.reviews.length} reviews</span></div>
+      ${reviewsMissing === null ? h`<span class="muted">${summary.reviews.length} reviews</span>` : badge("reviews unavailable", "bad", reviewsMissing)}</div>
       ${summary.rejections.length > 0 ? h`<ul class="reasons">${summary.rejections.slice(0, 3).map((r) => h`<li>${r}</li>`)}</ul>` : ""}
       ${pipelinesOf(run, state).slice(0, 2).map(pipeline)}`,
     h`<a class="link small" href="#runs">History →</a>`,
@@ -171,11 +211,14 @@ function debtBlockersCard(state: DashboardState) {
 
 function activityCard(state: DashboardState) {
   const items = recentActivity(state, 10);
+  const incomplete = activityIncomplete(state);
   return card(
-    h`Recent activity ${provenance("historical")}`,
+    h`Recent activity ${provenance("historical")}${incomplete === null ? "" : h` ${provenance("unavailable")}`}`,
     items.length === 0
-      ? empty("Quiet", "No timed sessions or failures on record.")
-      : h`<ol class="feed">${items.map(
+      ? incomplete === null
+        ? empty("Quiet", "No timed sessions or failures on record.")
+        : empty("Activity unavailable", incomplete, "bad")
+      : h`${incomplete === null ? "" : h`<p class="muted small">Some sources could not be read: ${incomplete}</p>`}<ol class="feed">${items.map(
           (item) =>
             h`<li>${dot(item.tone)}<div><div>${item.title}</div><div class="muted small">${when(item.at)} · ${item.detail}</div></div></li>`,
         )}</ol>`,
@@ -355,10 +398,15 @@ function debtView(state: DashboardState) {
 // ---------------------------------------------------------------------------------------------
 // Detail drawer
 
-const reviewBlock = (review: TicketView["review"]["loop"]) =>
-  review
-    ? h`${verdict(review.decision.verdict)} <span class="muted small">${review.run}${review.round === null ? "" : ` r${review.round}`}</span>${review.decision.blockers.map((b) => h`<div class="small">[${b.severity}] ${b.axis}: ${b.title}</div>`)}`
-    : h`<span class="muted">none on record</span>`;
+/** `missing`: why a newer or other review may exist unread; then "none" is not a claim to make. */
+const reviewBlock = (review: TicketView["review"]["loop"], missing: string | null) =>
+  h`${
+    review
+      ? h`${verdict(review.decision.verdict)} <span class="muted small">${review.run}${review.round === null ? "" : ` r${review.round}`}</span>${review.decision.blockers.map((b) => h`<div class="small">[${b.severity}] ${b.axis}: ${b.title}</div>`)}`
+      : missing === null
+        ? h`<span class="muted">none on record</span>`
+        : ""
+  }${missing === null ? "" : h`<div>${unavailable(missing)}</div>`}`;
 
 function debtGateBlock(ticket: TicketView) {
   if (ticket.status === "done") {
@@ -370,9 +418,16 @@ function debtGateBlock(ticket: TicketView) {
   return h`${badge(ticket.debt.state, verdictTone(ticket.debt.state))}<ul class="reasons">${ticket.debt.reasons.map((r) => h`<li>${r}</li>`)}</ul>`;
 }
 
-function ticketDetail(ticket: TicketView) {
+function ticketDetail(ticket: TicketView, state: DashboardState) {
   const eligibility = eligibilityOf(ticket);
   const key = ticketKey(ticket.number);
+  const phasesMissing = phasesUncertain(state);
+  const phase =
+    ticket.phase !== null
+      ? h`${liveness(ticket.phase.liveness)} <code>${ticket.phase.session.label}</code> ${sessionStatus(ticket.phase.session.status)} <span class="muted small">run ${ticket.phase.runId}</span>`
+      : phasesMissing === null
+        ? h`<span class="muted">no run logs</span>`
+        : unavailable(phasesMissing);
   return h`<article class="detail" id="d-${key}" data-detail-id="${key}">
     <p class="mono muted">Ticket #${ticket.number} · ${ticket.location === "done" ? "issues/done" : "issues"}</p>
     <h3>${ticket.title}</h3>
@@ -381,9 +436,9 @@ function ticketDetail(ticket: TicketView) {
       <dt>Eligibility</dt><dd>${eligibility === "not-applicable" ? h`<span class="muted">only computed for ready-for-agent</span>` : eligibilityBadge(eligibility)}</dd>
       <dt>Blocked by</dt><dd>${ticket.blockers.length === 0 ? h`<span class="muted">none</span>` : ticket.blockers.map((b) => h`<div>${ticketLink(b.number)} ${b.status === null ? badge("no such ticket", "bad") : badge(b.status, b.status === "done" ? "ok" : "warn")}</div>`)}</dd>
       <dt>Debt gate</dt><dd>${debtGateBlock(ticket)}</dd>
-      <dt>Agent phase</dt><dd>${ticket.phase === null ? h`<span class="muted">no run logs</span>` : h`${liveness(ticket.phase.liveness)} <code>${ticket.phase.session.label}</code> ${sessionStatus(ticket.phase.session.status)} <span class="muted small">run ${ticket.phase.runId}</span>`}</dd>
-      <dt>Loop review</dt><dd>${reviewBlock(ticket.review.loop)}</dd>
-      <dt>Host review</dt><dd>${reviewBlock(ticket.review.host)}</dd>
+      <dt>Agent phase</dt><dd>${phase}</dd>
+      <dt>Loop review</dt><dd>${reviewBlock(ticket.review.loop, reviewsUncertain(state, { kind: "loop", slug: ticket.slug }))}</dd>
+      <dt>Host review</dt><dd>${reviewBlock(ticket.review.host, reviewsUncertain(state, { kind: "host", slug: ticket.slug }))}</dd>
       ${ticket.pause ? h`<dt>Paused</dt><dd>${ticket.pause.reason} in ${ticket.pause.phase} (attempt ${ticket.pause.attempt}, round ${ticket.pause.round}), run ${ticket.pause.run}</dd>` : ""}
       ${ticket.completion ? h`<dt>Completed</dt><dd>${ticket.completion.date} · <code>${ticket.completion.branch}</code> · run ${ticket.completion.run}</dd>` : ""}
       <dt>Criteria</dt><dd>${ticket.criteria.checked}/${ticket.criteria.total} checked</dd>
@@ -416,10 +471,10 @@ function debtDetails(debt: NonNullable<DashboardState["debt"]>) {
 
 function drawer(state: DashboardState) {
   return h`<div class="drawer" id="drawer">
-    <a class="scrim" href="#" data-close aria-label="Close details"></a>
+    <a class="scrim" href="#" data-close tabindex="-1" aria-hidden="true"></a>
     <aside class="panel" aria-label="Details">
       <a class="close" href="#" data-close aria-label="Close details">✕</a>
-      <div data-region="details">${(state.tickets ?? []).map(ticketDetail)}${state.debt ? debtDetails(state.debt) : ""}</div>
+      <div data-region="details">${(state.tickets ?? []).map((ticket) => ticketDetail(ticket, state))}${state.debt ? debtDetails(state.debt) : ""}</div>
     </aside>
   </div>`;
 }
@@ -437,7 +492,13 @@ function nav(state: DashboardState) {
     ${item("board", "Ticket Board", counts ? h`<span class="count" title="tickets not done">${counts.total - counts.done}</span>` : "")}
     ${item("agents", "Agent Activity", dot(EXECUTION_TONE[execution.kind]))}
     ${item("debt", "Technical Debt", held > 0 ? h`<span class="count t-warn" title="tickets held">${held}</span>` : "")}
-    ${item("runs", "Run History", h`<span class="count">${state.runs.length}</span>`)}`;
+    ${item(
+      "runs",
+      "Run History",
+      state.runsIncomplete === null
+        ? h`<span class="count" title="runs on record">${state.runs.length}</span>`
+        : h`<span class="count t-bad" title="${`run list incomplete: ${state.runsIncomplete}`}">?</span>`,
+    )}`;
 }
 
 export function renderPage(state: DashboardState, options: { refreshSeconds: number }): string {
@@ -458,7 +519,7 @@ export function renderPage(state: DashboardState, options: { refreshSeconds: num
   <div class="nav" data-region="nav">${nav(state)}</div>
   <div class="sidebar-foot small muted" data-region="source">
     <div>${badge("read-only", "info")}</div>
-    <div>ref <code>${state.source.ref}</code> @ <code>${state.source.commit?.slice(0, 10) ?? "missing"}</code></div>
+    <div>ref <code>${state.source.ref}</code> @ <code>${state.source.commit?.slice(0, 10) ?? "unresolved"}</code></div>
     <div class="clamp" title="${state.source.root}">${state.source.root}</div>
   </div>
 </nav>

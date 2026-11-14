@@ -58,7 +58,7 @@ is stale.
 
 | Shown                   | Source                                                                                                                                           | Label                   |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
-| Ticket status, blockers | `issues/*.md`, `issues/done/*.md` **at the ref** (`git ls-tree`/`cat-file`), not the working tree                                                | live                    |
+| Ticket status, blockers | `issues/*.md`, `issues/done/*.md` **at the ref's commit** (`git ls-tree`/`cat-file`), not the working tree                                       | live                    |
 | Debt gate verdicts      | `docs/technical-debt.md` at the ref, through `scripts/ralph-debt.mjs` `debtGate` (Ralph's own code)                                              | live                    |
 | Selectable              | Ralph's selection rule: `ready-for-agent`, all blockers `done`, debt gate `clear`                                                                | derived                 |
 | Runs, agent phase       | `.ralph/logs/<run>/run.json`, `sessions.tsv`, `sessions/*.tsv`; runs still inside `.ralph/sandbox/<id>/out/logs/`                                | live / stale / finished |
@@ -78,6 +78,22 @@ is stale.
 - **A batch is live only with its lock.** `ralph-batch.mjs` leaves a resumable batch `running`.
 - **Logs expire.** `.ralph/logs` is kept 30 days, so older tickets show "no run logs" or "none on
   record" rather than a guessed history.
+- **A failed read is not an empty one.** "none", "0", "Idle" and "Quiet" appear only when every
+  source behind them was read. Without `.ralph/`, or when a directory cannot be listed, a file
+  cannot be read or parsed, a host review has no `decision.json` yet, or Git cannot list the
+  branches, the value is shown as `UNAVAILABLE` with the reason. The execution status becomes
+  "Run state unknown", with the reason, unless a live run was found, when the run list is
+  incomplete, when an `active` run's files cannot all be listed, when a run's `run.json` exists but
+  cannot be read or parsed (it is rewritten in place, so a refresh can catch it truncated), or when
+  a run without `run.json` was written within `--stale-after` or could not be fully listed. A fully
+  listed run without `run.json`, quiet for longer, cannot be the live one.
+- **Only loopback names are answered.** A request whose `Host` is not `127.0.0.1`, `localhost` or
+  `[::1]` on the served port gets `421`, so a DNS-rebinding page cannot read the state.
+- **One commit per refresh.** The ref is resolved once (`git rev-parse --verify`), and tickets and
+  the register are read from that commit, so a ref that moves mid-refresh cannot mix two versions.
+  A ref Git cannot resolve is "not found when read" (it may also have been rewritten at that
+  moment); any other Git failure is shown with Git's own message. Nothing is retried: the next
+  refresh reads again.
 
 ## Tests
 
@@ -87,4 +103,8 @@ pipeline stages, durations, debt ranking), the client's navigation, filter and r
 the HTML escaping and the absence of inline script, the GET-only server and its CSP, configuration,
 and an integration test on a real temporary Git repository. That test proves reads come from the
 ref, ignore an inherited `GIT_DIR`, and leave the repository (including `.git`) byte-for-byte
-unchanged.
+unchanged. It also covers Git failures (a missing ref, a permission error and a transient failure,
+through an injected Git runner) and a ref that moves mid-snapshot. `availability.test.ts` covers
+each unavailable source end to end, from snapshot to page; `style.test.ts` guards the grid tracks
+against page-wide horizontal overflow; `client/dashboard-dom.test.ts` covers view switching and
+drawer focus against a minimal stand-in DOM.

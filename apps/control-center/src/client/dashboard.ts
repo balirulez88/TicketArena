@@ -83,7 +83,11 @@ function all<T extends Element>(root: ParentNode, selector: string): T[] {
   return [...root.querySelectorAll<T>(selector)];
 }
 
-function showView(doc: Document, hash: string): void {
+/**
+ * Shows the view the hash names and marks its nav link current, without scrolling. A refresh
+ * calls this too: the server's nav markup never marks a link current.
+ */
+export function markView(doc: Document, hash: string): void {
   const view = viewFromHash(hash);
   for (const section of all<HTMLElement>(doc, "[data-view]")) {
     section.hidden = section.dataset["view"] !== view;
@@ -95,6 +99,34 @@ function showView(doc: Document, hash: string): void {
       link.removeAttribute("aria-current");
     }
   }
+}
+
+/**
+ * Shows the view the hash names and scrolls to the top. Following the `#view` anchor instead
+ * would put the section's heading under the sticky top bar.
+ */
+export function switchView(doc: Document, win: Window, hash: string): void {
+  markView(doc, hash);
+  win.scrollTo(0, 0);
+}
+
+// Nav and in-page view links (`#board`, `#debt`) switch views here rather than letting the browser
+// jump to the anchor; the history entry keeps Back and a reload on the same view.
+function wireNavigation(doc: Document, win: Window): void {
+  doc.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const link = target?.closest<HTMLAnchorElement>('a[href^="#"]');
+    const hash = link?.getAttribute("href") ?? "";
+    if (!link || link.hasAttribute("data-detail") || viewFromHash(hash) !== hash.slice(1)) {
+      return;
+    }
+    event.preventDefault();
+    if (win.location.hash !== hash) {
+      win.history.pushState(null, "", hash);
+    }
+    switchView(doc, win, hash);
+  });
+  win.addEventListener("hashchange", () => switchView(doc, win, win.location.hash));
 }
 
 const FILTER_FIELDS = ["board-search", "board-status", "board-eligibility"] as const;
@@ -130,7 +162,7 @@ function applyFilters(doc: Document): void {
 }
 
 /** The detail drawer. `show` returns whether a detail with that id exists on the page. */
-function createDrawer(doc: Document) {
+export function createDrawer(doc: Document) {
   const drawer = doc.getElementById("drawer");
   let current: string | null = null;
   let returnFocus: HTMLElement | null = null;
@@ -151,7 +183,9 @@ function createDrawer(doc: Document) {
     open(opener: HTMLElement, id: string) {
       returnFocus = opener;
       if (show(id)) {
-        drawer?.querySelector<HTMLElement>("[data-close]")?.focus();
+        // The visible ✕, not the first [data-close]: that is the full-screen scrim, which has
+        // no visible focus ring and would leave keyboard users nowhere.
+        drawer?.querySelector<HTMLElement>(".close[data-close]")?.focus();
       }
     },
     close() {
@@ -187,7 +221,7 @@ function wireDrawer(doc: Document, drawer: Drawer): void {
  * Replaces each `[data-region]` with its fresh copy, keeping what the reader did: the open
  * `<details>`, the board filters (they live outside the regions) and the open drawer entry.
  */
-function swapRegions(doc: Document, next: Document, drawer: Drawer): void {
+function swapRegions(doc: Document, next: Document, drawer: Drawer, hash: string): void {
   const open = new Set(
     all<HTMLDetailsElement>(doc, "details[data-key]")
       .filter((details) => details.open)
@@ -205,6 +239,7 @@ function swapRegions(doc: Document, next: Document, drawer: Drawer): void {
   for (const details of all<HTMLDetailsElement>(doc, "details[data-key]")) {
     details.open = open.has(details.dataset["key"]);
   }
+  markView(doc, hash);
   applyFilters(doc);
   drawer.show(drawer.current());
 }
@@ -243,7 +278,7 @@ function wireRefresh(doc: Document, win: Window, drawer: Drawer): void {
         throw new Error(`HTTP ${response.status}`);
       }
       const next = new DOMParser().parseFromString(await response.text(), "text/html");
-      swapRegions(doc, next, drawer);
+      swapRegions(doc, next, drawer, win.location.hash);
       status.loadedAt = Date.now();
       status.failed = false;
     } catch {
@@ -282,8 +317,8 @@ function boot(doc: Document): void {
   }
   doc.documentElement.classList.add("js");
   const drawer = createDrawer(doc);
-  win.addEventListener("hashchange", () => showView(doc, win.location.hash));
-  showView(doc, win.location.hash);
+  wireNavigation(doc, win);
+  switchView(doc, win, win.location.hash);
   for (const id of FILTER_FIELDS) {
     doc.getElementById(id)?.addEventListener("input", () => applyFilters(doc));
   }

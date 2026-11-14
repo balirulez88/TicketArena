@@ -130,6 +130,16 @@ describe("renderPage", () => {
   });
 });
 
+describe("detail drawer markup", () => {
+  it("keeps the full-screen scrim out of the tab order; the visible close button takes focus", async () => {
+    const html = renderPage(await buildState(snapshot({}), OPTIONS), { refreshSeconds: 0 });
+    expect(html).toContain(
+      '<a class="scrim" href="#" data-close tabindex="-1" aria-hidden="true"></a>',
+    );
+    expect(html).toContain('<a class="close" href="#" data-close aria-label="Close details">');
+  });
+});
+
 describe("escapeHtml", () => {
   it("escapes the five HTML-significant characters", () => {
     expect(escapeHtml(`<a href="x" title='y'>&</a>`)).toBe(

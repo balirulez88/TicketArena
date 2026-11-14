@@ -1,0 +1,21 @@
+{
+  "name": "@ticketarena/control-center",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Read-only dashboard over the Ralph workflow's repository artifacts and run logs.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "6.0.3",
+    "vitest": "5.0.5"
+  }
+}

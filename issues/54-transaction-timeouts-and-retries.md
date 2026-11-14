@@ -8,6 +8,12 @@
 
 **Status:** blocked
 
+**Stays blocked until its dependency recovery is implemented and verified (maintainer decision, 2026-11-14):** the 2026-11-08 run was quarantined by the container before host review because its RED tests needed `@neondatabase/serverless` as a devDependency of `packages/booking`, which the base did not have; Ralph cannot add a dependency and prove RED in one run, and no replay route exists for a container-rejected candidate. The status returns to `ready-for-agent` only after all of the following, each recorded in the commit that changes the status:
+1. A reviewed `chore` commit on `main` adds the devDependency (exact version, lockfile updated) and nothing else; `pnpm run check` and GitHub CI pass on it.
+2. On that `main`, a test file in `packages/booking` importing `@neondatabase/serverless` resolves and runs inside the Ralph sandbox image (a throwaway check, recorded, not committed), so RED can be proved there.
+3. The debt gate shows ticket 54 `clear` (`node scripts/ralph-debt.mjs gate docs/technical-debt.md`), which also requires TD-059 resolved by ticket 52.
+4. The maintainer approves the reset; the earlier candidate counts as reference only, like the rejected attempts of ticket 12.
+
 Each criterion names its test and the sabotage that test must catch: making the stated change to the production code must turn that test red.
 
 - [ ] Ground rules: every guarantee below that depends on Postgres, the `pg` driver, the Neon driver or Prisma is proved against the real test database or the real driver (ADR 0010), never against a hand-built error object or a proxied client. No existing assertion is removed or loosened. Every test this ticket adds or changes creates and disconnects its own clients (no module-level or lazily created client shared across test cases), never holds a lock or connection for a fixed time (blockers and occupiers are released by a latch the test opens), and bounds every wait on Postgres state with a deadline whose failure message names what it waited for. Behaviour tests may inject shorter timeouts than production; waits on real timeouts set per-test timeouts in the test file.

@@ -71,10 +71,12 @@ export function parseConfig(
       input[key] = value;
     }
   }
-  for (let index = 0; index < argv.length; index += 1) {
-    const flag = argv[index] ?? "";
+  // pnpm 12 passes the `--` of `pnpm control-center -- --port 5000` through to the script.
+  const args = argv[0] === "--" ? argv.slice(1) : argv;
+  for (let index = 0; index < args.length; index += 1) {
+    const flag = args[index] ?? "";
     const key = FLAGS[flag];
-    const value = argv[index + 1];
+    const value = args[index + 1];
     if (key === undefined || value === undefined) {
       throw new Error(
         `unknown or incomplete option ${flag}; options: ${Object.keys(FLAGS).join(", ")}`,

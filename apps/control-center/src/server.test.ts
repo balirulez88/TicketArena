@@ -37,11 +37,33 @@ describe("dashboard server", () => {
     expect(body.tickets.map((t) => [t.number, t.status])).toEqual([["13", "ready-for-agent"]]);
   });
 
+  it("serves the page under a CSP that allows only its own script and same-origin fetches", async () => {
+    const base = await serve(state);
+    const csp = (await fetch(`${base}/`)).headers.get("content-security-policy") ?? "";
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("script-src 'self'");
+    expect(csp).toContain("connect-src 'self'");
+    expect(csp).not.toMatch(/script-src[^;]*'unsafe-inline'/);
+    expect(csp).not.toContain("unsafe-eval");
+
+    const script = await fetch(`${base}/assets/dashboard.js`);
+    expect(script.status).toBe(200);
+    expect(script.headers.get("content-type")).toContain("text/javascript");
+    expect(script.headers.get("x-content-type-options")).toBe("nosniff");
+    const source = await script.text();
+    // Transpiled: TypeScript syntax is gone, the behaviour is there.
+    expect(source).toContain("export function viewFromHash(hash)");
+    expect(source).not.toMatch(/: BoardFilter\b/);
+    expect((await fetch(`${base}/assets/other.js`)).status).toBe(404);
+  });
+
   it("refuses every method that could change something, and unknown paths", async () => {
     const base = await serve(state);
     for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
-      const response = await fetch(`${base}/api/state`, { method });
-      expect(response.status).toBe(405);
+      for (const path of ["/api/state", "/assets/dashboard.js"]) {
+        const response = await fetch(`${base}${path}`, { method });
+        expect(response.status).toBe(405);
+      }
     }
     expect((await fetch(`${base}/api/run`)).status).toBe(404);
   });

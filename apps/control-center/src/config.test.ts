@@ -14,6 +14,10 @@ describe("parseConfig", () => {
     });
   });
 
+  it("accepts the leading -- that pnpm passes through", () => {
+    expect(parseConfig(["--", "--port", "5000"], {}, "/repo").port).toBe(5000);
+  });
+
   it("lets flags override environment variables", () => {
     const config = parseConfig(
       ["--port", "5000", "--ref", "integration/harness-branches"],

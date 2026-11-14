@@ -25,7 +25,34 @@ parent of Git's common directory), because `.ralph/` exists only where Ralph run
 | `--stale-after` | `RALPH_CC_STALE_AFTER_MINUTES` | `15`          | Quiet time after which an `active` run is stale             |
 | `--refresh`     | `RALPH_CC_REFRESH_SECONDS`     | `30`          | Page auto-refresh; `0` turns it off                         |
 
-`GET /` serves the page and `GET /api/state` the same state as JSON. Every other method gets 405.
+`GET /` serves the page, `GET /api/state` the same state as JSON and `GET /assets/dashboard.js`
+the page's script. Every other method gets 405.
+
+## Views
+
+| View           | Shows                                                                                                   |
+| -------------- | ------------------------------------------------------------------------------------------------------- |
+| Overview       | Ticket KPIs, execution status (live / stale / idle), latest run, debt blockers, recent activity, gaps   |
+| Ticket Board   | One column per status line, cards with blockers, calculated eligibility, phase; search and filters      |
+| Agent Activity | Planning → Implementation → Testing → Review → Merge per run and ticket, with a session timeline        |
+| Technical Debt | Open / planned / resolved counts, severity distribution, held tickets, findings ranked by actionability |
+| Run History    | Every run with duration, outcome, review verdicts, rejection reasons and failures, expandable           |
+
+Ticket cards and debt findings open a detail drawer. The server renders and escapes all markup;
+the script (`src/client/dashboard.ts`, transpiled once at start-up with the already-installed
+TypeScript compiler) only switches views, filters, opens details and refreshes. Every
+`--refresh` seconds it re-reads `/` and swaps the marked regions in place, keeping the view,
+filters, open details and drawer; it pauses while the tab is hidden, text is selected, or the
+reader pressed Pause. Without JavaScript all views are shown in sequence and a `<noscript>` meta
+refresh reloads the page. The CSP allows only this origin's script and fetches
+(`script-src 'self'; connect-src 'self'`), no inline script.
+
+Pipeline stages come only from recorded evidence: `red` → Testing; `green`, `refactor`, `docs` →
+Implementation; `review-spec`, `review-standards`, `review-fix` → Review; a ticket's
+`**Completed:**` line naming the run → Merge (a rejecting host review → failed). Ralph writes no
+planning record and a Lead session spans every stage, so those stay "no evidence"; a Lead session
+is listed as unmapped. A stage is active only in a live run; a `running` session in a quiet run
+is stale.
 
 ## Where each value comes from
 
@@ -55,7 +82,9 @@ parent of Git's common directory), because `.ralph/` exists only where Ralph run
 ## Tests
 
 `pnpm --filter @ticketarena/control-center test` covers the parsers, the state mapping (liveness,
-selectability, debt verdicts, failures), the HTML escaping, the GET-only server, configuration,
+selectability, debt verdicts, failures), the presentation rules (eligibility, board grouping,
+pipeline stages, durations, debt ranking), the client's navigation, filter and refresh decisions,
+the HTML escaping and the absence of inline script, the GET-only server and its CSP, configuration,
 and an integration test on a real temporary Git repository. That test proves reads come from the
 ref, ignore an inherited `GIT_DIR`, and leave the repository (including `.git`) byte-for-byte
 unchanged.

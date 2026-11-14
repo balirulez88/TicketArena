@@ -1,285 +1,483 @@
-// Server-rendered HTML: no client framework, no script. Every artifact value is escaped, because
-// ticket titles, review text and branch subjects are written by agents and are untrusted here.
+// Server-rendered dashboard. All markup and every value is produced here and escaped (see html.ts);
+// the client script only switches views, filters, opens details and swaps in a fresh copy of the
+// regions marked `data-region`. Without JavaScript every view is shown, one after another.
 
-import type { Gap, Provenance, Session } from "./model";
-import type {
-  DashboardState,
-  FailureView,
-  Liveness,
-  ReviewView,
-  RunView,
-  TicketView,
-} from "./state";
+import {
+  ago,
+  type BadgeTone,
+  badge,
+  card,
+  dot,
+  eligibilityBadge,
+  empty,
+  icon,
+  liveness,
+  provenance,
+  STATUS_TONE,
+  sessionStatus,
+  ticketStatus,
+  verdict,
+  when,
+} from "./components";
+import { domKey, type Html, h, raw } from "./html";
+import {
+  boardColumns,
+  DEBT_STATUSES,
+  debtCounts,
+  ELIGIBILITY_LABEL,
+  type Eligibility,
+  eligibilityOf,
+  executionStatus,
+  formatDuration,
+  pipelinesOf,
+  prioritizedDebt,
+  recentActivity,
+  severityDistribution,
+  summarizeRun,
+  ticketCounts,
+} from "./present";
+import { agentsView, pipeline, runsView } from "./render-runs";
+import type { DashboardState, TicketView } from "./state";
+import { STYLE } from "./style";
 
-export const escapeHtml = (value: string): string =>
-  value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+export { escapeHtml } from "./html";
 
-type Html = { readonly html: string };
-const raw = (html: string): Html => ({ html });
+const ticketKey = (number: string) => `ticket-${domKey(number)}`;
+const debtKey = (id: string) => `debt-${domKey(id)}`;
 
-/** Tagged template that escapes every interpolated value unless it is already `Html`. */
-function h(strings: TemplateStringsArray, ...values: unknown[]): Html {
-  let out = strings[0] ?? "";
-  values.forEach((value, index) => {
-    out += render(value) + (strings[index + 1] ?? "");
-  });
-  return raw(out);
-}
+/** A link that opens a detail in the drawer (client) or jumps to its anchor (no script). */
+const detailLink = (key: string, content: Html | string, cls = "link") =>
+  h`<a class="${cls}" href="#d-${key}" data-detail="${key}">${content}</a>`;
 
-function render(value: unknown): string {
-  if (value === null || value === undefined || value === false) {
-    return "";
-  }
-  if (Array.isArray(value)) {
-    return value.map(render).join("");
-  }
-  if (typeof value === "object" && "html" in value && typeof value.html === "string") {
-    return value.html;
-  }
-  return escapeHtml(String(value));
-}
+const ticketLink = (number: string) => detailLink(ticketKey(number), `#${number}`, "chip mono");
 
-const PROVENANCE_LABEL: Record<Provenance, string> = {
-  live: "LIVE",
-  historical: "HISTORICAL",
-  unavailable: "UNAVAILABLE",
-};
-const tag = (provenance: Provenance, title?: string) =>
-  h`<span class="tag ${provenance}" title="${title ?? ""}">${PROVENANCE_LABEL[provenance]}</span>`;
-
-const LIVENESS: Record<Liveness, { cls: string; label: string }> = {
-  live: { cls: "live", label: "live" },
-  stale: { cls: "stale", label: "stale: claims active" },
-  finished: { cls: "historical", label: "finished" },
-  unknown: { cls: "unavailable", label: "unknown" },
-};
-const liveness = (value: Liveness) =>
-  h`<span class="tag ${LIVENESS[value].cls}">${LIVENESS[value].label}</span>`;
-
-const pill = (text: string, cls: string) => h`<span class="pill ${cls}">${text}</span>`;
-const STATUS_CLASS: Record<string, string> = {
-  done: "ok",
-  "ready-for-agent": "info",
-  "in-progress": "live",
-  blocked: "bad",
-  "ready-for-human": "muted",
-};
-const ticketStatus = (ticket: TicketView) =>
-  ticket.statusRecognized
-    ? pill(ticket.status, STATUS_CLASS[ticket.status] ?? "muted")
-    : pill(`unrecognized: ${ticket.status || "(missing)"}`, "bad");
-
-const ago = (ms: number | null, now: number): string => {
-  if (ms === null) {
-    return "unknown";
-  }
-  const minutes = Math.max(0, Math.round((now - ms) / 60_000));
-  return minutes < 90 ? `${minutes} min ago` : `${Math.round(minutes / 60)} h ago`;
+const OUTCOME_TONE: Record<string, BadgeTone> = {
+  succeeded: "ok",
+  running: "live",
+  failed: "bad",
+  paused: "warn",
+  stale: "warn",
 };
 
-const sessionText = (session: Session) =>
-  h`<code>${session.label}</code> ${pill(session.status, session.status === "ok" ? "ok" : session.status === "running" ? "live" : "bad")}`;
+const EXECUTION_TONE = { live: "live", stale: "warn", idle: "muted" } as const;
+const EXECUTION_LABEL = { live: "Run active", stale: "Run stale", idle: "Idle" } as const;
 
-function verdictPill(review: ReviewView | null) {
-  if (review === null) {
-    return h`<span class="muted">none on record</span>`;
-  }
-  const cls = review.decision.verdict === "approved" ? "ok" : "bad";
-  const round = review.round === null ? "" : ` r${review.round}`;
-  return h`${pill(review.decision.verdict, cls)} <span class="muted">${review.run}${round}</span>`;
+// ---------------------------------------------------------------------------------------------
+// Overview
+
+function kpi(
+  label: string,
+  value: number | string,
+  tone: BadgeTone,
+  sub: Html | string,
+  href: string,
+) {
+  return h`<a class="kpi" href="${href}"><span class="kpi-label">${dot(tone)}${label}</span><span class="kpi-value">${value}</span><span class="kpi-sub">${sub}</span></a>`;
 }
 
-function blockersCell(ticket: TicketView) {
-  if (ticket.blockers.length === 0) {
-    return h`<span class="muted">none</span>`;
-  }
-  return ticket.blockers.map(
-    (blocker) =>
-      h`<span class="pill ${blocker.status === "done" ? "ok" : blocker.status === null ? "bad" : "warn"}" title="${blocker.status ?? "no such ticket"}">${blocker.number}</span> `,
-  );
-}
+const calc = raw('<span class="calc-mark">calc</span>');
 
-function debtCell(ticket: TicketView) {
-  if (ticket.status === "done") {
-    return h`<span class="muted">n/a</span>`;
-  }
-  if (ticket.debt === null) {
-    return tag("unavailable", "debt gate could not be computed");
-  }
-  const cls = { clear: "ok", waiting: "warn", "needs-triage": "bad" }[ticket.debt.state];
-  return h`<span title="${ticket.debt.reasons.join("\n")}">${pill(ticket.debt.state, cls)}</span>`;
-}
-
-function phaseCell(ticket: TicketView) {
-  if (ticket.phase === null) {
-    return h`<span class="muted">no run logs</span>`;
-  }
-  const { session, runId } = ticket.phase;
-  return h`${liveness(ticket.phase.liveness)} ${sessionText(session)} <span class="muted">${runId}</span>`;
-}
-
-function ticketRow(ticket: TicketView) {
-  const selectable = ticket.selectable === null ? "?" : ticket.selectable ? "yes" : "no";
-  return h`<tr>
-    <td><b>${ticket.number}</b></td>
-    <td>${ticket.title}${ticket.problems.length > 0 ? h` <span class="pill bad" title="${ticket.problems.join("\n")}">contract</span>` : ""}${ticket.pause ? h` <span class="pill warn" title="${`${ticket.pause.reason} in ${ticket.pause.phase}`}">paused</span>` : ""}</td>
-    <td>${ticketStatus(ticket)}</td>
-    <td>${blockersCell(ticket)}</td>
-    <td>${debtCell(ticket)}</td>
-    <td>${ticket.status === "ready-for-agent" ? selectable : h`<span class="muted">n/a</span>`}</td>
-    <td>${phaseCell(ticket)}</td>
-    <td>${verdictPill(ticket.review.loop)}</td>
-    <td>${verdictPill(ticket.review.host)}</td>
-    <td>${ticket.criteria.checked}/${ticket.criteria.total}</td>
-  </tr>`;
-}
-
-const TICKET_HEAD = h`<thead><tr><th>#</th><th>Ticket</th><th>Status</th><th>Blocked by</th>
-  <th>Debt gate</th><th title="ready-for-agent, blockers done, debt gate clear">Selectable</th>
-  <th>Agent phase</th><th>Loop review</th><th>Host review</th><th>AC</th></tr></thead>`;
-
-function ticketsSection(state: DashboardState) {
+function kpis(state: DashboardState) {
   if (state.tickets === null) {
-    return h`<section><h2>Tickets ${tag("unavailable")}</h2><p>Ticket files could not be read; see Unavailable sources.</p></section>`;
+    return card(
+      h`Tickets ${provenance("unavailable")}`,
+      h`<p>Ticket files could not be read; see Unavailable sources.</p>`,
+    );
   }
-  const active = state.tickets.filter((t) => t.location === "active");
-  const done = state.tickets.filter((t) => t.location === "done");
-  return h`<section><h2>Tickets ${tag("live", "ticket files at the ref")}</h2>
-    <p class="muted">Statuses are the <code>**Status:**</code> lines on <code>${state.source.ref}</code>, verbatim. Agent phase and reviews come from run logs (kept 30 days).</p>
-    <div class="scroll"><table>${TICKET_HEAD}<tbody>${active.map(ticketRow)}</tbody></table></div>
-    <details><summary>${done.length} archived tickets (issues/done)</summary>
-    <div class="scroll"><table>${TICKET_HEAD}<tbody>${done.map(ticketRow)}</tbody></table></div></details>
-  </section>`;
+  const c = ticketCounts(state.tickets);
+  const held = state.debt?.held.length;
+  const others = c.eligibilityUnknown + c.unrecognized + c.readyForHuman;
+  return h`<div class="kpis">
+    ${kpi("Eligible now", c.eligible, "ok", h`${calc}selectable by Ralph`, "#board")}
+    ${kpi("Waiting", c.waiting, "warn", h`${calc}ready, held by blockers or debt`, "#board")}
+    ${kpi("In progress", c.inProgress, "live", "status line", "#board")}
+    ${kpi("Blocked", c.blocked, "bad", "status line", "#board")}
+    ${kpi("Completed", c.done, "info", "status done", "#board")}
+    ${kpi("Debt-held", held ?? "?", held ? "warn" : "muted", h`${calc}debt gate verdicts`, "#debt")}
+  </div>
+  ${others > 0 ? h`<p class="muted small">Also: ${c.readyForHuman} ready-for-human · ${c.unrecognized} unrecognized status · ${c.eligibilityUnknown} with eligibility unknown.</p>` : ""}`;
 }
 
-function runRow(run: RunView, now: number) {
-  const last = run.sessions.at(-1);
-  return h`<tr>
-    <td><code>${run.runId}</code></td><td>${run.origin}</td>
-    <td>${liveness(run.liveness)} ${run.status === null ? tag("unavailable", "run.json missing or unreadable") : h`<code>${run.status}</code>`}</td>
-    <td>${run.tickets.join(", ")}</td>
-    <td>${run.current ? sessionText(run.current) : last ? sessionText(last) : h`<span class="muted">no sessions</span>`}</td>
-    <td>${run.sessions.length}</td>
-    <td>${ago(run.lastActivity, now)}</td>
-  </tr>`;
-}
-
-const RUN_HEAD = h`<thead><tr><th>Run</th><th>Origin</th><th>State</th><th>Tickets</th>
-  <th>Current / last session</th><th>Sessions</th><th>Last file activity</th></tr></thead>`;
-
-function currentSection(state: DashboardState, now: number) {
-  const { runs, batch, lock, pauses, pausedBranches } = state.current;
-  const lockText = lock.held
-    ? h`held by pid ${lock.owner?.pid ?? "unknown"} on ${lock.owner?.host ?? "unknown host"} since ${lock.owner?.startedAt ?? "unknown"} <span class="muted">(holder's liveness not verified)</span>`
-    : h`<span class="muted">not held</span>`;
-  const batchText = batch.value
-    ? h`${tag(batch.provenance)} <code>${batch.value.batch}</code> status <code>${batch.value.status}</code>${batch.value.stop ? h`, stopped <code>${batch.value.stop.reason}</code>: ${batch.value.stop.detail}` : ""}`
-    : tag("unavailable", "no .ralph/batch/state.json");
-  return h`<section><h2>Current runs</h2>
-    <p class="muted">A run is <b>live</b> while run.json says <code>active</code> and its files changed in the last ${state.staleAfterMinutes} min. <b>stale</b> means it still claims <code>active</code> but has been quiet: a killed run stays <code>active</code> forever, and process liveness is not checked.</p>
-    ${runs.length === 0 ? h`<p>No run claims to be active.</p>` : h`<div class="scroll"><table>${RUN_HEAD}<tbody>${runs.map((run) => runRow(run, now))}</tbody></table></div>`}
-    <dl>
-      <dt>Batch lock</dt><dd>${lockText}</dd>
-      <dt>Last batch</dt><dd>${batchText}</dd>
-      <dt>Paused tickets</dt><dd>${pauses.length === 0 ? h`<span class="muted">none in .ralph/state</span>` : pauses.map((p) => h`<div>ticket ${p.ticket}: ${p.reason} in ${p.phase} (attempt ${p.attempt}, round ${p.round}), run ${p.run}</div>`)}</dd>
-      <dt>Parked branches</dt><dd>${pausedBranches.length === 0 ? h`<span class="muted">none</span>` : pausedBranches.map((b) => h`<div><code>${b.name}</code> ${b.date}</div>`)}</dd>
+function executionCard(state: DashboardState, now: number) {
+  const execution = executionStatus(state);
+  const { batch, lock, pauses, pausedBranches } = state.current;
+  const headline = {
+    live: { title: "Ralph is running", text: "A run is active and wrote files recently." },
+    stale: {
+      title: "A run claims to be active, but is quiet",
+      text: `No file changed for over ${state.staleAfterMinutes} min. It may have been killed; process liveness is not checked.`,
+    },
+    idle: { title: "No run is active", text: "No run.json claims active." },
+  }[execution.kind];
+  return h`<section class="card hero hero-${execution.kind}">
+    <div class="hero-main">
+      <span class="pulse t-${EXECUTION_TONE[execution.kind]}" aria-hidden="true"></span>
+      <div><div class="hero-title">${headline.title}</div><div class="muted">${headline.text}</div></div>
+    </div>
+    ${execution.runs.map(
+      (run) =>
+        h`<div class="hero-run"><span class="mono">${run.runId}</span> ${liveness(run.liveness)} ${run.current ? h`<code>${run.current.label}</code> ${sessionStatus(run.current.status)}` : ""} <span class="muted small">files changed ${ago(run.lastActivity, now)}</span></div>`,
+    )}
+    <dl class="kv compact">
+      <dt>Batch lock</dt><dd>${lock.held ? h`${badge("held", "live")} pid ${lock.owner?.pid ?? "unknown"} on ${lock.owner?.host ?? "unknown host"} <span class="muted small">(holder not verified)</span>` : h`<span class="muted">not held</span>`}</dd>
+      <dt>Last batch</dt><dd>${batch.value ? h`${provenance(batch.provenance)} <code>${batch.value.batch}</code> <code>${batch.value.status}</code>${batch.value.stop ? h` · stopped <code>${batch.value.stop.reason}</code>` : ""}` : provenance("unavailable")}</dd>
+      <dt>Paused</dt><dd>${pauses.length === 0 ? h`<span class="muted">none</span>` : pauses.map((p) => h`<div>${ticketLink(p.ticket)} ${p.reason} in ${p.phase} <span class="muted small">run ${p.run}</span></div>`)}</dd>
+      <dt>Parked branches</dt><dd>${pausedBranches.length === 0 ? h`<span class="muted">none</span>` : pausedBranches.map((b) => h`<div><code>${b.name}</code></div>`)}</dd>
     </dl>
   </section>`;
 }
 
-function debtSection(state: DashboardState) {
-  if (state.debt === null) {
-    return h`<section><h2>Technical debt blockers ${tag("unavailable")}</h2><p>The register or tickets could not be evaluated; see Unavailable sources.</p></section>`;
+function latestRunCard(state: DashboardState, now: number) {
+  const run = state.runs[0];
+  if (run === undefined) {
+    return card("Latest run", empty("No runs on record", "Nothing in .ralph/logs or sandboxes."));
   }
-  const severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
-  const summaryRows = Object.entries(state.debt.summary).map(
-    ([status, row]) =>
-      h`<tr><td><code>${status}</code></td>${severities.map((s) => h`<td>${row[s] ?? 0}</td>`)}</tr>`,
+  const summary = summarizeRun(run, state, now);
+  return card(
+    h`Latest run <span class="mono muted">${run.runId}</span>`,
+    h`<div class="meta-row">${badge(summary.outcome, OUTCOME_TONE[summary.outcome] ?? "muted")}
+      <span class="muted">duration ${summary.outcome === "running" ? "so far " : ""}${formatDuration(summary.durationMs)}</span>
+      <span class="muted">${summary.reviews.length} reviews</span></div>
+      ${summary.rejections.length > 0 ? h`<ul class="reasons">${summary.rejections.slice(0, 3).map((r) => h`<li>${r}</li>`)}</ul>` : ""}
+      ${pipelinesOf(run, state).slice(0, 2).map(pipeline)}`,
+    h`<a class="link small" href="#runs">History →</a>`,
   );
-  return h`<section><h2>Technical debt blockers ${tag("live", "debt gate computed by scripts/ralph-debt.mjs")}</h2>
-    <p class="muted">Verdicts from <code>scripts/ralph-debt.mjs</code> <code>debtGate</code> over the register and tickets at <code>${state.source.ref}</code>, the same computation Ralph's selection uses.</p>
-    ${state.debt.held.length === 0 ? h`<p>No unfinished ticket is held by debt.</p>` : h`<div class="scroll"><table><thead><tr><th>Ticket</th><th>Verdict</th><th>Reasons</th></tr></thead><tbody>${state.debt.held.map((held) => h`<tr><td><b>${held.ticket}</b></td><td>${pill(held.verdict.state, held.verdict.state === "waiting" ? "warn" : "bad")}</td><td><ul>${held.verdict.reasons.map((r) => h`<li>${r}</li>`)}</ul></td></tr>`)}</tbody></table></div>`}
-    <details><summary>Register summary (${state.debt.entries.length} entries)</summary>
-    <table><thead><tr><th>Status</th>${severities.map((s) => h`<th>${s}</th>`)}</tr></thead><tbody>${summaryRows}</tbody></table></details>
-  </section>`;
 }
 
-function failureRow(failure: FailureView) {
-  return h`<tr><td>${failure.at}</td><td>${pill(failure.kind, "bad")}</td><td>${failure.ticket ?? ""}</td><td>${failure.detail}</td><td class="muted">${failure.source}</td></tr>`;
+const verdictTone = (state: string): BadgeTone =>
+  state === "clear" ? "ok" : state === "waiting" ? "warn" : "bad";
+
+function debtBlockersCard(state: DashboardState) {
+  if (state.debt === null) {
+    return card(
+      h`Debt blockers ${provenance("unavailable")}`,
+      h`<p class="muted">The register or tickets could not be evaluated.</p>`,
+    );
+  }
+  const { held } = state.debt;
+  return card(
+    "Debt blockers",
+    held.length === 0
+      ? empty("Nothing held", "No unfinished ticket is held by the debt gate.", "ok")
+      : h`<ul class="list">${held
+          .slice(0, 6)
+          .map(
+            ({ ticket, verdict: v }) =>
+              h`<li>${ticketLink(ticket)} ${badge(v.state, verdictTone(v.state))} <span class="muted small clamp">${v.reasons[0] ?? ""}</span></li>`,
+          )}</ul>${held.length > 6 ? h`<p class="muted small">and ${held.length - 6} more</p>` : ""}`,
+    h`<a class="link small" href="#debt">All debt →</a>`,
+  );
 }
 
-function failuresSection(state: DashboardState) {
-  return h`<section><h2>Recent failures ${tag("historical")}</h2>
-    ${state.failures.length === 0 ? h`<p>None on record.</p>` : h`<div class="scroll"><table><thead><tr><th>When</th><th>Kind</th><th>Ticket</th><th>Detail</th><th>Source</th></tr></thead><tbody>${state.failures.map(failureRow)}</tbody></table></div>`}
-  </section>`;
+function activityCard(state: DashboardState) {
+  const items = recentActivity(state, 10);
+  return card(
+    h`Recent activity ${provenance("historical")}`,
+    items.length === 0
+      ? empty("Quiet", "No timed sessions or failures on record.")
+      : h`<ol class="feed">${items.map(
+          (item) =>
+            h`<li>${dot(item.tone)}<div><div>${item.title}</div><div class="muted small">${when(item.at)} · ${item.detail}</div></div></li>`,
+        )}</ol>`,
+  );
 }
 
-function reviewRow(review: ReviewView) {
-  const findings = Object.entries(review.decision.findings)
-    .map(([severity, count]) => `${count} ${severity}`)
-    .join(", ");
-  return h`<tr><td><code>${review.run}</code></td><td>${review.kind}${review.round === null ? "" : ` r${review.round}`}</td><td>${review.slug}</td>
-    <td>${pill(review.decision.verdict, review.decision.verdict === "approved" ? "ok" : "bad")}</td>
-    <td>${review.decision.blockers.map((b) => h`<div>[${b.severity}] ${b.axis}: ${b.title}</div>`)}${review.decision.errors > 0 ? h`<div>${review.decision.errors} evidence errors</div>` : ""}</td>
-    <td>${findings || h`<span class="muted">none</span>`}</td></tr>`;
+function gapsCard(state: DashboardState) {
+  return card(
+    h`Unavailable sources ${state.gaps.length > 0 ? provenance("unavailable") : ""}`,
+    state.gaps.length === 0
+      ? empty("Every source was read", "", "ok")
+      : h`<ul class="plain">${state.gaps.map((gap) => h`<li><code>${gap.source}</code>: ${gap.reason}</li>`)}</ul>`,
+  );
 }
 
-function historySection(state: DashboardState, now: number) {
-  return h`<section><h2>Run and review history ${tag("historical")}</h2>
-    <details><summary>${state.runs.length} runs in .ralph/logs and sandboxes</summary>
-    <div class="scroll"><table>${RUN_HEAD}<tbody>${state.runs.map((run) => runRow(run, now))}</tbody></table></div></details>
-    <details><summary>${state.reviews.length} review decisions</summary>
-    <div class="scroll"><table><thead><tr><th>Run</th><th>Kind</th><th>Ticket</th><th>Verdict</th><th>Blockers</th><th>Findings</th></tr></thead><tbody>${state.reviews.map(reviewRow)}</tbody></table></div></details>
-  </section>`;
+function overviewView(state: DashboardState, now: number) {
+  return h`<div class="view-head"><div><h2>Overview</h2>
+    <p class="muted">Statuses are the <code>**Status:**</code> lines on <code>${state.source.ref}</code>, verbatim. ${calc} marks values calculated from Ralph's rules.</p></div></div>
+    ${kpis(state)}
+    <div class="grid-2">${executionCard(state, now)}${latestRunCard(state, now)}</div>
+    <div class="grid-3">${debtBlockersCard(state)}${activityCard(state)}${gapsCard(state)}</div>`;
 }
 
-function gapsSection(gaps: Gap[]) {
-  return h`<section><h2>Unavailable sources ${tag("unavailable")}</h2>
-    ${gaps.length === 0 ? h`<p>Every source was read.</p>` : h`<ul>${gaps.map((gap) => h`<li><code>${gap.source}</code>: ${gap.reason}</li>`)}</ul>`}
-  </section>`;
+// ---------------------------------------------------------------------------------------------
+// Ticket board
+
+const blockerChip = (status: string | null) =>
+  status === "done" ? "chip-ok" : status === null ? "chip-bad" : "chip-warn";
+
+function ticketCard(ticket: TicketView) {
+  const eligibility = eligibilityOf(ticket);
+  const key = ticketKey(ticket.number);
+  const search = `${ticket.number} ${ticket.title} ${ticket.slug} ${ticket.status}`;
+  const percent =
+    ticket.criteria.total === 0
+      ? 0
+      : Math.round((100 * ticket.criteria.checked) / ticket.criteria.total);
+  return h`<a class="tcard" href="#d-${key}" data-detail="${key}" data-card data-eligibility="${eligibility}" data-search="${search}">
+    <div class="tcard-top"><span class="mono muted">#${ticket.number}</span>${ticket.pause ? badge("paused", "warn", `${ticket.pause.reason} in ${ticket.pause.phase}`) : ""}${ticket.problems.length > 0 ? badge("contract", "bad", ticket.problems.join("\n")) : ""}</div>
+    <div class="tcard-title">${ticket.title}</div>
+    ${ticket.blockers.length > 0 ? h`<div class="chips">${ticket.blockers.map((b) => h`<span class="chip mono ${blockerChip(b.status)}" title="${`blocked by #${b.number}: ${b.status ?? "no such ticket"}`}">↳ ${b.number}</span>`)}</div>` : ""}
+    <div class="tcard-foot">
+      ${eligibility === "not-applicable" ? "" : eligibilityBadge(eligibility)}
+      ${ticket.phase ? h`<span class="small muted" title="${`last session in run ${ticket.phase.runId} (${ticket.phase.liveness})`}">${dot(ticket.phase.liveness === "live" ? "live" : "muted")}${ticket.phase.session.phase}</span>` : ""}
+      <span class="spacer"></span>
+      <span class="small muted" title="Acceptance criteria checked">${ticket.criteria.checked}/${ticket.criteria.total}</span>
+    </div>
+    <div class="progress"><span style="${raw(`width:${percent}%`)}"></span></div>
+  </a>`;
 }
 
-const STYLE = `
-:root{--bg:#f7f7f5;--fg:#1d1d1b;--muted:#6b6b66;--card:#fff;--line:#e2e1dc;
---ok:#1f7a3a;--okbg:#e3f3e7;--bad:#a32020;--badbg:#fbe5e5;--warn:#8a5a00;--warnbg:#fdf0d5;
---info:#1d4f91;--infobg:#e3ecf8;--live:#0b6e66;--livebg:#d7f2ee;--hist:#55554f;--histbg:#ecebe6}
-@media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#e9e8e3;--muted:#9a9993;--card:#1f1f1d;
---line:#33332f;--ok:#7fd49a;--okbg:#17321f;--bad:#f19a9a;--badbg:#3a1a1a;--warn:#f2c46b;--warnbg:#3a2d10;
---info:#9cc0f2;--infobg:#172840;--live:#6fe0d3;--livebg:#103430;--hist:#c2c1ba;--histbg:#2a2a27}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif}
-header,main{max-width:1400px;margin:0 auto;padding:16px}header h1{margin:0 0 4px;font-size:20px}
-section{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:0 0 16px}
-h2{font-size:16px;margin:4px 0 8px}table{border-collapse:collapse;width:100%}
-th,td{text-align:left;vertical-align:top;padding:5px 8px;border-bottom:1px solid var(--line)}
-th{font-size:12px;color:var(--muted);font-weight:600}.scroll{overflow-x:auto}
-code{font:12px ui-monospace,monospace}.muted{color:var(--muted)}ul{margin:0;padding-left:18px}
-.pill,.tag{display:inline-block;padding:0 6px;border-radius:9px;font-size:12px;white-space:nowrap}
-.tag{font-weight:700;letter-spacing:.03em;font-size:11px;border-radius:3px}
-.ok{color:var(--ok);background:var(--okbg)}.bad{color:var(--bad);background:var(--badbg)}
-.warn,.stale{color:var(--warn);background:var(--warnbg)}.info{color:var(--info);background:var(--infobg)}
-.live{color:var(--live);background:var(--livebg)}.historical,.muted.pill{color:var(--hist);background:var(--histbg)}
-.unavailable{color:var(--bad);background:repeating-linear-gradient(45deg,var(--badbg) 0 4px,transparent 4px 8px)}
-dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 12px}dt{color:var(--muted)}dd{margin:0}
-summary{cursor:pointer;margin:8px 0}`;
+const ELIGIBILITY_FILTERS: Eligibility[] = [
+  "eligible",
+  "waiting-blockers",
+  "waiting-debt",
+  "debt-triage",
+  "unknown",
+];
+
+function boardToolbar() {
+  return h`<div class="toolbar" role="search">
+    <input id="board-search" type="search" placeholder="Search id, title…" aria-label="Search tickets" autocomplete="off">
+    <select id="board-status" aria-label="Status">
+      <option value="open">All but done</option><option value="all">All statuses</option>
+      <option value="ready-for-agent">ready-for-agent</option><option value="in-progress">in-progress</option>
+      <option value="blocked">blocked</option><option value="ready-for-human">ready-for-human</option>
+      <option value="done">done</option><option value="unrecognized">unrecognized</option>
+    </select>
+    <select id="board-eligibility" aria-label="Eligibility (calculated)">
+      <option value="any">Any eligibility</option>
+      ${ELIGIBILITY_FILTERS.map((e) => h`<option value="${e}">calc: ${ELIGIBILITY_LABEL[e]}</option>`)}
+    </select>
+  </div>`;
+}
+
+function boardColumnsHtml(state: DashboardState) {
+  if (state.tickets === null) {
+    return card(
+      h`Tickets ${provenance("unavailable")}`,
+      h`<p>Ticket files could not be read; see Unavailable sources.</p>`,
+    );
+  }
+  return h`<div class="board">${boardColumns(state.tickets).map(
+    (column) => h`<section class="column" data-column="${column.key}">
+      <header class="column-head">${dot(STATUS_TONE[column.key] ?? "bad")}<span>${column.title}</span><span class="count" data-shown>${column.tickets.length}</span></header>
+      <div class="column-body">${column.tickets.map(ticketCard)}<p class="muted small empty-col" data-empty${column.tickets.length > 0 ? raw(" hidden") : ""}>No matching tickets</p></div>
+    </section>`,
+  )}</div>`;
+}
+
+function boardView(state: DashboardState) {
+  return h`<div class="view-head"><div><h2>Ticket Board</h2>
+    <p class="muted">Columns are the status line, verbatim; nothing here changes or infers it. The dashed ${calc} badge is Ralph's selection rule applied to that status.</p></div></div>
+    ${boardToolbar()}
+    <div data-region="board">${boardColumnsHtml(state)}</div>`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Technical debt
+
+const SEVERITY_CLASS: Record<string, string> = {
+  CRITICAL: "sev-critical",
+  HIGH: "sev-high",
+  MEDIUM: "sev-medium",
+  LOW: "sev-low",
+};
+const sevClass = (severity: string) => SEVERITY_CLASS[severity] ?? "sev-other";
+
+function severityChart(debt: NonNullable<DashboardState["debt"]>) {
+  const rows = severityDistribution(debt.entries);
+  const max = Math.max(1, ...rows.map((r) => r.total));
+  const segment = (severity: string, kind: string, n: number) =>
+    n > 0
+      ? h`<span class="seg seg-${kind}" style="${raw(`width:${((100 * n) / max).toFixed(2)}%`)}" title="${`${severity}: ${n} ${kind}`}"></span>`
+      : "";
+  return h`<div class="sevchart" role="img" aria-label="Debt entries by severity and status">
+    ${rows.map(
+      (row) => h`<div class="sevrow">
+        <span class="sevlabel">${row.severity}</span>
+        <div class="sevbar ${sevClass(row.severity)}">${segment(row.severity, "open", row.open)}${segment(row.severity, "planned", row.planned)}${segment(row.severity, "resolved", row.resolved)}</div>
+        <span class="sevnums mono small" title="open / planned / resolved">${row.open} / ${row.planned} / ${row.resolved}</span>
+      </div>`,
+    )}
+    <div class="legend small"><span><span class="swatch seg-open"></span>open</span><span><span class="swatch seg-planned"></span>planned</span><span><span class="swatch seg-resolved"></span>resolved</span><span class="muted">numbers: open / planned / resolved</span></div>
+  </div>`;
+}
+
+function debtView(state: DashboardState) {
+  if (state.debt === null) {
+    return h`<div class="view-head"><div><h2>Technical Debt</h2></div></div>${card(h`Register ${provenance("unavailable")}`, h`<p>The register or tickets could not be evaluated; see Unavailable sources on the overview.</p>`)}`;
+  }
+  const counts = debtCounts(state.debt.entries);
+  const actionable = prioritizedDebt(state.debt.entries, state.debt.held);
+  const heldCount = state.debt.held.length;
+  return h`<div class="view-head"><div><h2>Technical Debt</h2>
+    <p class="muted">Verdicts from <code>scripts/ralph-debt.mjs</code> <code>debtGate</code> over <code>docs/technical-debt.md</code> at <code>${state.source.ref}</code>: the computation Ralph's selection uses.</p></div></div>
+    <div class="kpis kpis-4">
+      ${kpi("Open", counts.open, "bad", "no plan yet", "#debt")}
+      ${kpi("Planned", counts.planned, "warn", "has a target", "#debt")}
+      ${kpi("Resolved", counts.resolved, "ok", "fixed and verified", "#debt")}
+      ${kpi("Tickets held", heldCount, heldCount > 0 ? "warn" : "ok", h`${calc}by the debt gate`, "#debt")}
+    </div>
+    ${counts.other > 0 ? h`<p class="muted small">${counts.other} entries carry a status other than ${DEBT_STATUSES.join(", ")}.</p>` : ""}
+    <div class="grid-2">
+      ${card("Severity distribution", severityChart(state.debt))}
+      ${card(
+        "Blocking dependencies",
+        heldCount === 0
+          ? empty("No ticket is held", "Every unfinished ticket passes the debt gate.", "ok")
+          : h`<ul class="list">${state.debt.held.map(
+              ({ ticket, verdict: v }) =>
+                h`<li class="held">${ticketLink(ticket)} ${badge(v.state, verdictTone(v.state))}<ul class="reasons">${v.reasons.map((r) => h`<li>${r}</li>`)}</ul></li>`,
+            )}</ul>`,
+      )}
+    </div>
+    ${card(
+      h`Actionable findings <span class="muted small">${actionable.length} unresolved, most actionable first</span>`,
+      actionable.length === 0
+        ? empty("Nothing open", "Every entry is resolved.", "ok")
+        : h`<ul class="findings">${actionable.map(
+            ({ entry, holding }) =>
+              h`<li>${detailLink(
+                debtKey(entry.id),
+                h`<span class="sevpill ${sevClass(entry.severity)}">${entry.severity}</span>
+              <span class="mono muted">${entry.id}</span>
+              <span class="finding-title">${entry.title}</span>
+              <span class="spacer"></span>
+              ${holding.length > 0 ? badge(`holds ${holding.map((t) => `#${t}`).join(" ")}`, "bad", "Cited by the debt gate right now") : ""}
+              ${entry.blocks.length > 0 ? h`<span class="small muted">blocks ${entry.blocks.join(", ")}</span>` : ""}
+              ${badge(entry.status, entry.status === "OPEN" ? "warn" : "muted")}`,
+                "finding",
+              )}</li>`,
+          )}</ul>`,
+    )}`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Detail drawer
+
+const reviewBlock = (review: TicketView["review"]["loop"]) =>
+  review
+    ? h`${verdict(review.decision.verdict)} <span class="muted small">${review.run}${review.round === null ? "" : ` r${review.round}`}</span>${review.decision.blockers.map((b) => h`<div class="small">[${b.severity}] ${b.axis}: ${b.title}</div>`)}`
+    : h`<span class="muted">none on record</span>`;
+
+function debtGateBlock(ticket: TicketView) {
+  if (ticket.status === "done") {
+    return h`<span class="muted">n/a</span>`;
+  }
+  if (ticket.debt === null) {
+    return provenance("unavailable");
+  }
+  return h`${badge(ticket.debt.state, verdictTone(ticket.debt.state))}<ul class="reasons">${ticket.debt.reasons.map((r) => h`<li>${r}</li>`)}</ul>`;
+}
+
+function ticketDetail(ticket: TicketView) {
+  const eligibility = eligibilityOf(ticket);
+  const key = ticketKey(ticket.number);
+  return h`<article class="detail" id="d-${key}" data-detail-id="${key}">
+    <p class="mono muted">Ticket #${ticket.number} · ${ticket.location === "done" ? "issues/done" : "issues"}</p>
+    <h3>${ticket.title}</h3>
+    <dl class="kv">
+      <dt>Status</dt><dd>${ticketStatus(ticket)} <span class="muted small">verbatim from the ticket file</span></dd>
+      <dt>Eligibility</dt><dd>${eligibility === "not-applicable" ? h`<span class="muted">only computed for ready-for-agent</span>` : eligibilityBadge(eligibility)}</dd>
+      <dt>Blocked by</dt><dd>${ticket.blockers.length === 0 ? h`<span class="muted">none</span>` : ticket.blockers.map((b) => h`<div>${ticketLink(b.number)} ${b.status === null ? badge("no such ticket", "bad") : badge(b.status, b.status === "done" ? "ok" : "warn")}</div>`)}</dd>
+      <dt>Debt gate</dt><dd>${debtGateBlock(ticket)}</dd>
+      <dt>Agent phase</dt><dd>${ticket.phase === null ? h`<span class="muted">no run logs</span>` : h`${liveness(ticket.phase.liveness)} <code>${ticket.phase.session.label}</code> ${sessionStatus(ticket.phase.session.status)} <span class="muted small">run ${ticket.phase.runId}</span>`}</dd>
+      <dt>Loop review</dt><dd>${reviewBlock(ticket.review.loop)}</dd>
+      <dt>Host review</dt><dd>${reviewBlock(ticket.review.host)}</dd>
+      ${ticket.pause ? h`<dt>Paused</dt><dd>${ticket.pause.reason} in ${ticket.pause.phase} (attempt ${ticket.pause.attempt}, round ${ticket.pause.round}), run ${ticket.pause.run}</dd>` : ""}
+      ${ticket.completion ? h`<dt>Completed</dt><dd>${ticket.completion.date} · <code>${ticket.completion.branch}</code> · run ${ticket.completion.run}</dd>` : ""}
+      <dt>Criteria</dt><dd>${ticket.criteria.checked}/${ticket.criteria.total} checked</dd>
+      ${ticket.problems.length > 0 ? h`<dt>Contract</dt><dd><ul class="reasons">${ticket.problems.map((p) => h`<li>${p}</li>`)}</ul></dd>` : ""}
+    </dl>
+  </article>`;
+}
+
+function debtDetails(debt: NonNullable<DashboardState["debt"]>) {
+  const resolved = debt.entries
+    .filter((entry) => entry.status === "RESOLVED")
+    .map((entry) => ({ entry, holding: [] as string[] }));
+  return [...prioritizedDebt(debt.entries, debt.held), ...resolved].map(
+    ({
+      entry,
+      holding,
+    }) => h`<article class="detail" id="d-${debtKey(entry.id)}" data-detail-id="${debtKey(entry.id)}">
+      <p class="mono muted">${entry.id}</p><h3>${entry.title}</h3>
+      <dl class="kv">
+        <dt>Status</dt><dd>${badge(entry.status, entry.status === "RESOLVED" ? "ok" : entry.status === "OPEN" ? "warn" : "muted")}</dd>
+        <dt>Severity</dt><dd><span class="sevpill ${sevClass(entry.severity)}">${entry.severity}</span></dd>
+        <dt>Risk</dt><dd>${entry.risk}</dd>
+        <dt>Triage</dt><dd>${entry.triage}</dd>
+        <dt>Target</dt><dd>${entry.target}</dd>
+        <dt>Blocks</dt><dd>${entry.blocks.length === 0 ? h`<span class="muted">none</span>` : entry.blocks.map(ticketLink)}</dd>
+        <dt>Holding now</dt><dd>${holding.length === 0 ? h`<span class="muted">not cited by the debt gate</span>` : holding.map(ticketLink)}</dd>
+      </dl></article>`,
+  );
+}
+
+function drawer(state: DashboardState) {
+  return h`<div class="drawer" id="drawer">
+    <a class="scrim" href="#" data-close aria-label="Close details"></a>
+    <aside class="panel" aria-label="Details">
+      <a class="close" href="#" data-close aria-label="Close details">✕</a>
+      <div data-region="details">${(state.tickets ?? []).map(ticketDetail)}${state.debt ? debtDetails(state.debt) : ""}</div>
+    </aside>
+  </div>`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shell
+
+function nav(state: DashboardState) {
+  const execution = executionStatus(state);
+  const counts = state.tickets ? ticketCounts(state.tickets) : null;
+  const held = state.debt?.held.length ?? 0;
+  const item = (view: string, label: string, extra: Html | string) =>
+    h`<a href="#${view}" data-nav="${view}">${icon(view)}<span>${label}</span>${extra}</a>`;
+  return h`${item("overview", "Overview", "")}
+    ${item("board", "Ticket Board", counts ? h`<span class="count" title="tickets not done">${counts.total - counts.done}</span>` : "")}
+    ${item("agents", "Agent Activity", dot(EXECUTION_TONE[execution.kind]))}
+    ${item("debt", "Technical Debt", held > 0 ? h`<span class="count t-warn" title="tickets held">${held}</span>` : "")}
+    ${item("runs", "Run History", h`<span class="count">${state.runs.length}</span>`)}`;
+}
 
 export function renderPage(state: DashboardState, options: { refreshSeconds: number }): string {
   const now = Date.parse(state.generatedAt);
-  const refresh =
+  const fallbackRefresh =
     options.refreshSeconds > 0
-      ? h`<meta http-equiv="refresh" content="${options.refreshSeconds}">`
+      ? h`<noscript><meta http-equiv="refresh" content="${options.refreshSeconds}"></noscript>`
       : "";
-  const body = h`<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">${refresh}
-<title>Ralph Control Center</title><style>${raw(STYLE)}</style></head><body>
-<header><h1>Ralph Control Center <span class="muted">read-only</span></h1>
-<div class="muted">Root <code>${state.source.root}</code> · ref <code>${state.source.ref}</code> @ <code>${state.source.commit?.slice(0, 10) ?? "missing"}</code> · generated ${state.generatedAt}${options.refreshSeconds > 0 ? ` · refreshes every ${options.refreshSeconds}s` : ""}</div>
-<div>${tag("live")} describes the present · ${tag("historical")} a finished record · ${tag("unavailable")} missing or unreadable</div></header>
-<main>${currentSection(state, now)}${ticketsSection(state)}${debtSection(state)}${failuresSection(state)}${historySection(state, now)}${gapsSection(state.gaps)}</main>
-</body></html>`;
-  return body.html;
+  const execution = executionStatus(state);
+  return h`<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">${fallbackRefresh}
+<title>Ralph Control Center</title><style>${raw(STYLE)}</style>
+<script type="module" src="/assets/dashboard.js"></script></head>
+<body data-refresh="${options.refreshSeconds}">
+<div class="app">
+<nav class="sidebar" aria-label="Views">
+  <div class="brand"><span class="logo" aria-hidden="true">R</span><div><div class="brand-name">Ralph</div><div class="muted small">Control Center</div></div></div>
+  <div class="nav" data-region="nav">${nav(state)}</div>
+  <div class="sidebar-foot small muted" data-region="source">
+    <div>${badge("read-only", "info")}</div>
+    <div>ref <code>${state.source.ref}</code> @ <code>${state.source.commit?.slice(0, 10) ?? "missing"}</code></div>
+    <div class="clamp" title="${state.source.root}">${state.source.root}</div>
+  </div>
+</nav>
+<div class="content">
+  <header class="topbar">
+    <div class="topbar-status" data-region="status">${dot(EXECUTION_TONE[execution.kind])}<span>${EXECUTION_LABEL[execution.kind]}</span><span class="muted small">generated ${when(state.generatedAt)} UTC</span></div>
+    <div class="topbar-actions"><span id="refresh-stamp" class="small muted">${options.refreshSeconds > 0 ? `refreshes every ${options.refreshSeconds}s` : "auto-refresh off"}</span>
+      <button type="button" id="refresh-toggle" class="btn" aria-pressed="false">Pause</button>
+      <button type="button" id="refresh-now" class="btn">Refresh</button></div>
+  </header>
+  <main>
+    <section class="view" id="overview" data-view="overview"><div data-region="overview">${overviewView(state, now)}</div></section>
+    <section class="view" id="board" data-view="board">${boardView(state)}</section>
+    <section class="view" id="agents" data-view="agents"><div data-region="agents">${agentsView(state, now)}</div></section>
+    <section class="view" id="debt" data-view="debt"><div data-region="debt">${debtView(state)}</div></section>
+    <section class="view" id="runs" data-view="runs"><div data-region="runs">${runsView(state, now)}</div></section>
+  </main>
+</div>
+</div>
+${drawer(state)}
+</body></html>`.html;
 }

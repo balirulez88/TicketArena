@@ -81,7 +81,7 @@ new_repo() {
   local dir="${WORK}/$1"
   mkdir -p "${dir}/scripts" "${dir}/skills/code-review" "${dir}/issues" "${dir}/docs"
   cp "${HARNESS}" "${dir}/ralph-loop.sh"
-  cp "${SOURCE_ROOT}"/scripts/{ralph-review.mjs,ralph-review-prompt.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs} "${dir}/scripts/"
+  cp "${SOURCE_ROOT}"/scripts/{ralph-review.mjs,ralph-review-prompt.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs,ralph-push-inspect.mjs} "${dir}/scripts/"
   printf '# Technical Debt Register\n\n<!-- ralph-debt:begin -->\n<!-- ralph-debt:end -->\n' \
     >"${dir}/docs/technical-debt.md"
   node "${dir}/scripts/ralph-debt.mjs" format "${dir}/docs/technical-debt.md"
@@ -328,16 +328,37 @@ host="${SCENARIO}"
 git -C "${host}" config receive.denyCurrentBranch updateInstead
 state_dir="${WORK}/sandbox-state"
 git clone --quiet "${host}" "${WORK}/clone-1"
-code="$(run_harness "${WORK}/clone-1" STUB_FAIL=green:usage:1 RALPH_PUSH_REMOTE=origin RALPH_STATE_DIR="${state_dir}")"
+# As the entrypoint does, the run is told that origin is its staging repository (ADR 0021).
+staging=(RALPH_PUSH_REMOTE=origin RALPH_SANDBOX=1 RALPH_STAGING_REMOTE="${host}")
+code="$(run_harness "${WORK}/clone-1" STUB_FAIL=green:usage:1 "${staging[@]}" RALPH_STATE_DIR="${state_dir}")"
 check "paused (exit 75)" "[[ ${code} == 75 ]]"
 check "the parked work reached the host" "has_ref ralph/paused/01-demo '${host}'"
 rm -rf "${WORK}/clone-1"
 git clone --quiet "${host}" "${WORK}/clone-2"
-code="$(run_harness "${WORK}/clone-2" RALPH_PUSH_REMOTE=origin RALPH_STATE_DIR="${state_dir}")"
+code="$(run_harness "${WORK}/clone-2" "${staging[@]}" RALPH_STATE_DIR="${state_dir}")"
 check "a new clone resumes and merges into the host" "[[ ${code} == 0 && \$(merged '${host}') == 1 ]]"
 check "RED was not rerun" "[[ \$(agent_runs red) == 1 ]]"
 check "the parked ref is deleted on the host, the state cleared" \
   "! has_ref ralph/paused/01-demo '${host}' && [[ ! -e '${state_dir}/01-demo.pause' ]]"
+end
+
+# Outside the sandbox a remote is not staging: paused agent work stays local, and the harness never
+# deletes a ref there, even one that is obsolete (ADR 0021).
+begin paused-work-stays-local-outside-the-sandbox
+remote="${WORK}/outside.remote.git"
+git init --quiet --bare "${remote}"
+git -C "${SCENARIO}" remote add origin "${remote}"
+git -C "${SCENARIO}" push --quiet origin main
+# An obsolete parked ref that a human pushed there earlier: evidence, never deleted automatically.
+git -C "${SCENARIO}" push --quiet origin main:refs/heads/ralph/paused/01-demo
+code="$(run_harness "${SCENARIO}" STUB_FAIL=green:usage:1 RALPH_PUSH_REMOTE=origin)"
+check "paused (exit 75)" "[[ ${code} == 75 ]] && has_ref ralph/paused/01-demo"
+check "the parked work did not reach the remote" \
+  "[[ \$(git -C '${remote}' rev-parse ralph/paused/01-demo) == \$(git -C '${remote}' rev-parse main) ]]"
+code="$(run_harness "${SCENARIO}" RALPH_PUSH_REMOTE=origin)"
+check "the local resume merges" "[[ ${code} == 0 && \$(merged) == 1 ]]"
+check "the remote ref was not deleted" "has_ref ralph/paused/01-demo '${remote}'"
+check "the log leaves the deletion to a human" "grep -q 'a human decides whether to delete it' '${SCENARIO}.out'"
 end
 
 if ((failures > 0)); then

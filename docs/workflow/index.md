@@ -140,6 +140,15 @@ debt is resolved or triaged):
 A ticket that cannot get through RED, GREEN, DOCS, REVIEW or VERIFY is **rejected**: its failing work is
 committed to a quarantine branch `rejected/<NN>-<slug>-<run-id>` (never to a slice branch or
 `main`), the ticket is marked `blocked` on `main`, and the loop stops for a human to look.
+Rejected work is never pushed by default ([ADR 0021](../adr/0021-rejected-work-is-not-published-by-default.md)):
+inside the sandbox it goes only to the container's staging repository, which the host validates;
+anywhere else it stays on the local branch, and only the blocked status is pushed. Publishing it
+needs both `--push-rejected NN` for that ticket on that run's command line (there is no
+environment variable or config for it) and a passing `scripts/ralph-push-inspect.mjs` over exactly
+the commits the push would send (no `.github/`, env or key files, no credential patterns, no
+binary content; a finding, a failure or an inspection that cannot run blocks it). Paused work is
+likewise pushed only to the staging repository, and the harness never deletes a remote ref
+outside it: removing one is a maintainer's decision.
 Agent transcripts, gate output and review reports are kept in `.ralph/logs/<run-id>/`
 (git-ignored); see [Run artifacts](#run-artifacts) for what is kept and for how long.
 
@@ -384,12 +393,19 @@ commits. `node scripts/ralph-debt.mjs gate` prints every unfinished ticket's ver
 | Verdict        | Cause                                                                                                                                                                                                                                                    |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `needs-triage` | an unresolved `MEDIUM`+ entry is untriaged or unowned (all tickets); an untriaged `LOW` found by a ticket this one builds on, or owned by it, or found outside any ticket's review (all tickets); an entry back in triage that still `Blocks` the ticket |
-| `waiting`      | a triaged unresolved entry lists the ticket in `Blocks`                                                                                                                                                                                                  |
+| `waiting`      | a triaged unresolved entry lists the ticket in `Blocks`, or holds it with `Blocks: ALL_AGENT_TICKETS`                                                                                                                                                    |
 | `clear`        | neither                                                                                                                                                                                                                                                  |
+- **Global hold** ([ADR 0020](../adr/0020-global-fail-closed-debt-hold.md)). `Blocks:
+  ALL_AGENT_TICKETS` holds every unfinished ticket that is not `ready-for-human`, including
+  tickets created later and tickets with a missing or misspelt status, until the entry is
+  resolved. Its owner must be `ready-for-human`, so the fix is worked by hand. A `Blocks` value
+  the gate cannot read holds every ticket.
 - **Selection and batch.** `next_ticket` picks the first cleared ticket, so independent work
   continues; the batch stops `needs-triage` (exit 4, resumable) once no cleared ticket is left
   and one needs triage, and re-checks a paused ticket before resuming it. An invalid register
-  clears nothing.
+  clears nothing: `ralph-loop.sh` stops with an error before selecting anything, and a ticket
+  without a verdict is never `clear`. Each run keeps the verdicts it selected by in
+  `.ralph/logs/<run-id>/debt-gate.tsv`.
 - **Importer.** The host refuses (exit 3) a ticket the base's gate does not clear, and a slice
   whose register changes anything but resolving entries and the recorder's own additions
   (`slice` rules: severity, risk, triage, target, blocks, acceptance and history are fixed), or
@@ -493,7 +509,8 @@ Nothing else is mounted. That excludes the host repository, its `.git`, `.ralph/
 `.ralph/state`, the Docker socket, and GitHub credentials. The container runs with
 `--cap-drop ALL` and `no-new-privileges`. Inside it, the entrypoint clones the bundle into a
 private staging bare repository and a workspace, and Ralph pushes to that staging repository
-(`RALPH_PUSH_REMOTE=origin`). At exit, the staging repository's branches are bundled into
+(`RALPH_PUSH_REMOTE=origin`, with `RALPH_STAGING_REMOTE` naming it, the only remote rejected or
+paused work reaches without an operator's authorization: ADR 0021). At exit, the staging repository's branches are bundled into
 `result.bundle`, whatever the outcome.
 
 `scripts/ralph-accept.mjs` then decides on the host. It is the only code that changes the host

@@ -31,8 +31,9 @@ ADRs do. Review reports in `.ralph/logs/` expire after 30 days; this register do
 - **Triage.** A human classifies every finding: `Risk` (`CORRECTNESS`, `CONCURRENCY`,
   `SECURITY`, `VERIFICATION`, `OPERABILITY`, `MAINTAINABILITY`; `UNTRIAGED` until then),
   `Triage` (`YYYY-MM-DD: <who decided, and where>`; `pending` until then), an owner
-  (`Target: ticket NN`, required for `MEDIUM` and worse) and the tickets it `Blocks` (`none`, or
-  ticket numbers that rely on the fixed behaviour). Risk and blocking are separate decisions:
+  (`Target: ticket NN`, required for `MEDIUM` and worse) and the tickets it `Blocks` (`none`,
+  ticket numbers that rely on the fixed behaviour, or `ALL_AGENT_TICKETS`: every ticket not
+  `ready-for-human`, now and later, for a pre-run safety blocker, [ADR 0020](adr/0020-global-fail-closed-debt-hold.md)). Risk and blocking are separate decisions:
   a `LOW` blocks only the tickets listed in `Blocks`. The [debt gate](adr/0016-risk-based-debt-gate.md)
   holds a ticket that a blocking entry names, every ticket while a `MEDIUM`+ entry is untriaged
   or unowned, and every ticket that builds on the ticket an untriaged `LOW` was found in. The
@@ -1527,10 +1528,10 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `scripts/ralph-accept.mjs:926`, `scripts/ralph-batch.mjs:222`
 - **Problem:** A rejected run's work is imported as `refs/heads/rejected/<slug>-<run-id>`. Its tree passed no path rule. Only a documentation note says to inspect it with `git log -p` or `git show` rather than check it out, and a broad push (`git push --all`) would publish it, so its own `.github/workflows` would run on GitHub.
 - **Impact:** None while operators follow the note and push only `main`, as the batch does. A careless checkout writes untrusted files into the host working tree; a broad push runs untrusted workflows with the repository's secrets.
-- **Justification:** Deferred from ticket 47: the batch (`rejectedRefs`) and `ralph-loop.sh` outside the sandbox both find rejections under `refs/heads/rejected/`, so moving them changes the batch's rejection detection and the non-sandbox loop together. The batch itself never checks out or pushes these branches. Triage 2026-11-06: rejected work lands under refs/heads/, so a broad push would run its workflows; harness-only, done in a human-reviewed commit (ticket 52) and blocks no feature ticket. Reassessed 2026-11-14: no longer harness-only in effect, because one rejected branch was pushed to the public remote. Until ticket 52 moves quarantine out of refs/heads/, no Ralph production run may start; tickets 49, 52 and 58 are worked by hand and are not blocked. `Blocks` lists the tickets explicitly for now, so it fails closed only by hand: until ticket 52 merges, the reviewed commit that creates a ticket Ralph can select adds its number here in the same commit. Ticket 52 replaces the list with a dynamic, fail-closed global gate.
+- **Justification:** Deferred from ticket 47: the batch (`rejectedRefs`) and `ralph-loop.sh` outside the sandbox both find rejections under `refs/heads/rejected/`, so moving them changes the batch's rejection detection and the non-sandbox loop together. The batch itself never checks out or pushes these branches. Triage 2026-11-06: rejected work lands under refs/heads/, so a broad push would run its workflows; harness-only, done in a human-reviewed commit (ticket 52) and blocks no feature ticket. Reassessed 2026-11-14: no longer harness-only in effect, because one rejected branch was pushed to the public remote. Until ticket 52 moves quarantine out of refs/heads/, no Ralph production run may start; tickets 49, 52 and 58 are worked by hand and are not blocked. `Blocks` is the global hold (`ALL_AGENT_TICKETS`, ADR 0020): every ticket that is not `ready-for-human` waits, including tickets created later, so no list has to be kept current by hand. Ticket 52's global gate and its rejected-push controls are in place; the quarantine namespace move, the ptrace regression test (TD-060) and the maintainer's evidence-first cleanup of the public ref remain, so the entry stays unresolved.
 - **Remediation:** Import rejected work under `refs/ralph/rejected/<slug>-<run-id>` (outside `refs/heads`) and have the batch detect rejections there; keep `refs/heads/rejected/` only for runs outside the sandbox.
 - **Target:** ticket 52 (`issues/52-harness-quarantine-and-ptrace-refusal-coverage.md`)
-- **Blocks:** 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 43, 44, 45, 46, 50, 51, 54, 55, 57, 59
+- **Blocks:** ALL_AGENT_TICKETS
 - **Acceptance:** none
 - **Resolution:** none
 - **Verification:** none
@@ -1539,6 +1540,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-04: recorded: LOW finding deferred from ticket 47's Spec review (round 4)
   - 2026-11-06: triaged: SECURITY, owned by ticket 52, blocks no ticket (initial triage, ticket 53)
   - 2026-11-14: severity revised LOW -> MEDIUM (approved risk reassessment, not an automatic escalation): SECURITY, owned by ticket 52, blocks every ticket Ralph can select (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 43, 44, 45, 46, 50, 51, 54, 55, 57, 59) until it is resolved; public remote ref confirmed, no secrets found by a read-only scan, remote ref not deleted (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
+  - 2026-11-14: Blocks switched from the explicit list (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 43, 44, 45, 46, 50, 51, 54, 55, 57, 59) to the global hold ALL_AGENT_TICKETS (ADR 0020), in the same commit that introduces the global gate, so no commit leaves a ticket Ralph can select clear; the entry stays PLANNED and unresolved (maintainer instruction of 2026-11-14 to implement ticket 52's global safety gate, fix/ticket-52-ralph-safety-gate)
 
 ### TD-060: The verifier's Yama refusal has no regression test
 

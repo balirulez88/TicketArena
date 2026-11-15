@@ -430,6 +430,8 @@ lead_ticket() {
   base_sha="$(git rev-parse HEAD)"
   git switch --quiet -c "${branch}" "${BASE_BRANCH}" || die "could not create ${branch}"
   CURRENT_BRANCH="${branch}"
+  # reject_slice (ralph-loop.sh) refuses to commit or push if the base branch moved from here.
+  SLICE_BASE="$(git rev-parse "refs/heads/${BASE_BRANCH}")"
   LEAD_SLUG="${slug}" LEAD_BRANCH="${branch}" LEAD_BASE="${base_sha}" LEAD_CANDIDATE=""
   trap 'lead_interrupt 130' INT
   trap 'lead_interrupt 143' TERM

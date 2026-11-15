@@ -1897,6 +1897,39 @@ describe("ralph-accept: the debt gate (ADR 0016)", () => {
     assert.match(result.output, /\(waiting\): TD-001 \(CORRECTNESS\) until ticket 03 resolves it/);
   });
 
+  // ADR 0020: one unresolved entry holds every ticket not worked by hand, without listing them.
+  const globalHold = (blocks) => (dir) => {
+    write(
+      dir,
+      "issues/05-fix.md",
+      DEMO.replace("# 01: Demo ticket", "# 05: Fix").replace("ready-for-agent", "ready-for-human"),
+    );
+    editDebt(dir, { ...TRIAGED, Status: "PLANNED", Target: "ticket 05", Blocks: blocks });
+  };
+
+  it("refuses a slice while a global hold is unresolved, though the hold names no ticket", () => {
+    const host = hostWithDebt();
+    maintain(host, "chore(debt): TD-001 holds every agent ticket", globalHold("ALL_AGENT_TICKETS"));
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws);
+    const result = assertRefused(host, finish(host, ws), { base });
+    assert.match(
+      result.output,
+      /\(waiting\): TD-001 \(CORRECTNESS\) holds every ticket not ready-for-human until ticket 05 resolves it/,
+    );
+  });
+
+  it("refuses a slice when the base's Blocks value cannot be read (fail closed)", () => {
+    const host = hostWithDebt();
+    maintain(host, "chore(debt): a malformed hold", globalHold("ALL_AGENT_TICKETS, 01"));
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws);
+    const result = assertRefused(host, finish(host, ws), { base });
+    assert.match(result.output, /\(needs-triage\): TD-001 has a Blocks value the gate cannot read/);
+  });
+
   it("refuses a dependent ticket while a LOW finding of its blocker awaits triage", () => {
     const host = hostWithDebt();
     // Ticket 01 is done, and TD-001 came from its review: ticket 02 builds on it.
@@ -1979,6 +2012,7 @@ function leadHost() {
     "ralph-usage.mjs",
     "ralph-red.mjs",
     "ralph-provider.mjs",
+    "ralph-push-inspect.mjs",
   ]) {
     copyFileSync(join(source, "scripts", script), join(host, "scripts", script));
   }

@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-06
 - **Extends:** [0014](0014-sandbox-trust-boundary.md), [0015](0015-review-and-verification-isolation.md)
+- **Amended by:** [0020](0020-global-fail-closed-debt-hold.md) (`Blocks: ALL_AGENT_TICKETS`, the global, fail-closed hold)
 
 ## Context
 
@@ -28,12 +29,12 @@ a human makes both.
 
 Each entry gains four fields, owned by `scripts/ralph-debt.mjs`:
 
-| Field        | Values                                                                                                     | Who sets it                                                                               |
-| ------------ | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `Risk`       | `CORRECTNESS`, `CONCURRENCY`, `SECURITY`, `VERIFICATION`, `OPERABILITY`, `MAINTAINABILITY`, or `UNTRIAGED` | human triage (the recorder sets `SECURITY` for a security finding, `UNTRIAGED` otherwise) |
-| `Triage`     | `pending`, or `YYYY-MM-DD: <who decided, and where>`                                                       | human triage                                                                              |
-| `Blocks`     | `none`, or the two-digit tickets that may not start until the entry is resolved                            | human triage                                                                              |
-| `Acceptance` | for `ACCEPTED_RISK` only: `Residual risk:`, `Review when:`, `Decided by:`                                  | human decision                                                                            |
+| Field        | Values                                                                                                      | Who sets it                                                                               |
+| ------------ | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `Risk`       | `CORRECTNESS`, `CONCURRENCY`, `SECURITY`, `VERIFICATION`, `OPERABILITY`, `MAINTAINABILITY`, or `UNTRIAGED`  | human triage (the recorder sets `SECURITY` for a security finding, `UNTRIAGED` otherwise) |
+| `Triage`     | `pending`, or `YYYY-MM-DD: <who decided, and where>`                                                        | human triage                                                                              |
+| `Blocks`     | `none`, the two-digit tickets that may not start until the entry is resolved, or `ALL_AGENT_TICKETS` (0020) | human triage                                                                              |
+| `Acceptance` | for `ACCEPTED_RISK` only: `Residual risk:`, `Review when:`, `Decided by:`                                   | human decision                                                                            |
 
 `Target` (`ticket NN …`) is the **owner**: the ticket that must resolve the entry before it can
 merge. The recorder may suggest a risk class from the finding's kind in the history line
@@ -61,7 +62,7 @@ For every unfinished ticket the host computes one verdict from the base's regist
 | Verdict        | When                                                                                                                                                                                                                                                                                                                                     |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `needs-triage` | an unresolved `MEDIUM` or worse entry is untriaged or unowned (every ticket); or an untriaged `LOW` entry was found by a ticket this one builds on (transitively, `Blocked by`), or this ticket owns it, or it came from outside any ticket's review (every ticket); or an entry sent back to triage still lists this ticket in `Blocks` |
-| `waiting`      | a triaged unresolved entry lists this ticket in `Blocks`                                                                                                                                                                                                                                                                                 |
+| `waiting`      | a triaged unresolved entry lists this ticket in `Blocks`, or holds it with `ALL_AGENT_TICKETS` (0020)                                                                                                                                                                                                                                    |
 | `clear`        | otherwise                                                                                                                                                                                                                                                                                                                                |
 
 So: `CRITICAL` and `HIGH` still block the merge itself, unchanged. An untriaged `MEDIUM` holds all

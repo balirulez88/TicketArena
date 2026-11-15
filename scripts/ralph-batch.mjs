@@ -43,6 +43,7 @@ import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { redactCredentials } from "./ralph-artifacts.mjs";
 import { checkRegisterText, debtGate, loadTickets, parseRegister } from "./ralph-debt.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -90,7 +91,12 @@ function run(command, args, options = {}) {
   const result = spawnSync(command, args, { cwd: root, encoding: "utf8", ...options });
   return { status: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
-const git = (...args) => run("git", args);
+// Git's errors can quote the remote's URL with its credentials (it talks to GitHub here), and they
+// end up in the terminal and the batch's state file: they are scrubbed before anything reads them.
+const git = (...args) => {
+  const result = run("git", args);
+  return { ...result, stderr: redactCredentials(result.stderr) };
+};
 const gitOut = (...args) => {
   const result = git(...args);
   if (result.status !== 0) {

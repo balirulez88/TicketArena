@@ -22,6 +22,7 @@
 //        node scripts/ralph-artifacts.mjs remove --root <review root> --run-id <id>
 //        node scripts/ralph-artifacts.mjs cleanup --review-root <dir> --log-root <dir> [--keep <id>]
 //        node scripts/ralph-artifacts.mjs redact --run <log dir>
+//        <git output> | node scripts/ralph-artifacts.mjs scrub
 
 import {
   existsSync,
@@ -144,7 +145,47 @@ export function removeRun(root, runId) {
 // --- Secret redaction --------------------------------------------------------------------------
 
 const SECRET_NAME = /(API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/i;
-const SECRET_PATTERNS = [/sk-ant-[A-Za-z0-9_-]{8,}/g];
+// Credentials whose shape alone says what they are. Never legitimate work, so they are removed
+// from every artifact, work patches included.
+const SECRET_PATTERNS = [
+  /sk-ant-[A-Za-z0-9_-]{8,}/g,
+  /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})/g,
+  /\bglpat-[A-Za-z0-9_-]{20,}/g,
+  /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
+  /\bxox[abposr]-[A-Za-z0-9-]{10,}/g,
+  /\bnpm_[A-Za-z0-9]{30,}/g,
+  /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+];
+// An Authorization header's value, whatever its scheme (Git prints them with GIT_CURL_VERBOSE or
+// echoes http.extraHeader in config errors).
+const AUTHORIZATION = /\b(authorization\s*:\s*)(?:(?:basic|bearer|token|digest)\s+)?[^\s'"]+/gi;
+// Only for Git's output, not for whole artifacts: a work patch legitimately holds the project's
+// local connection strings, and rewriting those would make it impossible to apply. Greedy up to the
+// last `@` of the token: a typed password may itself hold an `@`.
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s'"<>]*@/gi;
+const QUERY_SECRET =
+  /([?&](?:access_token|private_token|token|password|passwd|pwd|api_key|apikey|secret|sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token)=)[^&\s'"#]+/gi;
+
+function redactPatterns(text) {
+  let result = text.replace(AUTHORIZATION, "$1[REDACTED]");
+  for (const pattern of SECRET_PATTERNS) {
+    result = result.replace(pattern, "[REDACTED]");
+  }
+  return result;
+}
+
+/**
+ * Git's own error output without credentials. A push or fetch can quote the remote's URL, a
+ * credential helper's message or an HTTP header, and that text reaches the terminal, the run's
+ * logs and the batch's state, so it is scrubbed before it is printed anywhere (ADR 0021). A URL's
+ * userinfo (`user:password@`) is removed whatever it contains: Git does not percent-encode a
+ * password typed into a URL, so it may hold a slash, and over-redacting a URL costs nothing.
+ */
+export function redactCredentials(text) {
+  return redactPatterns(
+    String(text).replace(URL_USERINFO, "$1***@").replace(QUERY_SECRET, "$1[REDACTED]"),
+  );
+}
 
 export function secretValues(env) {
   return Object.entries(env)
@@ -160,10 +201,7 @@ export function redactText(text, secrets) {
   for (const secret of secrets) {
     result = result.split(secret).join("[REDACTED]");
   }
-  for (const pattern of SECRET_PATTERNS) {
-    result = result.replace(pattern, "[REDACTED]");
-  }
-  return result;
+  return redactPatterns(result);
 }
 
 /** Rewrites every regular file under a run's log directory without the given secrets. */
@@ -209,6 +247,11 @@ const COMMANDS = {
     for (const path of redactRun(values.run, secretValues(process.env))) {
       console.error(`ralph-artifacts: redacted secrets in ${path}`);
     }
+  },
+  // A filter for the shell harness: Git's output on stdin, scrubbed on stdout.
+  scrub: () => {
+    const text = readFileSync(0, "utf8");
+    process.stdout.write(redactText(redactCredentials(text), secretValues(process.env)));
   },
 };
 

@@ -30,6 +30,7 @@ import { spawnSync } from "node:child_process";
 import { basename } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { redactCredentials } from "./ralph-artifacts.mjs";
 
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const SHA = /^[0-9a-f]{40}$/;
@@ -168,12 +169,9 @@ export function inspectCommits(commits) {
 
 class Unavailable extends Error {}
 
-// What reaches the terminal: printable ASCII only (paths are agent-controlled), and no URL
-// credentials (Git's own errors may quote a remote URL with a token in it).
-export const printable = (text) =>
-  String(text)
-    .replace(/\/\/[^/@\s]+@/g, "//***@")
-    .replace(/[^ -~]/g, "?");
+// What reaches the terminal: printable ASCII only (paths are agent-controlled), and no
+// credentials (Git's own errors may quote a remote URL with a token or password in it).
+export const printable = (text) => redactCredentials(text).replace(/[^ -~]/g, "?");
 
 function git(args, input) {
   const result = spawnSync("git", ["-c", "core.quotePath=false", ...args], {

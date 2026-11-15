@@ -37,7 +37,9 @@
 # outage is retried in a fresh session, bounded; a usage limit, refused credentials or a provider
 # that stays down PAUSES the run (exit 75): the work in progress is parked on
 # `ralph/paused/<slug>` with a state file in RALPH_STATE_DIR, nothing is rejected or blocked, and
-# no implementation attempt or review round is spent. Running the harness again resumes the
+# no implementation attempt or review round is spent (in the sandbox only once the parked ref is
+# in the staging repository; otherwise the run fails and saves the work as a patch in its logs:
+# park_unreachable). Running the harness again resumes the
 # ticket at the interrupted phase and attempt; an interrupted review round is redone from scratch
 # and never judged. Anything not confidently a provider failure is judged as before.
 #
@@ -131,6 +133,9 @@ CURRENT_BRANCH=""
 # The ticket the gate's debt check judges the slice for (set per ticket in process_ticket).
 GATE_TICKET=""
 GATE_TICKET_FILE=""
+# The ticket the debt gate judged clear in this process, at the start of its work
+# (require_debt_clear). Every agent launcher refuses any other ticket (require_debt_cleared).
+DEBT_CLEARED=""
 REVIEW_FEEDBACK=""
 RUN_STATUS=failed
 # Agent sessions of the current ticket that ran out of context (see fresh_session).
@@ -344,6 +349,56 @@ debt_gate() {
 # Field $2 (2 = state, 3 = reasons) of ticket file $3's line in the gate output $1.
 debt_field() {
   awk -F'\t' -v n="$(ticket_number "$3")" -v f="$2" '$1 == n { print $f }' <<<"$1"
+}
+
+# The gate at the moment agent work on a ticket starts or resumes, whichever driver and whatever
+# picked the ticket (ADR 0020). Selection applies the gate too, but a hold that only selection
+# enforces is one caller, bug or future entry point away from being bypassed. Anything but `clear`
+# refuses: a waiting or untriaged ticket, a gate that cannot run (missing, malformed or unreadable
+# register or tickets), and a gate with no verdict for the ticket. Every verdict is appended to the
+# run's debt-gate-verdicts.tsv before anything happens, and a verdict that cannot be recorded
+# refuses too. Called while the base branch is checked out, so it judges the base's register.
+# Usage: require_debt_clear <ticket file> <driver>
+require_debt_clear() {
+  local ticket=$1 driver=$2 number gate state reasons
+  number="$(ticket_number "${ticket}")"
+  DEBT_CLEARED=""
+  if gate="$(debt_gate)"; then
+    state="$(debt_field "${gate}" 2 "${ticket}")"
+    reasons="$(debt_field "${gate}" 3 "${ticket}")"
+    [[ -n "${state}" ]] || state=missing reasons="the debt gate has no verdict for this ticket"
+  else
+    state=unavailable reasons="the debt gate could not run (pnpm run check:debt)"
+  fi
+  record_gate_verdict "${driver}" "${number}" "${state}" "${reasons}" ||
+    die "debt gate: could not record the verdict for ticket ${number}; no agent runs"
+  case "${state}" in
+    clear) DEBT_CLEARED="${number}" ;;
+    unavailable) die "debt gate: ${reasons}; ticket ${number} is not started and no agent runs" ;;
+    *) die "debt gate: ticket ${number} is ${state}; no agent runs (${reasons})" ;;
+  esac
+}
+
+# Both drivers' run-level check: the gate must reach a verdict at all, or nothing is selected (a
+# broken register must not look like an empty queue). With a file, the verdicts the run selects by
+# are kept there, with its logs (ADR 0020: auditable decisions).
+# Usage: require_debt_verdicts [file]
+require_debt_verdicts() {
+  debt_gate >"${1:-/dev/null}" ||
+    die "the debt gate could not reach a verdict (pnpm run check:debt); no ticket is selected"
+}
+
+# One audit line: when, driver, ticket, verdict, the base commit it judged, reasons.
+record_gate_verdict() {
+  [[ -n "${LOG_DIR}" && -d "${LOG_DIR}" ]] || return 1
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$1" "$2" "$3" \
+    "$(git rev-parse --verify --quiet HEAD || echo none)" "$4" >>"${LOG_DIR}/debt-gate-verdicts.tsv"
+}
+
+# Every launcher of agent or reviewer sessions for a ticket calls this first.
+require_debt_cleared() {
+  [[ -n "${GATE_TICKET}" && "${DEBT_CLEARED}" == "${GATE_TICKET}" ]] ||
+    die "refusing to start an agent: the debt gate has not cleared ticket ${GATE_TICKET:-?} in this run (ADR 0020)"
 }
 
 # The tickets in order whose blockers are done, each with its debt verdict: "<file> <state>".
@@ -666,6 +721,7 @@ provider_retry() {
 # Returns 0 whatever the agent did (the gate decides), or PAUSED_EXIT after a provider failure.
 run_agent() {
   local phase=$1 ticket=$2 feedback_file=$3 attempt=$4 slug output status class retry=0
+  require_debt_cleared
   slug="$(ticket_slug "${ticket}")"
   output="${LOG_DIR}/${slug}.${phase}-${attempt}.agent.out"
   local -a agent_argv
@@ -817,6 +873,9 @@ reviewers_tampered() {
 # count, and a resumed run redoes it from scratch (new changeset token, both axes).
 run_review() {
   local ticket=$1 round=$2 slug prefix base head diff_file token verdict=0
+  # Here, not in run_reviewer: the reviewers run in the background, where a refusal would not stop
+  # the run.
+  require_debt_cleared
   slug="$(ticket_slug "${ticket}")"
   prefix="${LOG_DIR}/${slug}.review-${round}"
   base="$(git merge-base "${BASE_BRANCH}" HEAD)"
@@ -1001,6 +1060,26 @@ archive_ticket() {
   printf '%s\n' "${archived}"
 }
 
+# Git's push errors can quote the remote's URL with its credentials (an https remote with a token
+# or password in it, a credential helper's message), and RALPH_PUSH_REMOTE may itself be such a
+# URL. Both reach the terminal and the logs only scrubbed (scripts/ralph-artifacts.mjs scrub,
+# ADR 0021). If the scrubber cannot run, Git's message is withheld rather than printed raw.
+# Usage: git_push <git push arguments...>; returns git push's status.
+git_push() {
+  local err status=0
+  err="$(git push --quiet "$@" 2>&1 >/dev/null)" || status=$?
+  if [[ -n "${err}" ]]; then
+    printf '%s\n' "${err}" | node "${ARTIFACTS}" scrub >&2 ||
+      log "  (Git's message is withheld: it could not be scrubbed of credentials)"
+  fi
+  return "${status}"
+}
+
+# RALPH_PUSH_REMOTE as the harness may name it in its own messages.
+remote_shown() {
+  printf '%s' "${PUSH_REMOTE}" | node "${ARTIFACTS}" scrub 2>/dev/null || printf 'the push remote'
+}
+
 finalize_slice() {
   local ticket=$1 branch=$2 title archived
   title="$(ticket_title "${ticket}")"
@@ -1015,9 +1094,9 @@ finalize_slice() {
   if [[ -n "${PUSH_REMOTE}" ]]; then
     # Checked explicitly: errexit is off here. An unpushed merge must not count as done (the
     # sandbox clone dies with it), nor may the ticket's pause state be cleared after it.
-    git push --quiet "${PUSH_REMOTE}" "${branch}" "${BASE_BRANCH}" ||
-      die "merged ${branch} locally but could not push it to ${PUSH_REMOTE}; the ticket is NOT done there"
-    log "  pushed ${branch} and ${BASE_BRANCH} to ${PUSH_REMOTE}"
+    git_push "${PUSH_REMOTE}" "${branch}" "${BASE_BRANCH}" ||
+      die "merged ${branch} locally but could not push it to $(remote_shown); the ticket is NOT done there"
+    log "  pushed ${branch} and ${BASE_BRANCH} to $(remote_shown)"
   fi
 }
 
@@ -1062,16 +1141,17 @@ staging_remote() {
   local urls url staging
   [[ "${RALPH_SANDBOX:-0}" == 1 && -n "${RALPH_STAGING_REMOTE:-}" && -n "${PUSH_REMOTE}" ]] ||
     return 1
-  staging="$(cd "${RALPH_STAGING_REMOTE}" 2>/dev/null && pwd -P)" || return 1
+  staging="${RALPH_STAGING_REMOTE}"
+  [[ -d "${staging}" ]] || return 1
   # Where a push actually goes: pushurl and pushInsteadOf can differ from the fetch URL, so every
-  # push URL must be the staging repository. Compared as physical directories, because Git may
-  # report the same path in another spelling (Git for Windows turns /tmp/x into C:/.../x); a URL
-  # that is not an existing local directory is never staging.
+  # push URL must be the staging repository. Compared as the same directory on disk (device and
+  # inode, `-ef`), never as text: Git may report one path in another spelling (Git for Windows
+  # turns /tmp/x into C:/.../x, and its file system ignores case), and a symlink to the staging
+  # repository pushes into it. A URL that is not an existing local directory is never staging.
   urls="$(git remote get-url --push --all "${PUSH_REMOTE}" 2>/dev/null)" || return 1
   [[ -n "${urls}" ]] || return 1
   while read -r url; do
-    [[ -n "${url}" && -d "${url}" ]] || return 1
-    [[ "$(cd "${url}" 2>/dev/null && pwd -P)" == "${staging}" ]] || return 1
+    [[ -n "${url}" && -d "${url}" && "${url}" -ef "${staging}" ]] || return 1
   done <<<"${urls}"
 }
 
@@ -1109,16 +1189,16 @@ push_rejection() {
     return 0
   }
   if may_push_rejection "${quarantine}" "${ticket}"; then
-    git push --quiet "${PUSH_REMOTE}" "${QUARANTINE_SHA}:refs/heads/${quarantine}" ||
-      log "  ERROR: could not push ${quarantine} to ${PUSH_REMOTE}; it stays local"
+    git_push "${PUSH_REMOTE}" "${QUARANTINE_SHA}:refs/heads/${quarantine}" ||
+      log "  ERROR: could not push ${quarantine} to $(remote_shown); it stays local"
   fi
-  if git push --quiet "${PUSH_REMOTE}" "${BASE_BRANCH}"; then
-    log "  pushed the blocked status on ${BASE_BRANCH} to ${PUSH_REMOTE}"
-  elif git push --quiet "${PUSH_REMOTE}" "${BASE_BRANCH}:refs/heads/${side}"; then
-    log "  ${PUSH_REMOTE} refused ${BASE_BRANCH} (local changes or diverged); blocked status" \
+  if git_push "${PUSH_REMOTE}" "${BASE_BRANCH}"; then
+    log "  pushed the blocked status on ${BASE_BRANCH} to $(remote_shown)"
+  elif git_push "${PUSH_REMOTE}" "${BASE_BRANCH}:refs/heads/${side}"; then
+    log "  $(remote_shown) refused ${BASE_BRANCH} (local changes or diverged); blocked status" \
       "is on ${side}: merge it into ${BASE_BRANCH} when ready"
   else
-    log "  ERROR: could not push the blocked status to ${PUSH_REMOTE}"
+    log "  ERROR: could not push the blocked status to $(remote_shown)"
   fi
 }
 
@@ -1128,19 +1208,49 @@ push_rejection() {
 
 state_field() { sed -n "s/^$2=//p" "$1" | head -n 1; }
 
+# A pause in the sandbox whose parked ref cannot reach the staging repository: a resume could never
+# read it, so no pause is claimed (a state file naming a ref the host never receives would make the
+# host refuse the whole run). The state directory is left exactly as the run found it, so a pause
+# the host already holds for this ticket (its ref and state) stays valid and resumable. The new work
+# is kept on the slice branch and the parked ref, and, because this clone dies with the container,
+# as a patch series in the run's logs, which the host imports.
+# Usage: park_unreachable <ticket> <slice branch> <parked ref> <why>
+park_unreachable() {
+  local ticket=$1 branch=$2 ref=$3 why=$4 slug patch base
+  slug="$(ticket_slug "${ticket}")"
+  patch="${LOG_DIR}/${slug}.paused-work.patch"
+  base="$(git rev-parse "${BASE_BRANCH}")"
+  log "  ERROR: ${ref} cannot be parked where a resume reads it: ${why}. No pause is recorded"
+  if git format-patch --quiet --stdout "${base}..${ref}" >"${patch}"; then
+    log "  the work is saved as ${patch} (in the imported logs), on top of ${BASE_BRANCH}" \
+      "${base:0:12}; it is also on ${branch} and ${ref} in this clone, which does not outlive" \
+      "the container"
+    # --empty=keep: a pause that came before the phase's agent wrote anything parks an empty
+    # commit, on which a plain `git am` stops ("Patch is empty").
+    log "  to recover it: git switch -c ${branch} ${base:0:12} && git am --empty=keep <that" \
+      "patch>; its last commit is the interrupted ${PAUSE_PHASE} phase's unchecked work (empty if" \
+      "the phase had written nothing). Or rerun: the ticket restarts from scratch, or from an" \
+      "earlier pause if the host still holds one"
+  else
+    log "  ERROR: could not save the work as ${patch}; it is only on ${branch} and ${ref} in this clone"
+  fi
+}
+
 # Nothing is wrong with the ticket, so it is neither rejected nor blocked: `main` is untouched and
 # still shows it `ready-for-agent`. The work in progress is committed on ralph/paused/<slug>,
-# directly on top of the last gated checkpoint (so the resume can tell the two apart), and pushed
-# with the slice branch's other evidence so it survives the sandbox. The state file is written
-# last: without it a rerun starts the ticket from scratch, which is always safe.
+# directly on top of the last gated checkpoint (so the resume can tell the two apart). Outside the
+# sandbox the resume reads that local ref. Inside it the clone dies with the container, so the ref
+# must reach the staging repository, the only remote paused work may go to (ADR 0021); if it cannot
+# (park_unreachable), nothing claims a pause. The slice branch is deleted and the state directory
+# touched only once the parked ref is where a resume reads it, and the state file is written last:
+# without it a rerun starts the ticket from scratch, which is always safe.
 pause_ticket() {
   local ticket=$1 branch=$2 slug ref state gated
   slug="$(ticket_slug "${ticket}")"
   ref="ralph/paused/${slug}"
   state="${STATE_DIR}/${slug}.pause"
   gated="$(git rev-parse HEAD)"
-  # process_ticket runs with errexit off (it is called in a `||` list), so every step is checked:
-  # the slice branch is deleted only once the parked ref provably holds the work.
+  # process_ticket runs with errexit off (it is called in a `||` list), so every step is checked.
   if ! { git add -A &&
     git commit --quiet --allow-empty -m "wip(ralph): paused in ${PAUSE_PHASE} (${PROVIDER_PAUSE})" &&
     git branch --quiet --force "${ref}" HEAD &&
@@ -1149,21 +1259,25 @@ pause_ticket() {
     log "  ERROR: could not park ${slug}; its work stays on ${branch} for inspection, not resumable"
     return 1
   fi
+  if [[ "${RALPH_SANDBOX:-0}" == 1 ]]; then
+    if ! staging_remote; then
+      park_unreachable "${ticket}" "${branch}" "${ref}" \
+        "RALPH_PUSH_REMOTE is not the sandbox's staging repository (RALPH_STAGING_REMOTE)"
+      return 1
+    fi
+    if ! git_push --force "${PUSH_REMOTE}" "${ref}"; then
+      park_unreachable "${ticket}" "${branch}" "${ref}" "the push to the staging repository failed"
+      return 1
+    fi
+  elif [[ -n "${PUSH_REMOTE}" ]]; then
+    log "  ${ref} stays local: paused agent work is pushed only to the sandbox's staging repository"
+  fi
   mkdir -p "${STATE_DIR}"
   rm -f "${state}" "${STATE_DIR}/${slug}.feedback.log" "${STATE_DIR}/${slug}.blocking.md"
   [[ ! -s "${PAUSE_FEEDBACK}" ]] || cp "${PAUSE_FEEDBACK}" "${STATE_DIR}/${slug}.feedback.log"
   [[ "${PAUSE_PHASE}" != review-fix ]] || cp "${REVIEW_FEEDBACK}" "${STATE_DIR}/${slug}.blocking.md"
   git branch --quiet -D "${branch}"
   CURRENT_BRANCH=""
-  # Parked work is unreviewed agent output too: it leaves only for the sandbox's staging
-  # repository (ADR 0021); elsewhere the local ref is what the resume reads.
-  if staging_remote && ! git push --quiet --force "${PUSH_REMOTE}" "${ref}"; then
-    log "  ERROR: could not push ${ref} to ${PUSH_REMOTE}; the ticket will restart from scratch"
-    return 0
-  fi
-  if [[ -n "${PUSH_REMOTE}" ]] && ! staging_remote; then
-    log "  ${ref} stays local: paused agent work is not pushed outside the sandbox"
-  fi
   printf '%s\n' "ticket=$(ticket_number "${ticket}")" "ref=${ref}" \
     "base=$(git rev-parse "${BASE_BRANCH}")" "gated=${gated}" "paused=$(git rev-parse "${ref}")" \
     "phase=${PAUSE_PHASE}" "attempt=${PAUSE_ATTEMPT}" "round=${PAUSE_ROUND}" \
@@ -1231,10 +1345,10 @@ clear_pause() {
   # Only the sandbox's own staging repository is cleaned automatically; a remote ref anywhere else
   # is evidence, and deleting it is a human's decision (ADR 0021).
   if staging_remote; then
-    git push --quiet "${PUSH_REMOTE}" --delete "${ref}" ||
-      log "  could not delete ${ref} on ${PUSH_REMOTE}; it is obsolete, delete it by hand"
+    git_push "${PUSH_REMOTE}" --delete "${ref}" ||
+      log "  could not delete ${ref} on $(remote_shown); it is obsolete, delete it by hand"
   elif [[ -n "${PUSH_REMOTE}" ]]; then
-    log "  ${ref} is obsolete; if ${PUSH_REMOTE} has it, a human decides whether to delete it"
+    log "  ${ref} is obsolete; if $(remote_shown) has it, a human decides whether to delete it"
   fi
 }
 
@@ -1259,8 +1373,10 @@ phase_due() { (($(phase_rank "$1") >= $(phase_rank "${2:-red}"))); }
 stop_ticket() {
   local ticket=$1 branch=$2 status=$3 reason=$4
   if ((status == PAUSED_EXIT)); then
+    # Not paused, rejected or blocked: pause_ticket said above where the work is kept.
     pause_ticket "${ticket}" "${branch}" ||
-      die "provider failure (${PROVIDER_PAUSE}), and the work could not be parked: see ${branch}"
+      die "provider failure (${PROVIDER_PAUSE}), and the work could not be parked for a resume;" \
+        "nothing is paused, rejected or blocked. Where the work is kept is logged above"
     return "${PAUSED_EXIT}"
   fi
   reject_slice "${ticket}" "${branch}" "${reason}"
@@ -1290,6 +1406,8 @@ process_ticket() {
   [[ ! -e "${DONE_DIR}/$(basename "${ticket}")" ]] ||
     die "${ticket} is already archived in ${DONE_DIR}/; refusing to process it again"
   git show-ref --quiet "refs/heads/${branch}" && die "branch ${branch} already exists"
+  # Before a fresh start or a resume touches anything.
+  require_debt_clear "${ticket}" ralph
   PROVIDER_PAUSE="" PAUSE_PHASE="" PAUSE_ATTEMPT=1 PAUSE_ROUND=1 PAUSE_FEEDBACK=""
   RESUME_PHASE="" RESUME_ATTEMPT=1 RESUME_ROUND=1 RESUME_FEEDBACK="" RESUME_BLOCKING=""
   CONTEXT_EXHAUSTIONS=0
@@ -1353,8 +1471,7 @@ main() {
   preflight
 
   # A gate that cannot reach a verdict selects nothing; say so instead of reporting an empty queue.
-  debt_gate >/dev/null ||
-    die "the debt gate could not reach a verdict (pnpm run check:debt); no ticket is selected"
+  require_debt_verdicts
 
   if [[ "${DRY_RUN}" == true ]]; then
     local ticket
@@ -1366,9 +1483,7 @@ main() {
     return 0
   fi
   start_run
-  # The verdicts this run selects by, kept with its logs (ADR 0020: auditable decisions).
-  debt_gate >"${LOG_DIR}/debt-gate.tsv" ||
-    die "the debt gate could not reach a verdict (pnpm run check:debt); no ticket is selected"
+  require_debt_verdicts "${LOG_DIR}/debt-gate.tsv"
 
   local ticket processed=0 status
   while ticket="$(next_ticket)"; do
@@ -1387,8 +1502,7 @@ main() {
   done
   # next_ticket also fails when the gate does; a register a merged slice made unreadable must not
   # end the run as an empty queue.
-  debt_gate >/dev/null ||
-    die "the debt gate could not reach a verdict (pnpm run check:debt); no further ticket is selected"
+  require_debt_verdicts
   RUN_STATUS=succeeded
   local triage
   triage="$(triage_ticket)"

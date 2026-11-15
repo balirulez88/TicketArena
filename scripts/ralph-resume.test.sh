@@ -342,6 +342,96 @@ check "the parked ref is deleted on the host, the state cleared" \
   "! has_ref ralph/paused/01-demo '${host}' && [[ ! -e '${state_dir}/01-demo.pause' ]]"
 end
 
+# In the sandbox the clone dies with the container: a parked ref that cannot reach the staging
+# repository can never be resumed, so no pause may be claimed, and the work must leave in the logs.
+the_patch() { compgen -G "$1/.ralph/logs/2*/01-demo.paused-work.patch" | tail -n 1; }
+# The patch, applied exactly as the log says to a fresh clone of the host's main, holds the parked
+# work up to its last commit, the interrupted phase ($3, default green). A pause that comes before
+# the phase's agent wrote anything leaves that commit empty, so the recovery must keep empties.
+patch_recovers() {
+  local into="${WORK}/recover-$2" phase=${3:-green}
+  grep -q 'git am --empty=keep' "${SCENARIO}.out" &&
+    git clone --quiet "${host}" "${into}" &&
+    git -C "${into}" -c user.name=t -c user.email=t@t am --quiet --empty=keep "$(the_patch "$1")" &&
+    [[ -f "${into}/feature.test.txt" ]] &&
+    git -C "${into}" log -1 --format=%s | grep -q "^wip(ralph): paused in ${phase}"
+}
+reject_parked_refs() {
+  printf '#!/bin/sh\nwhile read -r old new ref; do case "$ref" in refs/heads/ralph/paused/*) exit 1 ;; esac; done\n' \
+    >"${host}/.git/hooks/pre-receive"
+  chmod +x "${host}/.git/hooks/pre-receive"
+}
+unparked() {
+  local clone=$1 code=$2
+  check "a failure (exit 1), not a pause (75)" "[[ ${code} == 1 ]]"
+  check "no pause state was written" "[[ ! -e '${state_dir}/01-demo.pause' ]]"
+  check "the host received no parked ref" "! has_ref ralph/paused/01-demo '${host}'"
+  check "the work is kept in the clone, on the slice branch and the parked ref" \
+    "has_ref slice/01-demo '${clone}' && has_ref ralph/paused/01-demo '${clone}'"
+  check "the log names the patch and how to recover it" \
+    "grep -q 'paused-work.patch' '${SCENARIO}.out' && grep -q 'git am' '${SCENARIO}.out'"
+  check "the run is not reported as paused" "! grep -q '^\[ralph [0-9:]*\] PAUSED' '${SCENARIO}.out'"
+}
+
+begin sandbox-staging-mismatch-claims-no-pause-and-keeps-the-work
+host="${SCENARIO}"
+git -C "${host}" config receive.denyCurrentBranch updateInstead
+state_dir="${WORK}/mismatch-state"
+git clone --quiet "${host}" "${WORK}/mismatch-clone"
+git init --quiet --bare "${WORK}/elsewhere.git"
+code="$(run_harness "${WORK}/mismatch-clone" STUB_FAIL=green:usage:1 RALPH_PUSH_REMOTE=origin \
+  RALPH_SANDBOX=1 RALPH_STAGING_REMOTE="${WORK}/elsewhere.git" RALPH_STATE_DIR="${state_dir}")"
+unparked "${WORK}/mismatch-clone" "${code}"
+check "the log says the remote is not the staging repository" \
+  "grep -q 'is not the sandbox.s staging repository' '${SCENARIO}.out'"
+check "the saved patch recovers the work on the host's main" \
+  "patch_recovers '${WORK}/mismatch-clone' mismatch"
+end
+
+begin sandbox-staging-push-failure-claims-no-pause-and-keeps-the-work
+host="${SCENARIO}"
+git -C "${host}" config receive.denyCurrentBranch updateInstead
+state_dir="${WORK}/push-failure-state"
+reject_parked_refs
+git clone --quiet "${host}" "${WORK}/push-failure-clone"
+code="$(run_harness "${WORK}/push-failure-clone" STUB_FAIL=green:usage:1 RALPH_PUSH_REMOTE=origin \
+  RALPH_SANDBOX=1 RALPH_STAGING_REMOTE="${host}" RALPH_STATE_DIR="${state_dir}")"
+unparked "${WORK}/push-failure-clone" "${code}"
+check "the log says the push failed" "grep -q 'the push to the staging repository failed' '${SCENARIO}.out'"
+check "the saved patch recovers the work on the host's main" \
+  "patch_recovers '${WORK}/push-failure-clone' push-failure"
+end
+
+# A resumed ticket that pauses again but cannot park: the pause the host already holds must stay
+# exactly as it was, and still resume.
+begin a-failed-repark-keeps-the-earlier-pause-resumable
+host="${SCENARIO}"
+git -C "${host}" config receive.denyCurrentBranch updateInstead
+state_dir="${WORK}/repark-state"
+staging=(RALPH_PUSH_REMOTE=origin RALPH_SANDBOX=1 RALPH_STAGING_REMOTE="${host}")
+git clone --quiet "${host}" "${WORK}/repark-1"
+code="$(run_harness "${WORK}/repark-1" STUB_FAIL=green:usage:1 "${staging[@]}" RALPH_STATE_DIR="${state_dir}")"
+check "first run paused in green (exit 75)" "[[ ${code} == 75 && -e '${state_dir}/01-demo.pause' ]]"
+cp "${state_dir}/01-demo.pause" "${WORK}/repark.pause.before"
+parked_before="$(git -C "${host}" rev-parse refs/heads/ralph/paused/01-demo)"
+reject_parked_refs
+git clone --quiet "${host}" "${WORK}/repark-2"
+code="$(run_harness "${WORK}/repark-2" STUB_FAIL=refactor:usage:1 "${staging[@]}" RALPH_STATE_DIR="${state_dir}")"
+check "the second run resumed, then failed to park (exit 1)" \
+  "[[ ${code} == 1 ]] && grep -q 'resuming at green' '${SCENARIO}.out'"
+check "the earlier pause state is byte for byte unchanged" \
+  "cmp -s '${WORK}/repark.pause.before' '${state_dir}/01-demo.pause'"
+check "the host's parked ref is unchanged" \
+  "[[ \$(git -C '${host}' rev-parse refs/heads/ralph/paused/01-demo) == '${parked_before}' ]]"
+check "the new work's patch recovers it, its empty refactor commit included" \
+  "patch_recovers '${WORK}/repark-2' repark refactor && [[ -f '${WORK}/recover-repark/feature.txt' ]]"
+rm -f "${host}/.git/hooks/pre-receive"
+git clone --quiet "${host}" "${WORK}/repark-3"
+code="$(run_harness "${WORK}/repark-3" "${staging[@]}" RALPH_STATE_DIR="${state_dir}")"
+check "a later run resumes the earlier pause and merges" \
+  "[[ ${code} == 0 && \$(merged '${host}') == 1 ]]"
+end
+
 # Outside the sandbox a remote is not staging: paused agent work stays local, and the harness never
 # deletes a ref there, even one that is obsolete (ADR 0021).
 begin paused-work-stays-local-outside-the-sandbox

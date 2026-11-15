@@ -105,7 +105,29 @@ run_harness() {
     source ./ralph-loop.sh
     run_gate() { : >"$1"; }
     verify_red() { : >"$1"; }
-    main --once "${HARNESS_ARGS[@]}"
+    # HARNESS_ENTRY sabotages the way in, to prove that the hold is enforced where agent work
+    # starts and not only by ticket selection: `selection` hands the phase machine ticket 01
+    # whatever the gate says; the others enter below main, as a future caller or a bug might.
+    case "${HARNESS_ENTRY:-main}" in
+      main) main --once "${HARNESS_ARGS[@]}" ;;
+      selection)
+        next_ticket() { printf '%s\n' "${ISSUES_DIR}/01-demo.md"; }
+        main --once "${HARNESS_ARGS[@]}"
+        ;;
+      process_ticket) start_run && process_ticket "${ISSUES_DIR}/01-demo.md" ;;
+      # A gate that answers, but not for ticket 01.
+      no_verdict)
+        debt_gate() { printf '02\tclear\t\n'; }
+        start_run && process_ticket "${ISSUES_DIR}/01-demo.md"
+        ;;
+      # A verdict that cannot be written: the audit file's place is taken by a directory.
+      unrecordable)
+        start_run && mkdir "${LOG_DIR}/debt-gate-verdicts.tsv" &&
+          process_ticket "${ISSUES_DIR}/01-demo.md"
+        ;;
+      run_agent) start_run && GATE_TICKET=01 && run_agent green "${ISSUES_DIR}/01-demo.md" /dev/null 1 ;;
+      run_review) start_run && GATE_TICKET=01 && run_review "${ISSUES_DIR}/01-demo.md" 1 ;;
+    esac
   ) >"${dir}.out" 2>&1 && echo 0 || echo $?
 }
 
@@ -194,6 +216,87 @@ commit_all "${dir}" "no register"
 code="$(run_harness "${dir}" STUB_REVIEW=clean)"
 HARNESS_ARGS=()
 check "the harness refuses before any agent runs" "[[ ${code} != 0 ]] && ! agent_ran '${dir}'"
+
+# --- Sabotage: the hold holds where agent work starts, not only at selection (ADR 0020) ---------
+
+# Any agent or reviewer session leaves a record before it launches (fresh_session).
+session_started() { find "$1/.ralph/logs" -path '*/sessions/*.tsv' 2>/dev/null | grep -q .; }
+# The audit line for ticket 01: when, driver, ticket, verdict, base, reasons.
+verdict_of() { awk -F'\t' '$3 == "01" { print $2 " " $4 }' "$1"/.ralph/logs/2*/debt-gate-verdicts.tsv 2>/dev/null; }
+
+# A held repository: TD-001 holds every agent ticket; 05 is worked by hand.
+held_repo() {
+  local dir
+  dir="$(new_repo "$1")"
+  register ALL_AGENT_TICKETS "ticket 05" >"${dir}/docs/technical-debt.md"
+  printf '# 05: Fix\n\n**Blocked by:** None\n\n**Status:** ready-for-human\n' >"${dir}/issues/05-fix.md"
+  node "${dir}/scripts/ralph-debt.mjs" format "${dir}/docs/technical-debt.md" --root "${dir}"
+  commit_all "${dir}" "maintainer: TD-001 holds every agent ticket"
+  printf '%s\n' "${dir}"
+}
+
+for entry in selection process_ticket; do
+  echo "a-held-ticket-handed-to-${entry}-starts-no-agent:"
+  dir="$(held_repo "held-${entry}")"
+  code="$(HARNESS_ENTRY=${entry} run_harness "${dir}" STUB_REVIEW=clean)"
+  check "refused: no agent ran, nothing merged, no session started" \
+    "[[ ${code} != 0 ]] && ! agent_ran '${dir}' && ! merged '${dir}' && ! session_started '${dir}'"
+  check "the refusal names the hold" "grep -q 'debt gate: ticket 01 is waiting' '${dir}.out'"
+  check "the verdict is recorded for audit" "[[ \"\$(verdict_of '${dir}')\" == 'ralph waiting' ]]"
+  check "the ticket is untouched on main" \
+    "git -C '${dir}' show main:issues/01-demo.md | grep -q '^\*\*Status:\*\* ready-for-agent'"
+done
+
+echo "a-gate-that-breaks-after-selection-starts-no-agent:"
+dir="$(new_repo broken-after-selection)"
+register "all" "ticket 05" >"${dir}/docs/technical-debt.md"
+printf '# 05: Fix\n\n**Blocked by:** None\n\n**Status:** ready-for-human\n' >"${dir}/issues/05-fix.md"
+commit_all "${dir}" "a malformed hold"
+code="$(HARNESS_ENTRY=process_ticket run_harness "${dir}" STUB_REVIEW=clean)"
+check "refused before any agent runs" \
+  "[[ ${code} != 0 ]] && ! agent_ran '${dir}' && ! session_started '${dir}'"
+check "the audit says the gate could not run" "[[ \"\$(verdict_of '${dir}')\" == 'ralph unavailable' ]]"
+
+echo "a-gate-with-no-verdict-for-the-ticket-starts-no-agent:"
+dir="$(new_repo no-verdict)"
+code="$(HARNESS_ENTRY=no_verdict run_harness "${dir}" STUB_REVIEW=clean)"
+check "refused before any agent runs" \
+  "[[ ${code} != 0 ]] && ! agent_ran '${dir}' && ! session_started '${dir}'"
+check "the audit records the missing verdict" "[[ \"\$(verdict_of '${dir}')\" == 'ralph missing' ]]"
+
+echo "a-verdict-that-cannot-be-recorded-starts-no-agent:"
+dir="$(new_repo unrecordable)"
+code="$(HARNESS_ENTRY=unrecordable run_harness "${dir}" STUB_REVIEW=clean)"
+check "refused before any agent runs" \
+  "[[ ${code} != 0 ]] && ! agent_ran '${dir}' && ! session_started '${dir}'"
+check "it says the verdict could not be recorded" \
+  "grep -q 'could not record the verdict for ticket 01' '${dir}.out'"
+
+echo "an-unreadable-ticket-file-starts-no-agent:"
+dir="$(new_repo unreadable-ticket)"
+# A directory where a ticket file should be: the gate cannot read it, so it reaches no verdict.
+mkdir -p "${dir}/issues/02-broken.md" && echo x >"${dir}/issues/02-broken.md/keep"
+commit_all "${dir}" "an unreadable ticket"
+code="$(HARNESS_ENTRY=process_ticket run_harness "${dir}" STUB_REVIEW=clean)"
+check "refused before any agent runs" \
+  "[[ ${code} != 0 ]] && ! agent_ran '${dir}' && ! session_started '${dir}'"
+code="$(run_harness "${dir}" STUB_REVIEW=clean)"
+check "selection refuses too" "[[ ${code} != 0 ]] && grep -q 'could not reach a verdict' '${dir}.out'"
+
+for entry in run_agent run_review; do
+  echo "a-launcher-called-without-a-verdict-starts-nothing-${entry}:"
+  dir="$(new_repo "launcher-${entry}")"
+  code="$(HARNESS_ENTRY=${entry} run_harness "${dir}" STUB_REVIEW=clean)"
+  check "refused, no session started" \
+    "[[ ${code} != 0 ]] && ! agent_ran '${dir}' && ! session_started '${dir}'"
+  check "it says why" "grep -q 'the debt gate has not cleared ticket 01 in this run' '${dir}.out'"
+done
+
+echo "a-clear-ticket-records-its-verdict:"
+dir="$(new_repo clear-verdict)"
+code="$(run_harness "${dir}" STUB_REVIEW=clean)"
+check "it merges" "[[ ${code} == 0 ]] && merged '${dir}'"
+check "the clear verdict is recorded" "[[ \"\$(verdict_of '${dir}')\" == 'ralph clear' ]]"
 
 # --- Rejected work and the remote (ADR 0021) ------------------------------------------------------
 
@@ -293,6 +396,25 @@ push_scenario a-diverted-push-url-is-not-staging RALPH_SANDBOX=1 \
 PUSH_SETUP=""
 check "the diverted target received no quarantine branch" \
   "[[ -z \$(remote_quarantine '${WORK}/diverted.git') ]]"
+
+# Git quotes a failing remote's URL back, credentials and all. A synthetic password, built at run
+# time; its slash makes Git reject the URL locally (no network) and echo it verbatim.
+password="pw-$(printf 's3cr/t%.0s' 1 2 3)"
+credentialed="https://bot:${password}@127.0.0.1:9/r.git"
+leaked() { grep -rqF -- "${password}" "$1.out" "$1/.ralph"; }
+credential_push_url() { git -C "$1" remote set-url --push origin "${credentialed}"; }
+PUSH_SETUP=credential_push_url
+HARNESS_ARGS=(--push-rejected 01)
+push_scenario a-credentialed-push-url-never-reaches-the-output
+PUSH_SETUP=""
+check "Git's errors were reported, scrubbed" "grep -q 'https://\*\*\*@127.0.0.1' '${dir}.out'"
+check "the password is in no output, log or artifact" "! leaked '${dir}'"
+
+# RALPH_PUSH_REMOTE may itself be a URL: the harness names it in its own messages too.
+HARNESS_ARGS=(--push-rejected 01)
+push_scenario a-credentialed-push-remote-is-never-named RALPH_PUSH_REMOTE="${credentialed}"
+check "the remote is named scrubbed" "grep -q 'https://\*\*\*@127.0.0.1:9/r.git' '${dir}.out'"
+check "the password is in no output, log or artifact" "! leaked '${dir}'"
 
 # The agent switched to the base branch: the rejection must not commit or push anything, with or
 # without authorization.

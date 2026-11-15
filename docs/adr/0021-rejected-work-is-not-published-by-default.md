@@ -22,11 +22,20 @@ work (`ralph/paused/*`) and deleted it from the remote after a resume.
 - **Staging is recognised, not assumed.** A remote counts as staging only when `RALPH_SANDBOX=1`,
   the entrypoint set `RALPH_STAGING_REMOTE` to its staging repository's path, that path is a
   directory, and every push URL of `RALPH_PUSH_REMOTE` (`git remote get-url --push --all`, so a
-  `pushurl` or `pushInsteadOf` cannot divert it) is an existing local directory that resolves to
-  that same directory (compared physically, since Git may spell one path two ways). A wrong or
-  missing marker only ever keeps work local. An operator who sets these variables by hand on the host can make a
-  local directory count as staging; that publishes nothing beyond the machine, but it is an
-  environment-level exemption, which is why only the entrypoint sets them.
+  `pushurl` or `pushInsteadOf` cannot divert it) is an existing local directory that is that same
+  directory on disk (`[[ url -ef staging ]]`: same device and inode, never a text comparison,
+  since Git may spell one path two ways and Git for Windows' file system ignores case). A wrong or
+  missing marker only ever keeps work local. An operator who sets these variables by hand on the
+  host can make a local directory count as staging; that publishes nothing beyond the machine, but
+  it is an environment-level exemption, which is why only the entrypoint sets them.
+- **A pause in the sandbox is claimed only once it is recoverable.** The container's clone dies
+  with the run, so a parked `ralph/paused/*` ref that is not provably in the staging repository
+  (the remote is not staging, or the push fails) can never be resumed. Then no pause is recorded:
+  the run exits 1, not 75, and the state directory stays exactly as the run found it, so a pause
+  the host already held for the ticket remains valid. The new work leaves as
+  `.ralph/logs/<run>/<slug>.paused-work.patch` (a `git format-patch` series on the base, for
+  `git am --empty=keep`, since the last commit is empty when the phase had written nothing), and
+  the log says so. Outside the sandbox the local ref is what the resume reads.
 - **A rejection that cannot be trusted publishes nothing.** If HEAD is no longer the slice branch,
   or the base branch moved since the ticket started (an agent that broke the no-git rule),
   `reject_slice` stops with an error before committing, moving or pushing anything.
@@ -39,8 +48,16 @@ work (`ralph/paused/*`) and deleted it from the remote after a resume.
   cloud and API tokens, JWTs, connection strings with a password, credential assignments) in an
   added line or commit message; no binary content. A finding, a failure or an inspection that
   cannot run blocks the push. The commit is resolved once, and that exact commit is inspected and
-  pushed. Findings name the commit, file, line and rule, never the match, and
-  printed Git errors have URL credentials removed.
+  pushed. Findings name the commit, file, line and rule, never the match.
+- **Git's errors never carry credentials.** A failing push or fetch can quote the remote's URL
+  with its userinfo (Git 2.45 echoes `https://user:password@host` verbatim when the password holds
+  a slash), and `RALPH_PUSH_REMOTE` may itself be such a URL. Every push in `ralph-loop.sh`, the
+  inspection's errors and every Git error the batch reports or stores in its state go through one
+  scrubber (`redactCredentials` in `scripts/ralph-artifacts.mjs`): URL userinfo, secret query
+  parameters, `Authorization` values and known token formats. The harness names the remote only
+  scrubbed, and withholds Git's message if the scrubber cannot run. Run logs are additionally
+  scrubbed of known token formats and `Authorization` values, not of URL userinfo, because a work
+  patch there may legitimately hold the project's local connection strings.
 - **No automatic remote deletion.** The harness deletes a remote ref only in the sandbox's staging
   repository. Anywhere else an obsolete ref is evidence; removing it is a maintainer's explicit
   decision, after the evidence is preserved (ticket 52's maintainer steps).

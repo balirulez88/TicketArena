@@ -216,4 +216,22 @@ describe("the push inspection CLI", () => {
       assert.match(result.stderr, /could not run, so the push is blocked/);
     }
   });
+
+  it("never prints a remote's credentials, even one Git itself echoes (exit 2)", () => {
+    const { repo } = setup({ "src/feature.ts": "x\n" });
+    // Synthetic, built at run time. The slash makes Git reject the URL locally (no network), and
+    // Git quotes it back verbatim, userinfo and all.
+    const password = `pw-${"s3cr/t".repeat(3)}`;
+    const token = `ghp_${"A1b2".repeat(9)}`;
+    for (const remote of [
+      `https://bot:${password}@127.0.0.1:9/r.git`,
+      join(repo, "..", token, "r.git"),
+    ]) {
+      const result = inspect(repo, "--ref", "refs/heads/work", "--remote", remote);
+      assert.equal(result.status, 2);
+      const printed = `${result.stdout}${result.stderr}`;
+      assert.ok(!(printed.includes(password) || printed.includes(token)), printed);
+      assert.match(printed, /could not run, so the push is blocked/);
+    }
+  });
 });

@@ -1,5 +1,6 @@
 import "./ralph-test-workspace.mjs";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -13,15 +14,19 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   cleanup,
   initRoot,
   markRun,
+  redactCredentials,
   redactRun,
   redactText,
   removeRun,
   secretValues,
 } from "./ralph-artifacts.mjs";
+
+const ARTIFACTS_CLI = fileURLToPath(new URL("./ralph-artifacts.mjs", import.meta.url));
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = Date.parse("2026-10-30T12:00:00Z");
@@ -195,5 +200,80 @@ describe("secret redaction", () => {
     assert.equal(readFileSync(join(logDir, "agent.log"), "utf8"), "token [REDACTED] used\n");
     assert.equal(readFileSync(join(logDir, "nested", "env.log"), "utf8"), "key [REDACTED]\n");
     assert.equal(redactText("plain", []), "plain");
+  });
+});
+
+// Synthetic credentials, assembled at run time so that no file in the repository holds one.
+const fake = {
+  github: `ghp_${"A1b2".repeat(9)}`,
+  pat: `github_pat_${"Z9y8".repeat(6)}`,
+  gitlab: `glpat-${"Qx7".repeat(7)}`,
+  aws: `AKIA${"K".repeat(16)}`,
+  password: `pw-${"s3cr/t".repeat(3)}`,
+  // A slash makes Git echo the URL verbatim; the `@` must not end the redaction early.
+  atPassword: `p/w@${"S3cr3t".repeat(3)}`,
+  basic: Buffer.from(`x-access-token:${"t0k".repeat(8)}`).toString("base64"),
+};
+
+describe("credentials in Git output", () => {
+  const leaks = (text) => Object.values(fake).filter((secret) => text.includes(secret));
+
+  it("removes the userinfo of a remote URL, even when the password holds a slash", () => {
+    const stderr = [
+      `fatal: unable to access 'https://bot:${fake.password}@github.example/org/repo.git/': 403`,
+      `remote: rejected https://${fake.github}@github.example/org/repo.git`,
+      `error: failed to push some refs to 'ssh://deploy:${fake.password}@host:22/repo.git'`,
+      `fatal: unable to access 'https://bot:${fake.atPassword}@github.example/x.git/': 403`,
+    ].join("\n");
+    const clean = redactCredentials(stderr);
+    assert.deepEqual(leaks(clean), []);
+    assert.ok(!clean.includes("S3cr3t"), clean);
+    assert.match(clean, /https:\/\/\*\*\*@github\.example\/org\/repo\.git/);
+    assert.match(clean, /ssh:\/\/\*\*\*@host:22\/repo\.git/);
+  });
+
+  it("removes tokens in query strings, Authorization headers and known token formats", () => {
+    const stderr = [
+      `fatal: https://github.example/repo.git/info/refs?access_token=${fake.gitlab}&x=1`,
+      `> Authorization: Basic ${fake.basic}`,
+      `http.extraheader=AUTHORIZATION: bearer ${fake.pat}`,
+      `hint: the helper printed ${fake.github} and ${fake.aws}`,
+    ].join("\n");
+    const clean = redactCredentials(stderr);
+    assert.deepEqual(leaks(clean), []);
+    assert.match(clean, /\?access_token=\[REDACTED\]&x=1/);
+    assert.match(clean, /Authorization: \[REDACTED\]/);
+  });
+
+  it("leaves ordinary Git output alone", () => {
+    const stderr =
+      "To /srv/staging.git\n ! [rejected] main -> main (non-fast-forward)\nerror: failed to push some refs to 'git@github.example:org/repo.git'";
+    assert.equal(redactCredentials(stderr), stderr);
+  });
+
+  it("scrubs standard input for the shell harness, the environment's secret values too", () => {
+    const secret = `env-${"v4lue".repeat(3)}`;
+    const result = spawnSync(process.execPath, [ARTIFACTS_CLI, "scrub"], {
+      input: `fatal: 'https://u:${fake.password}@h.example/r' and ${secret}\n`,
+      encoding: "utf8",
+      env: { ...process.env, RALPH_TEST_TOKEN: secret },
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, "fatal: 'https://***@h.example/r' and [REDACTED]\n");
+  });
+
+  it("redacts known token formats and Authorization values from run logs, not URLs in work patches", () => {
+    const logDir = join(logRoot, "20261030-120000");
+    mkdirSync(logDir, { recursive: true });
+    // A work patch may carry the project's own local connection strings; rewriting them would make
+    // it impossible to apply. Tokens are never legitimate work, so they go.
+    const fixture = "+const url = 'postgresql://app:app@localhost:5432/db';\n";
+    writeFileSync(join(logDir, "work.patch"), `${fixture}+const t = '${fake.github}';\n`);
+    writeFileSync(join(logDir, "curl.log"), `Authorization: Bearer ${fake.pat}\n`);
+    redactRun(logDir, []);
+    const patch = readFileSync(join(logDir, "work.patch"), "utf8");
+    assert.ok(patch.startsWith(fixture));
+    assert.deepEqual(leaks(patch), []);
+    assert.deepEqual(leaks(readFileSync(join(logDir, "curl.log"), "utf8")), []);
   });
 });

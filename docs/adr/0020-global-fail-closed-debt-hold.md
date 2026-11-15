@@ -39,8 +39,20 @@ explicit list had two weaknesses:
   The CLI prints no verdict for a missing, unreadable or invalid register; `ralph-loop.sh` then
   stops with an error (at start, before selecting anything, and again when its queue ends, so a
   register broken mid-run is not reported as an empty queue), and a
-  ticket without a verdict line is never `clear`. Each run keeps the verdicts it selected by in
-  `.ralph/logs/<run>/debt-gate.tsv`.
+  ticket without a verdict line is never `clear`. Each run, of either driver, keeps the verdicts
+  it selected by in `.ralph/logs/<run>/debt-gate.tsv`; the Lead driver stops the same way.
+- **Enforced where agent work starts, not only at selection.** Selection is one caller; a bug in
+  it, or a future entry point, must not reach an agent with a held ticket. So the gate is asked
+  again for the one ticket at the moment its work starts or resumes (`require_debt_clear` in
+  `process_ticket` and in the Lead's `lead_ticket`, before any branch, status or file changes),
+  and only `clear` proceeds: `waiting`, `needs-triage`, no verdict line, or a gate that cannot run
+  all refuse. Every launcher of agent sessions (`run_agent`, `run_review`, `lead_session`) refuses
+  unless that check cleared exactly the current ticket in this process. Each check appends its
+  verdict (time, driver, ticket, verdict, the base commit it judged, reasons) to
+  `.ralph/logs/<run>/debt-gate-verdicts.tsv` before acting on it, and a verdict that cannot be
+  recorded refuses too. Sabotage scenarios in `scripts/ralph-safety.test.sh` and
+  `scripts/ralph-lead.test.sh` hand each driver a held ticket below selection and call each
+  launcher without a verdict.
 
 A maintainer may set the global hold only in a reviewed commit with a history line (as for any
 governed field, `ralph-debt.mjs audit`), for a pre-run safety blocker: a risk to the harness or

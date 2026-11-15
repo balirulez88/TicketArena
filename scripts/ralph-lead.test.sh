@@ -168,7 +168,21 @@ run_lead_body() {
         return 1
       fi
     }
-    lead_main "$@"
+    # LEAD_ENTRY sabotages the way in, to prove that the debt hold is enforced where the Lead
+    # starts and not only by ticket selection: `selection` hands the driver ticket 01 whatever the
+    # gate says; the others enter below lead_main, as a future caller or a bug might.
+    case "${LEAD_ENTRY:-main}" in
+      main) lead_main "$@" ;;
+      selection)
+        next_ticket() { printf '%s\n' "${ISSUES_DIR}/01-demo.md"; }
+        lead_main "$@"
+        ;;
+      lead_ticket) start_run && lead_ticket "${ISSUES_DIR}/01-demo.md" ;;
+      lead_session)
+        start_run && GATE_TICKET=01 &&
+          lead_session "${ISSUES_DIR}/01-demo.md" "${LOG_DIR}/x.json" "${LOG_DIR}/x.err" prompt
+        ;;
+    esac
   }
 }
 run_lead() { (run_lead_body "$@"); }
@@ -401,6 +415,121 @@ code=0
 STUB_LEAD=ok run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
 expect "a ticket paused by the Ralph driver is not taken over" test "${code}" != 0
 expect "still no lead session" test "$(calls notask lead)" = 0
+
+# ------------------------------------------------------------------ the global debt hold (ADR 0020)
+# A register whose TD-001 holds every ticket not ready-for-human (the shape of TD-059), owned by
+# ticket 05, which is worked by hand. $2 replaces the Blocks value (a malformed hold).
+hold_all() {
+  local dir=$1 blocks=${2:-ALL_AGENT_TICKETS}
+  printf '# 05: Fix\n\n**Blocked by:** None\n\n**Status:** ready-for-human\n' >"${dir}/issues/05-fix.md"
+  cat >"${dir}/docs/technical-debt.md" <<REGISTER
+# Technical Debt Register
+
+<!-- ralph-debt:begin -->
+### TD-001: Rejected work is published
+- **Status:** PLANNED
+- **Severity:** MEDIUM
+- **Risk:** SECURITY
+- **Triage:** 2026-11-14: a maintainer
+- **Source:** ticket 00
+- **Evidence:** earlier review
+- **Components:** \`old.txt\`
+- **Problem:** p
+- **Impact:** i
+- **Justification:** held
+- **Remediation:** r
+- **Target:** ticket 05
+- **Blocks:** ${blocks}
+<!-- ralph-debt:end -->
+REGISTER
+  node "${dir}/scripts/ralph-debt.mjs" format "${dir}/docs/technical-debt.md" --root "${dir}" 2>/dev/null || true
+  git -C "${dir}" add -A
+  git -C "${dir}" -c user.name=t -c user.email=t@t commit --quiet -m "maintainer: hold every agent ticket"
+}
+# Any agent session leaves a record before it launches; the stub Lead logs its calls.
+no_agent_started() {
+  [[ "$(calls "$1" lead)" == 0 && "$(calls "$1" agent)" == 0 ]] &&
+    ! find "${WORK}/$1/.ralph/logs" -path '*/sessions/*.tsv' 2>/dev/null | grep -q .
+}
+untouched() {
+  no_merge "$1" && [[ "$(main_status "$1")" == ready-for-agent ]] &&
+    [[ -z "$(git -C "${WORK}/$1" for-each-ref 'refs/heads/slice/' 'refs/heads/rejected/')" ]]
+}
+verdict_of() { awk -F'\t' '$3 == "01" { print $2 " " $4 }' "${WORK}/$1"/.ralph/logs/2*/debt-gate-verdicts.tsv 2>/dev/null; }
+
+scenario "a ticket the gate clears is worked, and its verdict is on record"
+expect "the merge scenario recorded 'lead clear'" test "$(verdict_of merge)" = "lead clear"
+expect "and kept the verdicts it judged by" \
+  bash -c "grep -q \$'^01\tclear' '${WORK}/merge'/.ralph/logs/2*/debt-gate.tsv"
+
+scenario "the global hold: the lead never starts a held ticket, by any way in"
+d="$(new_repo held)"
+hold_all "${d}"
+code=0
+STUB_LEAD=ok run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "refused" test "${code}" != 0
+expect "no lead session, no agent" no_agent_started held
+expect "nothing changed" untouched held
+expect "the run kept the verdicts it judged by, 01 held" \
+  bash -c "grep -q \$'^01\twaiting\tTD-001 (SECURITY) holds every ticket' '${d}'/.ralph/logs/2*/debt-gate.tsv"
+code=0
+STUB_LEAD=ok run_lead "${d}" --ticket 01 --dry-run >"${d}.out" 2>&1 || code=$?
+expect "the host's dry run refuses too" test "${code}" != 0
+for entry in selection lead_ticket; do
+  d="$(new_repo "held-${entry}")"
+  hold_all "${d}"
+  code=0
+  LEAD_ENTRY=${entry} STUB_LEAD=ok run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+  expect "${entry}: refused" test "${code}" != 0
+  expect "${entry}: no lead session, no agent" no_agent_started "held-${entry}"
+  expect "${entry}: nothing changed" untouched "held-${entry}"
+  expect "${entry}: the refusal names the hold" grep -q 'debt gate: ticket 01 is waiting' "${d}.out"
+  expect "${entry}: the verdict is recorded for audit" test "$(verdict_of "held-${entry}")" = "lead waiting"
+done
+d="$(new_repo held-lead_session)"
+code=0
+LEAD_ENTRY=lead_session STUB_LEAD=ok run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "lead_session without a verdict: refused, no session" \
+  bash -c "test '${code}' != 0 && grep -q 'the debt gate has not cleared ticket 01 in this run' '${d}.out'"
+expect "lead_session without a verdict: nothing started" no_agent_started held-lead_session
+
+scenario "governance data the gate cannot read: the lead fails closed"
+d="$(new_repo malformed)"
+hold_all "${d}" "all"
+code=0
+STUB_LEAD=ok run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "a malformed hold is refused, saying the gate reached no verdict" \
+  bash -c "test '${code}' != 0 && grep -q 'could not reach a verdict' '${d}.out'"
+expect "a malformed hold starts nothing" no_agent_started malformed
+code=0
+STUB_LEAD=ok run_lead "${d}" --ticket 01 --dry-run >"${d}.out" 2>&1 || code=$?
+expect "the dry run says the same" \
+  bash -c "test '${code}' != 0 && grep -q 'could not reach a verdict' '${d}.out'"
+d="$(new_repo malformed-entry)"
+hold_all "${d}" "all"
+code=0
+LEAD_ENTRY=lead_ticket STUB_LEAD=ok run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "entered below selection, it still starts nothing" \
+  bash -c "test '${code}' != 0 && grep -q 'debt gate could not run' '${d}.out'"
+expect "entered below selection: no agent" no_agent_started malformed-entry
+expect "the audit says the gate could not run" test "$(verdict_of malformed-entry)" = "lead unavailable"
+d="$(new_repo noregister)"
+git -C "${d}" rm --quiet docs/technical-debt.md
+git -C "${d}" -c user.name=t -c user.email=t@t commit --quiet -m "no register"
+code=0
+STUB_LEAD=ok run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "a missing register is refused and starts nothing" \
+  bash -c "test '${code}' != 0 && grep -q 'register' '${d}.out'"
+expect "a missing register: no agent" no_agent_started noregister
+d="$(new_repo unreadable)"
+mkdir -p "${d}/issues/02-broken.md" && echo x >"${d}/issues/02-broken.md/keep"
+git -C "${d}" add -A
+git -C "${d}" -c user.name=t -c user.email=t@t commit --quiet -m "an unreadable ticket"
+code=0
+STUB_LEAD=ok run_lead "${d}" --ticket 01 >"${d}.out" 2>&1 || code=$?
+expect "an unreadable ticket file is refused" \
+  bash -c "test '${code}' != 0 && grep -q 'could not reach a verdict' '${d}.out'"
+expect "an unreadable ticket file starts nothing" no_agent_started unreadable
 
 # -------------------------------------------------------------------------------- readiness (ADR 0019)
 scenario "the check before RED stops a candidate the base cannot load: no RED, no block, work kept"

@@ -86,5 +86,13 @@ The `/grill-me` session settled every former open decision; see the
 
 ## Open decisions
 
-None for the MVP. Phase-2 topics (authentication, payment retry UI, provider reconciliation,
-dynamic queue activation, bot mitigation) are listed under "Out of Scope" in the spec.
+No product decision is open for the MVP. Phase-2 topics (authentication, payment retry UI,
+provider reconciliation, dynamic queue activation, bot mitigation) are listed under "Out of Scope"
+in the spec. Engineering decisions still open, from the technical-debt audit of 2026-11-14:
+
+| Open decision                                 | Where it is decided                                                                                                                                                                                                                                                                                                      |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| An outbox event that can never be published   | [ADR 0022](adr/0022-terminal-failed-outbox-events.md), completed by ticket 59 (what counts as permanent and the cap). Decided 2026-11-14: the row stays `FAILED` with its payload and history, is never discarded or marked delivered, and later events of its aggregate proceed (TD-038, [register](technical-debt.md)) |
+| The rejected branch on the public remote      | Ticket 52's maintainer steps: preserve evidence, check for sensitive data, then the maintainer explicitly approves removing it (TD-059). Pushing rejected work is off by default ([ADR 0021](adr/0021-rejected-work-is-not-published-by-default.md))                                                                     |
+| A global, fail-closed debt gate               | Decided: [ADR 0020](adr/0020-global-fail-closed-debt-hold.md). TD-059 holds every ticket not `ready-for-human` (`Blocks: ALL_AGENT_TICKETS`); no Ralph run starts until it is resolved                                                                                                                                   |
+| Recovering ticket 54's container-rejected run | Ticket 54's unblock conditions: the dependency lands on `main` by a reviewed chore commit first                                                                                                                                                                                                                          |

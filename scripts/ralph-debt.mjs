@@ -15,7 +15,8 @@
 // `sliceErrors` decides what a slice may change in the register (it may resolve entries, never
 // triage them) and that a ticket resolves the entries it owns; `auditErrors` holds a maintainer's
 // triage changes to a history line each. Risk class (`Risk`) and blocking (`Blocks`) are separate
-// fields: a class never blocks anything by itself.
+// fields: a class never blocks anything by itself. `Blocks: ALL_AGENT_TICKETS` is the global,
+// fail-closed hold of ADR 0020: every ticket not worked by hand waits, including future ones.
 //
 // Usage: node scripts/ralph-debt.mjs check <register> [--root <dir>]
 //        node scripts/ralph-debt.mjs format <register>
@@ -102,6 +103,15 @@ const ACCEPTANCE_PARTS = ["Residual risk:", "Review when:", "Decided by:"];
 const TEST_FILE = /\.test\.(?:[cm]?[jt]sx?|sh)$/;
 const TICKET = /^\d{2}$/;
 
+// The global hold (ADR 0020): `Blocks: ALL_AGENT_TICKETS` holds every unfinished ticket that is
+// not worked by hand, including tickets created after the entry was written. It is resolved
+// against the tickets each time the gate runs, never expanded into a list, so a new ticket cannot
+// slip past it. Only `ready-for-human` tickets (which Ralph, the batch and the importer never
+// take) stay workable; a ticket with any other status, including a misspelt or missing one, is
+// held.
+export const GLOBAL_HOLD = "ALL_AGENT_TICKETS";
+export const HUMAN_STATUS = "ready-for-human";
+
 export const isSet = (value) => typeof value === "string" && value.trim() !== "" && value !== NONE;
 const idNumber = (id) => Number(id.slice(3));
 
@@ -114,9 +124,36 @@ export const ownerOf = (entry) => /^ticket (\d{2})\b/.exec(fieldOf(entry, "Targe
 /** The ticket whose review found it, when the Source is one. */
 export const sourceTicketOf = (entry) =>
   /^ticket (\d{2})\b/.exec(fieldOf(entry, "Source"))?.[1] ?? null;
+/** The explicitly listed tickets of `Blocks` (empty for `none` and for the global hold). */
 export function blocksOf(entry) {
   const value = fieldOf(entry, "Blocks");
-  return isSet(value) ? value.split(",").map((part) => part.trim()) : [];
+  return isSet(value) && !isGlobalHold(entry) ? value.split(",").map((part) => part.trim()) : [];
+}
+
+export const isGlobalHold = (entry) => fieldOf(entry, "Blocks").trim() === GLOBAL_HOLD;
+
+/**
+ * How the gate reads `Blocks`: `none`, `tickets` (an explicit list), `global`, or `invalid`. An
+ * invalid value is never read as blocking nothing: the gate holds every ticket on it (debtGate).
+ */
+export function blocksKind(entry) {
+  const value = fieldOf(entry, "Blocks").trim();
+  if (!isSet(value)) {
+    return "none";
+  }
+  if (value === GLOBAL_HOLD) {
+    return "global";
+  }
+  return value.split(",").every((part) => TICKET.test(part.trim())) ? "tickets" : "invalid";
+}
+
+/** Whether a valid `Blocks` holds `ticket` (an invalid one is handled by the gate itself). */
+function holds(entry, ticket) {
+  const kind = blocksKind(entry);
+  if (kind === "global") {
+    return ticket.status !== HUMAN_STATUS;
+  }
+  return kind === "tickets" && blocksOf(entry).includes(ticket.number);
 }
 
 // --- Parsing and rendering ------------------------------------------------------------------
@@ -323,8 +360,10 @@ function shapeErrors(entry) {
   if (isSet(value("Target")) && ownerOf(entry) === null) {
     errors.push('Target must be "none" or start with "ticket NN"');
   }
-  if (isSet(value("Blocks")) && !blocksOf(entry).every((number) => TICKET.test(number))) {
-    errors.push('Blocks must be "none" or two-digit ticket numbers, comma separated');
+  if (blocksKind(entry) === "invalid") {
+    errors.push(
+      `Blocks must be "none", two-digit ticket numbers (comma separated) or ${GLOBAL_HOLD} alone`,
+    );
   }
   for (const name of REQUIRED.filter((required) => !isSet(value(required)))) {
     errors.push(`${name} is required`);
@@ -335,7 +374,7 @@ function shapeErrors(entry) {
 function blockingErrors(entry) {
   const errors = [];
   const blocks = blocksOf(entry);
-  if (blocks.length > 0 && ownerOf(entry) === null) {
+  if (blocksKind(entry) !== "none" && ownerOf(entry) === null) {
     errors.push("an entry that Blocks tickets needs a Target ticket that owns the fix");
   }
   if (blocks.includes(ownerOf(entry) ?? "")) {
@@ -351,7 +390,7 @@ function acceptanceErrors(entry) {
     if (!isTriaged(entry)) {
       errors.push("an ACCEPTED_RISK entry must be triaged");
     }
-    if (blocksOf(entry).length > 0) {
+    if (blocksKind(entry) !== "none") {
       errors.push("an ACCEPTED_RISK entry cannot block tickets");
     }
     const acceptance = value("Acceptance");
@@ -428,6 +467,18 @@ function referenceErrors(entry, tickets) {
       errors.push(`Blocks names ticket ${number}, which is done: reconcile it`);
     }
   }
+  // A global hold whose owner the hold itself would stop could never be lifted: its owner is
+  // worked by hand, outside every automated path the hold closes.
+  const ownerStatus = owner === null ? undefined : tickets.get(owner)?.status;
+  if (
+    isGlobalHold(entry) &&
+    ownerStatus !== undefined &&
+    !["done", HUMAN_STATUS].includes(ownerStatus)
+  ) {
+    errors.push(
+      `${GLOBAL_HOLD} needs an owner worked by hand: ticket ${owner} is ${ownerStatus || "without a Status"}, not ${HUMAN_STATUS}`,
+    );
+  }
   return errors;
 }
 
@@ -446,8 +497,10 @@ function cycleErrors(register, tickets) {
     }
   }
   for (const entry of register.entries.filter(isUnresolved)) {
-    for (const number of blocksOf(entry)) {
-      add(number, ownerOf(entry) ?? "");
+    for (const ticket of tickets.values()) {
+      if (holds(entry, ticket)) {
+        add(ticket.number, ownerOf(entry) ?? "");
+      }
     }
   }
   const state = new Map();
@@ -545,6 +598,8 @@ export function checkRegisterText(text, options) {
  *     triages it, nothing can show that the ticket does not rely on the unresolved behaviour.
  *
  * A triaged LOW finding that Blocks nothing is deferred and holds nothing up, whatever its class.
+ * A triaged entry makes the tickets it Blocks wait: the listed ones, or with the global hold every
+ * ticket not worked by hand. The verdict never defaults to `clear` for a ticket it cannot judge.
  */
 export function debtGate(register, tickets) {
   const open = register.entries.filter(isUnresolved);
@@ -556,22 +611,28 @@ export function debtGate(register, tickets) {
       (entry) =>
         `${entry.id} (${fieldOf(entry, "Severity")}) is ${isTriaged(entry) ? "unowned (no Target ticket)" : "untriaged"}`,
     );
+  // A Blocks value the gate cannot read could mean anything, so it holds every ticket. The CLI
+  // refuses such a register outright; this keeps the gate closed for callers that only parse it.
+  const unreadable = open
+    .filter((entry) => blocksKind(entry) === "invalid")
+    .map((entry) => `${entry.id} has a Blocks value the gate cannot read`);
   const untriagedLow = open.filter((entry) => !(isTriaged(entry) || mustTriage(entry)));
   const blocking = open.filter(isTriaged);
   const verdicts = new Map();
   for (const ticket of [...tickets.values()].filter((t) => t.status !== "done")) {
     const triage = [
       ...everywhere,
+      ...unreadable,
       ...lowTriageReasons(untriagedLow, tickets, ticket.number),
       ...open
-        .filter((entry) => !isTriaged(entry) && blocksOf(entry).includes(ticket.number))
+        .filter((entry) => !isTriaged(entry) && holds(entry, ticket))
         .map((entry) => `${entry.id} blocks ticket ${ticket.number} and is back in triage`),
     ];
     const waits = blocking
-      .filter((entry) => blocksOf(entry).includes(ticket.number))
+      .filter((entry) => holds(entry, ticket))
       .map(
         (entry) =>
-          `${entry.id} (${fieldOf(entry, "Risk")}) until ticket ${ownerOf(entry)} resolves it`,
+          `${entry.id} (${fieldOf(entry, "Risk")}) ${isGlobalHold(entry) ? `holds every ticket not ${HUMAN_STATUS} ` : ""}until ticket ${ownerOf(entry)} resolves it`,
       );
     const state = triage.length > 0 ? "needs-triage" : waits.length > 0 ? "waiting" : "clear";
     verdicts.set(ticket.number, { state, reasons: triage.length > 0 ? triage : waits });
@@ -1058,7 +1119,7 @@ function report(register, tickets) {
     "Debt by risk class and status:",
     riskTable(register.entries),
     "",
-    `Unresolved: ${count(isUnresolved)}, of which untriaged: ${count((e) => isUnresolved(e) && !isTriaged(e))}, blocking a ticket: ${count((e) => isUnresolved(e) && blocksOf(e).length > 0)}`,
+    `Unresolved: ${count(isUnresolved)}, of which untriaged: ${count((e) => isUnresolved(e) && !isTriaged(e))}, blocking a ticket: ${count((e) => isUnresolved(e) && blocksKind(e) !== "none")}, holding every ticket not worked by hand: ${count((e) => isUnresolved(e) && isGlobalHold(e))}`,
     "",
     "Debt gate (unfinished tickets):",
     ...gateLines(register, tickets).map((line) => `  ${line.replace(/\t/g, "  ")}`),

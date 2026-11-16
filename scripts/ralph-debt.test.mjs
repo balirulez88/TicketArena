@@ -1,9 +1,11 @@
 import "./ralph-test-workspace.mjs";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   auditErrors,
   checkRegisterText,
@@ -534,6 +536,189 @@ describe("the debt gate", () => {
     const blocking = triaged("TD-001", { Status: "PLANNED", Target: "ticket 04", Blocks: "03" });
     const fresh = entry("TD-002", { Severity: "LOW", Source: "ticket 02 (`02-two`)" });
     assert.equal(verdicts(blocking, fresh)["03"], "needs-triage");
+  });
+});
+
+// --- The global hold (ADR 0020) ----------------------------------------------------------------
+
+describe("the global hold (ADR 0020)", () => {
+  // 05 is worked by hand and owns the fix; 06 is blocked, 07 has a misspelt status.
+  const HELD = tickets(
+    ...GRAPH.values(),
+    ticket("05", [], "ready-for-human"),
+    ticket("06", [], "blocked"),
+    ticket("07", [], "ready-for-agnet"),
+  );
+  const hold = (fields = {}) =>
+    triaged("TD-001", {
+      Severity: "MEDIUM",
+      Risk: "SECURITY",
+      Status: "PLANNED",
+      Target: "ticket 05",
+      Blocks: "ALL_AGENT_TICKETS",
+      ...fields,
+    });
+  const states = (graph, ...entries) =>
+    Object.fromEntries([...debtGate(register(...entries), graph)].map(([n, v]) => [n, v.state]));
+  const errorsWith = (graph, ...entries) =>
+    validateRegister(register(...entries), { tickets: graph }).join("\n");
+
+  it("holds every unfinished ticket not worked by hand, whatever its status", () => {
+    assert.deepEqual(states(HELD, hold()), {
+      "02": "waiting",
+      "03": "waiting",
+      "04": "waiting",
+      "05": "clear",
+      "06": "waiting",
+      "07": "waiting",
+    });
+    assert.match(
+      debtGate(register(hold()), HELD).get("04")?.reasons.join() ?? "",
+      /TD-001 \(SECURITY\) holds every ticket not ready-for-human until ticket 05 resolves it/,
+    );
+    assert.equal(errorsWith(HELD, hold()), "");
+  });
+
+  it("holds a ticket created after the entry was written, without listing it", () => {
+    const root = mkdtempSync(join(tmpdir(), "ralph-debt-hold-"));
+    mkdirSync(join(root, "issues"), { recursive: true });
+    const write = (name, status) =>
+      writeFileSync(
+        join(root, "issues", name),
+        `# x\n\n**Blocked by:** None\n\n**Status:** ${status}\n`,
+      );
+    write("05-fix.md", "ready-for-human");
+    write("02-old.md", "ready-for-agent");
+    const reg = register(hold());
+    assert.equal(debtGate(reg, loadTickets(root)).get("02")?.state, "waiting");
+    write("08-new.md", "ready-for-agent");
+    assert.equal(debtGate(reg, loadTickets(root)).get("08")?.state, "waiting");
+    assert.equal(debtGate(reg, loadTickets(root)).get("05")?.state, "clear");
+  });
+
+  it("releases every ticket once the entry is resolved, and only then", () => {
+    for (const status of ["OPEN", "PLANNED", "IN_PROGRESS"]) {
+      assert.equal(states(HELD, hold({ Status: status }))["04"], "waiting", status);
+    }
+    const resolved = hold({ Status: "RESOLVED", Resolution: "fixed", Verification: "none" });
+    assert.equal(states(HELD, resolved)["04"], "clear");
+  });
+
+  it("needs triage everywhere it holds when the entry is sent back to triage", () => {
+    const back = hold({ Triage: "pending", Severity: "LOW" });
+    assert.equal(states(HELD, back)["04"], "needs-triage");
+    assert.match(
+      debtGate(register(back), HELD).get("04")?.reasons.join() ?? "",
+      /TD-001 blocks ticket 04 and is back in triage/,
+    );
+  });
+
+  it("keeps explicit blockers working next to it", () => {
+    const explicit = triaged("TD-002", { Status: "PLANNED", Target: "ticket 04", Blocks: "03" });
+    assert.deepEqual(states(GRAPH, explicit), { "02": "clear", "03": "waiting", "04": "clear" });
+    const both = debtGate(register(hold(), explicit), HELD).get("03")?.reasons ?? [];
+    assert.equal(both.length, 2);
+  });
+
+  it("refuses a malformed, mixed, unowned or self-holding global hold", () => {
+    for (const value of ["ALL_AGENT_TICKETS, 03", "all_agent_tickets", "ALL", "*"]) {
+      assert.match(errorsWith(HELD, hold({ Blocks: value })), /ALL_AGENT_TICKETS alone/, value);
+    }
+    assert.match(errorsWith(HELD, hold({ Target: "none" })), /needs a Target ticket/);
+    assert.match(
+      errorsWith(HELD, hold({ Target: "ticket 04" })),
+      /needs an owner worked by hand: ticket 04 is ready-for-agent/,
+    );
+    const accepted = hold({
+      Status: "ACCEPTED_RISK",
+      Acceptance: "Residual risk: x. Review when: y. Decided by: z.",
+    });
+    assert.match(errorsWith(HELD, accepted), /ACCEPTED_RISK entry cannot block/);
+  });
+
+  it("refuses a hold whose owner builds on a ticket the hold stops (a deadlock)", () => {
+    const graph = tickets(...HELD.values(), ticket("05", ["04"], "ready-for-human"));
+    assert.match(errorsWith(graph, hold()), /cycle: .*05 -> 04|cycle: .*04 -> 05/);
+  });
+
+  it("fails closed on a Blocks value it cannot read, even without validation", () => {
+    const result = states(HELD, hold({ Blocks: "everything" }));
+    assert.deepEqual(new Set(Object.values(result)), new Set(["needs-triage"]));
+    assert.match(
+      debtGate(register(hold({ Blocks: "everything" })), HELD)
+        .get("05")
+        ?.reasons.join() ?? "",
+      /TD-001 has a Blocks value the gate cannot read/,
+    );
+  });
+});
+
+describe("the gate CLI fails closed", () => {
+  const cli = (...args) =>
+    spawnSync(
+      process.execPath,
+      [fileURLToPath(new URL("ralph-debt.mjs", import.meta.url)), ...args],
+      {
+        encoding: "utf8",
+      },
+    );
+  const fixture = (blocks) => {
+    const root = mkdtempSync(join(tmpdir(), "ralph-debt-cli-"));
+    mkdirSync(join(root, "issues"), { recursive: true });
+    writeFileSync(
+      join(root, "issues", "05-fix.md"),
+      "# 05: Fix\n\n**Blocked by:** None\n\n**Status:** ready-for-human\n",
+    );
+    writeFileSync(
+      join(root, "issues", "02-two.md"),
+      "# 02: Two\n\n**Blocked by:** None\n\n**Status:** ready-for-agent\n",
+    );
+    const path = join(root, "register.md");
+    const held = triaged("TD-001", {
+      Severity: "MEDIUM",
+      Status: "PLANNED",
+      Target: "ticket 05",
+      Blocks: blocks,
+    });
+    writeFileSync(path, renderRegister(register(held)));
+    return { root, path };
+  };
+
+  it("prints the hold's verdict for every ticket from a valid register", () => {
+    const { root, path } = fixture("ALL_AGENT_TICKETS");
+    const result = cli("gate", path, "--root", root);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^02\twaiting\tTD-001/m);
+    assert.match(result.stdout, /^05\tclear\t/m);
+  });
+
+  it("prints no verdict at all for a missing, unreadable or invalid register", () => {
+    const { root, path } = fixture("ALL_AGENT_TICKETS, 02");
+    for (const target of [path, join(root, "missing.md"), root]) {
+      const result = cli("gate", target, "--root", root);
+      assert.notEqual(result.status, 0, target);
+      assert.equal(result.stdout, "", target);
+    }
+  });
+});
+
+// The transition from TD-059's explicit list to the global hold must never leave a gap: while
+// TD-059 is unresolved, the repository's own gate clears no ticket Ralph can select.
+describe("the repository's safety hold (TD-059)", () => {
+  it("clears no ready-for-agent ticket while TD-059 is unresolved", () => {
+    const root = fileURLToPath(new URL("..", import.meta.url));
+    const reg = parseRegister(readFileSync(join(root, "docs", "technical-debt.md"), "utf8"));
+    const td059 = reg.entries.find((candidate) => candidate.id === "TD-059");
+    assert.ok(td059, "TD-059 is in the register");
+    if (td059.fields.Status === "RESOLVED") {
+      return;
+    }
+    const all = loadTickets(root);
+    const cleared = [...debtGate(reg, all)]
+      .filter(([number]) => all.get(number)?.status === "ready-for-agent")
+      .filter(([, verdict]) => verdict.state === "clear")
+      .map(([number]) => number);
+    assert.deepEqual(cleared, []);
   });
 });
 

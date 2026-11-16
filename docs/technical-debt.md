@@ -12,7 +12,15 @@ ADRs do. Review reports in `.ralph/logs/` expire after 30 days; this register do
   `CRITICAL` and `HIGH` findings block the merge ([merge policy](workflow/index.md#independent-review))
   and never become debt. A deferred finding whose real impact outgrows its severity is
   **escalated**: it keeps its original severity, says why in `Escalation`, and must be `PLANNED`,
-  `IN_PROGRESS` or `RESOLVED`, never left `OPEN` or `ACCEPTED_RISK`.
+  `IN_PROGRESS` or `RESOLVED`, never left `OPEN` or `ACCEPTED_RISK`. Escalation never changes
+  `Severity`, and neither the recorder nor a slice may.
+- **Severity revisions.** Changing `Severity` is a separate, manual decision: an explicitly
+  approved **risk reassessment** by the maintainer, in a reviewed commit. It is recorded so that
+  it cannot be mistaken for an escalation: `Escalation` begins `Risk reassessment approved by the
+  maintainer on YYYY-MM-DD: <old> -> <new>` and says why, and the history line begins
+  `severity revised <old> -> <new> (approved risk reassessment)`. The entry then follows the rules
+  of its new severity (a `MEDIUM` needs an owner) and, like an escalated entry, may not stay
+  `OPEN` or `ACCEPTED_RISK`.
 - **Statuses.** `OPEN` (deferred, no plan yet), `PLANNED` (a `Target` ticket or milestone will fix
   it), `IN_PROGRESS`, `RESOLVED`, `ACCEPTED_RISK` (a deliberate decision to live with it). Every
   status except `RESOLVED` needs a `Justification`.
@@ -23,8 +31,9 @@ ADRs do. Review reports in `.ralph/logs/` expire after 30 days; this register do
 - **Triage.** A human classifies every finding: `Risk` (`CORRECTNESS`, `CONCURRENCY`,
   `SECURITY`, `VERIFICATION`, `OPERABILITY`, `MAINTAINABILITY`; `UNTRIAGED` until then),
   `Triage` (`YYYY-MM-DD: <who decided, and where>`; `pending` until then), an owner
-  (`Target: ticket NN`, required for `MEDIUM` and worse) and the tickets it `Blocks` (`none`, or
-  ticket numbers that rely on the fixed behaviour). Risk and blocking are separate decisions:
+  (`Target: ticket NN`, required for `MEDIUM` and worse) and the tickets it `Blocks` (`none`,
+  ticket numbers that rely on the fixed behaviour, or `ALL_AGENT_TICKETS`: every ticket not
+  `ready-for-human`, now and later, for a pre-run safety blocker, [ADR 0020](adr/0020-global-fail-closed-debt-hold.md)). Risk and blocking are separate decisions:
   a `LOW` blocks only the tickets listed in `Blocks`. The [debt gate](adr/0016-risk-based-debt-gate.md)
   holds a ticket that a blocking entry names, every ticket while a `MEDIUM`+ entry is untriaged
   or unowned, and every ticket that builds on the ticket an untriaged `LOW` was found in. The
@@ -52,21 +61,21 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
-| OPEN          | 0        | 0    | 0      | 48  | 48    |
-| PLANNED       | 0        | 0    | 13     | 18  | 31    |
+| OPEN          | 0        | 0    | 0      | 39  | 39    |
+| PLANNED       | 0        | 0    | 15     | 25  | 40    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
 | RESOLVED      | 0        | 3    | 7      | 6   | 16    |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 | Risk            | OPEN | PLANNED | IN_PROGRESS | RESOLVED | ACCEPTED_RISK | Total |
 | --------------- | ---- | ------- | ----------- | -------- | ------------- | ----- |
-| CORRECTNESS     | 2    | 5       | 0           | 5        | 0             | 12    |
+| CORRECTNESS     | 1    | 6       | 0           | 5        | 0             | 12    |
 | CONCURRENCY     | 0    | 2       | 0           | 2        | 0             | 4     |
 | SECURITY        | 1    | 2       | 0           | 2        | 0             | 5     |
-| VERIFICATION    | 10   | 14      | 0           | 5        | 0             | 29    |
-| OPERABILITY     | 7    | 7       | 0           | 2        | 0             | 16    |
-| MAINTAINABILITY | 25   | 1       | 0           | 0        | 0             | 26    |
-| UNTRIAGED       | 3    | 0       | 0           | 0        | 0             | 3     |
+| VERIFICATION    | 8    | 17      | 0           | 5        | 0             | 30    |
+| OPERABILITY     | 5    | 10      | 0           | 2        | 0             | 17    |
+| MAINTAINABILITY | 24   | 3       | 0           | 0        | 0             | 27    |
+| UNTRIAGED       | 0    | 0       | 0           | 0        | 0             | 0     |
 
 ## Entries
 
@@ -181,7 +190,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `apps/web/src/server/routers/health.test.ts:6`
 - **Problem:** The same unusedDb factory, with the same fake connection string and comment, is copied into health.test.ts and session.test.ts. The tests also rely on the client never connecting, which is an unstated assumption of the driver.
 - **Impact:** A change to the client factory or to its lazy-connect behaviour must be fixed in several places. A driver that connects eagerly would make these unrelated tests fail.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. No correctness impact found in the 2026-10-30 correctness review. Triage 2026-11-06: duplicated test helper; no unfinished ticket relies on the affected behaviour.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. No correctness impact found in the 2026-10-30 correctness review. Triage 2026-11-06: duplicated test helper; no unfinished ticket relies on the affected behaviour. Reconciled 2026-11-14: the `unusedDb` helper no longer exists (ticket 56 rewrote these tests), but the finding remains in another form: health.test.ts:9 and session.test.ts:9 each stub the same fake `DATABASE_URL` (`postgresql://unused@127.0.0.1:1/unused`) and rely on createTRPCContext never connecting. It shares its root with TD-084 and goes away when TD-003 (ticket 43) lets procedures that do not use the database run without `DATABASE_URL`; it is resolved only by a change that names the test proving it.
 - **Remediation:** Share a single helper, for example in a test-support module, or let these tests use the real test database like catalog.test.ts does.
 - **Target:** none
 - **Blocks:** none
@@ -192,10 +201,11 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-10-30: recorded: LOW maintainability at `apps/web/src/server/routers/health.test.ts:6`, standards axis (ticket 03 review-2 standards, run 20261030-132411)
   - 2026-11-06: triaged: MAINTAINABILITY, no owner: deferred, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-14: reconciled, still OPEN: the unusedDb helper is gone, but health.test.ts and session.test.ts each stub the same unused DATABASE_URL and rely on the client never connecting; resolve only with a test, not on the helper's removal (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-006: Seat-map tests depend on execution order and shared mutated state
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -205,9 +215,9 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `apps/web/src/server/routers/catalog.test.ts:99`
 - **Problem:** The first seats.map test asserts that map.seats[0] has status AVAILABLE. A later test marks an arbitrary findFirst seat as SOLD in the same shared database. Nothing pins the seat updated to a position other than the first. seed.test.ts has the same pattern: an earlier test asserts all statuses are AVAILABLE, and a later one writes SOLD.
 - **Impact:** Reordering tests, or a Prisma default ordering change, makes them fail or pass for the wrong reason. The suite is currently green only because of declaration order.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. No correctness impact found in the 2026-10-30 correctness review. Triage 2026-11-06: the seat-map tests depend on declaration order; the seat-map UI (32) builds on the API, whose behaviour other tests pin, not on these tests' order.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. No correctness impact found in the 2026-10-30 correctness review. Triage 2026-11-06: the seat-map tests depend on declaration order; the seat-map UI (32) builds on the API, whose behaviour other tests pin, not on these tests' order. Owner set 2026-11-14: ticket 55's client-lifecycle and isolation rules cover catalog.test.ts (module-level `let prisma`) and seed.test.ts.
 - **Remediation:** Make each test create its own fixture state, or reset it in beforeEach (reseed or delete). Choose the SOLD seat explicitly, for example the last one in the map order.
-- **Target:** none
+- **Target:** ticket 55 (`issues/55-deterministic-transaction-tests.md`)
 - **Blocks:** none
 - **Acceptance:** none
 - **Resolution:** none
@@ -216,6 +226,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-10-30: recorded: LOW missing_test at `apps/web/src/server/routers/catalog.test.ts:99`, standards axis (ticket 03 review-2 standards, run 20261030-132411)
   - 2026-11-06: triaged: VERIFICATION, no owner: deferred, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-14: planned for ticket 55, blocks no ticket: ticket 55's client-lifecycle and isolation rules cover catalog.test.ts (module-level `let prisma`) and seed.test.ts. (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-007: tsx is added with a caret range
 
@@ -277,7 +288,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `packages/db/prisma/schema.prisma:10`
 - **Problem:** The datasource sets schemas = ["public"] and every model and enum has @@schema("public"), but no test checks this. The catalog tests would pass if multiSchema were removed.
 - **Impact:** A later edit could drop the multiSchema setup without any test failing; the risk is low.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. No correctness impact found in the 2026-10-30 correctness review. Triage 2026-11-06: dropping multiSchema would fail every @@schema model at generate time; no unfinished ticket relies on the affected behaviour.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. No correctness impact found in the 2026-10-30 correctness review. Triage 2026-11-06: dropping multiSchema would fail every @@schema model at generate time; no unfinished ticket relies on the affected behaviour. Reconciled 2026-11-14: a candidate for resolution, not resolved. There are now three schemas. `packages/db/src/payment-schema.test.ts` and `notification-schema.test.ts` check table placement in the migrated database, which the migrations decide, so they cannot catch a change to the Prisma configuration alone. `packages/messaging/src/payment-schema-binding.test.ts` writes through the Prisma model API (`paymentOutboxEvent`) and asserts nothing lands in the public outbox, so dropping multiSchema should turn it red. Resolve the entry only after a sabotage run (remove `schemas` and the `@@schema` attributes, regenerate, see that test fail) is recorded and the test is named in Verification.
 - **Remediation:** Add a cheap check, e.g. a test that reads schema.prisma for the schemas setting, or asserts that the tables and the SeatStatus type live in the public schema via information_schema.
 - **Target:** none
 - **Blocks:** none
@@ -288,10 +299,11 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-10-30: recorded: LOW missing_test at `packages/db/prisma/schema.prisma:10`, spec axis (ticket 03 review-2 spec, run 20261030-132411)
   - 2026-11-06: triaged: VERIFICATION, no owner: deferred, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-14: reconciled, still OPEN: payment-schema-binding.test.ts is a candidate Verification, pending a recorded sabotage run (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-010: seedCatalog is exported from the runtime barrel of @ticketarena/db
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** MAINTAINABILITY
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -301,9 +313,9 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `packages/db/src/index.ts:19`
 - **Problem:** seedCatalog is re-exported from the db barrel that the web app imports at runtime, so demo-catalog data and seeding logic sit in the production server module graph although only tests and the CLI need them.
 - **Impact:** A wider public surface than the API needs, and a request path could call the seeder by accident.
-- **Justification:** LOW: maintainability or diagnosability only, no correctness impact. Deferred under the merge policy; fix when the file is next changed. Triage 2026-11-06: a wider export surface; no unfinished ticket relies on the affected behaviour.
+- **Justification:** LOW: maintainability or diagnosability only, no correctness impact. Deferred under the merge policy; fix when the file is next changed. Triage 2026-11-06: a wider export surface; no unfinished ticket relies on the affected behaviour. Owner set 2026-11-14: ticket 43 moves the seed entry point for TD-001; the seeder's export moves with it.
 - **Remediation:** Expose the seeder through a separate entry point (e.g. a `./seed` export) used only by tests and the CLI.
-- **Target:** none
+- **Target:** ticket 43 (`issues/43-config-injection-and-venue-migration-hardening.md`)
 - **Blocks:** none
 - **Acceptance:** none
 - **Resolution:** none
@@ -312,10 +324,11 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-10-30: backfilled from an earlier review round; confirmed still present on main at 2513586 (correctness review of tickets 03-05, 2026-10-30)
   - 2026-11-06: triaged: MAINTAINABILITY, no owner: deferred, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-14: planned for ticket 43, blocks no ticket: ticket 43 moves the seed entry point for TD-001; the seeder's export moves with it. (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-011: The db:seed entry point is not exercised by any test
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -325,9 +338,9 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `packages/db/src/seed-main.ts:6`
 - **Problem:** Tests call seedCatalog directly; the script `pnpm db:seed` runs (env guard, driver choice, disconnect) is never executed by the suite.
 - **Impact:** A broken entry point passes the gate and fails only when someone seeds a database.
-- **Justification:** LOW and dev-only today. Best fixed together with TD-001, which moves the entry point to a boundary that validates config. Triage 2026-11-06: a broken seed entry point fails loudly when run, never silently; no unfinished ticket relies on the affected behaviour.
+- **Justification:** LOW and dev-only today. Best fixed together with TD-001, which moves the entry point to a boundary that validates config. Triage 2026-11-06: a broken seed entry point fails loudly when run, never silently; no unfinished ticket relies on the affected behaviour. Owner set 2026-11-14: ticket 43 moves the db:seed entry point to a validated boundary (TD-001), which is where its end-to-end test belongs.
 - **Remediation:** When TD-001 moves the CLI to an app boundary, test it end to end against the test database.
-- **Target:** none
+- **Target:** ticket 43 (`issues/43-config-injection-and-venue-migration-hardening.md`)
 - **Blocks:** none
 - **Acceptance:** none
 - **Resolution:** none
@@ -336,6 +349,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-10-30: backfilled from an earlier review round; confirmed still present on main at 2513586 (correctness review of tickets 03-05, 2026-10-30)
   - 2026-11-06: triaged: VERIFICATION, no owner: deferred, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-14: planned for ticket 43, blocks no ticket: ticket 43 moves the db:seed entry point to a validated boundary (TD-001), which is where its end-to-end test belongs. (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-012: No index on seats.holdId, which is now a foreign key and a lookup key
 
@@ -838,7 +852,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-04: planned for ticket 45 (`issues/45-worker-loop-error-reporting.md`), before ticket 24 (remediation planning, 2026-11-04)
   - 2026-11-06: triaged: OPERABILITY, owned by ticket 45, blocks ticket(s) 24 until it is resolved (initial triage, ticket 53)
 
-### TD-032: Handler errors are nak'd with no trace, and the poll loop swallows all errors
+### TD-032: Handler-failure logging is unverified, and the poll loop swallows all errors
 
 - **Status:** PLANNED
 - **Severity:** MEDIUM
@@ -863,6 +877,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-03: seen again: MEDIUM regression_risk at `packages/booking/src/payment-saga.ts:88`, standards axis (ticket 08 review-2 standards, run 20261103-160343)
   - 2026-11-04: planned for ticket 45 (`issues/45-worker-loop-error-reporting.md`), before ticket 24; poison-message loop left to ticket 25; handler-failure logging observed in code since ticket 07 but not yet verified by a test (remediation planning, 2026-11-04)
   - 2026-11-06: triaged: OPERABILITY, owned by ticket 45, blocks ticket(s) 24 until it is resolved (initial triage, ticket 53)
+  - 2026-11-14: title corrected, triage unchanged: it said handler errors leave no trace, but consumer-runner.ts:94 logs them at error with the delivery count before nak; what remains is that no test proves it and the poll loop's catch at line 117 drops every error (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-033: Retention is documented but no job exists
 
@@ -915,7 +930,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-035: Shutdown has no error handling or timeout
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** OPERABILITY
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -925,10 +940,10 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `apps/worker/src/main.ts:12`
 - **Problem:** `shutdown` is an async signal handler with no try/catch. A rejection during `worker.stop()` or `bus.close()` becomes an unhandled rejection and skips `process.exit`, which leaves the process hung or crashing with a misleading status. There is also no bound on how long stop waits for an in-flight 60 s relay transaction.
 - **Impact:** A SIGTERM during a slow tick can exceed the orchestrator's kill grace period. Failures in the shutdown path are unreported.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: shutdown error handling; the worker is not deployed and ticket 46 already owns its startup and stop path.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: shutdown error handling; the worker is not deployed and ticket 46 already owns its startup and stop path. Owner set 2026-11-14: ticket 46 covers worker startup only; deployment (38) must not ship an unbounded SIGTERM path, so the stop path joins ticket 46 and blocks 38.
 - **Remediation:** Wrap shutdown in try/catch and set a nonzero exit code on error. Add a deadline after which it exits.
-- **Target:** none
-- **Blocks:** none
+- **Target:** ticket 46 (`issues/46-worker-startup-cleanup.md`); must merge before ticket 38 (deployment), which is blocked by it
+- **Blocks:** 38
 - **Acceptance:** none
 - **Resolution:** none
 - **Verification:** none
@@ -936,10 +951,11 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-03: recorded: LOW defect at `apps/worker/src/main.ts:12`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
   - 2026-11-06: triaged: OPERABILITY, no owner: deferred, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-14: planned for ticket 46, blocks ticket(s) 38 until it is resolved: ticket 46 covers worker startup only; deployment (38) must not ship an unbounded SIGTERM path, so the stop path joins ticket 46 and blocks 38. (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-036: ensureTopology treats any `add` failure as a config mismatch
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** OPERABILITY
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -949,9 +965,9 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `packages/messaging/src/jetstream-message-bus.ts:112`
 - **Problem:** The bare `catch {}` around `streams.add` falls through to `update` for every error, including timeouts, permission failures and invalid config. The update then surfaces a different error and the original cause is lost.
 - **Impact:** Startup diagnosis is harder: the reported error describes the update, not the add failure.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: a lost error cause at startup; no unfinished ticket relies on the affected behaviour.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: a lost error cause at startup; no unfinished ticket relies on the affected behaviour. Owner set 2026-11-14: ticket 26 (AT-35) rewrites exactly this `ensureTopology` code, so it fixes the bare catch with a test or leaves the entry stale.
 - **Remediation:** Catch only the JetStream 'stream name already in use' error (or look the stream up first) and rethrow anything else.
-- **Target:** none
+- **Target:** ticket 26 (`issues/26-stream-backpressure-and-topology.md`)
 - **Blocks:** none
 - **Acceptance:** none
 - **Resolution:** none
@@ -960,6 +976,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-03: recorded: LOW defect at `packages/messaging/src/jetstream-message-bus.ts:112`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
   - 2026-11-06: triaged: OPERABILITY, no owner: deferred, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-14: planned for ticket 26, blocks no ticket: ticket 26 (AT-35) rewrites exactly this `ensureTopology` code, so it fixes the bare catch with a test or leaves the entry stale. (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-037: Reflect.get indirection kept after the export exists
 
@@ -987,20 +1004,20 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-038: A permanently unpublishable row blocks its whole aggregate
 
-- **Status:** OPEN
-- **Severity:** LOW
+- **Status:** PLANNED
+- **Severity:** MEDIUM
 - **Risk:** CORRECTNESS
-- **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
-- **Escalation:** none
+- **Triage:** 2026-11-14: maintainer, approving Claude's technical-debt audit of main at a3bb37f (chore/debt-audit-triage)
+- **Escalation:** Risk reassessment approved by the maintainer on 2026-11-14: LOW -> MEDIUM (technical-debt audit of main at a3bb37f); a manual severity revision, not an automatic escalation. No ticket covers outbox-side poison: ticket 25 routes consumer-side failures only, and `OutboxStatus.FAILED` exists but nothing sets it. One unpublishable row (for example an event type with no stream subject, or a payload over the broker's limit) holds every later event of its aggregate forever with no alert, so an order or hold can stall silently. Tickets 25, 27 and 38 wait until ticket 59 resolves it with verified tests.
 - **Source:** ticket 06 (`06-worker-relay-and-consumer-runner`)
 - **Evidence:** `.ralph/logs/20261103-120228/06-worker-relay-and-consumer-runner.review-3.standards.json`
 - **Components:** `packages/messaging/src/outbox-relay.ts:50`
 - **Problem:** A row whose `eventType` maps to a subject outside the stream's subjects (or whose payload cannot be published) fails on every tick. `attempts` grows with no cap or terminal status, and the NOT EXISTS ordering rule then keeps every later row of that aggregate from being claimed.
 - **Impact:** One bad event stalls that aggregate's events forever at 250 ms retry churn. There is no alert or dead-letter path.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: an unpublishable row stalls its aggregate, but every event type maps to a fixed subject in code, so it takes a code bug; the DLQ (25) and recovery (27) tickets cover delivery failures, and the gate will escalate it if one depends on relay liveness.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: an unpublishable row stalls its aggregate, but every event type maps to a fixed subject in code, so it takes a code bug; the DLQ (25) and recovery (27) tickets cover delivery failures, and the gate will escalate it if one depends on relay liveness. Reassessed 2026-11-14: the 2026-11-06 triage relied on the DLQ (25) and recovery (27) tickets, but both are consumer-side; the relay has no terminal state, no alert and no rule for the rest of the aggregate. Ticket 59 owns that policy. Approved policy: a `FAILED` row stays recorded with its payload, failure reason and history and releases its aggregate; it is never discarded or marked delivered.
 - **Remediation:** Define a maximum attempts policy (FAILED status or a DLQ route) or track the gap as technical debt.
-- **Target:** none
-- **Blocks:** none
+- **Target:** ticket 59 (`issues/59-terminal-outbox-failures.md`); must merge before tickets 25, 27 and 38, which are blocked by it
+- **Blocks:** 25, 27, 38
 - **Acceptance:** none
 - **Resolution:** none
 - **Verification:** none
@@ -1008,6 +1025,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-03: recorded: LOW maintainability at `packages/messaging/src/outbox-relay.ts:50`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
   - 2026-11-06: triaged: CORRECTNESS, no owner: deferred, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-14: severity revised LOW -> MEDIUM (approved risk reassessment, not an automatic escalation): CORRECTNESS, owned by ticket 59 (new: terminal outbox failures), blocks ticket(s) 25, 27, 38 until it is resolved (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-039: The same bus and prisma setup is repeated in three test files
 
@@ -1326,7 +1344,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-05: seen again: MEDIUM regression_risk at `apps/worker/src/notification/notification-handler.ts:77`, standards axis (ticket 09 review-3 standards, run 20261105-075349)
   - 2026-11-06: triaged: CONCURRENCY, owned by ticket 44, blocks ticket(s) 17, 27 until it is resolved (initial triage, ticket 53)
 
-### TD-052: bookingStore and paymentStore are line-for-line copies; service names are listed in two places
+### TD-052: bookingStore, paymentStore and notificationStore are line-for-line copies; service names are listed in two places
 
 - **Status:** OPEN
 - **Severity:** LOW
@@ -1336,7 +1354,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Source:** ticket 08 (`08-mock-payment-confirms-order`)
 - **Evidence:** `.ralph/logs/20261103-160343/08-mock-payment-confirms-order.review-2.standards.json`
 - **Components:** `packages/messaging/src/service-store.ts:55`
-- **Problem:** The two stores differ only in the Prisma delegate and the table name. worker.ts separately hard-codes the list ["booking","payment"], and serviceStore picks via a ternary instead of a total map.
+- **Problem:** The three stores (booking, payment, notification) differ only in the Prisma delegate and the table name. worker.ts separately hard-codes the list ["booking","payment"], and serviceStore picks via a ternary instead of a total map.
 - **Impact:** A third service means editing the ServiceName union, the ternary and the worker list, with the Prisma delegate copies drifting. The compiler does not catch a service missing from the worker's list.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: copied stores; no unfinished ticket relies on the affected behaviour.
 - **Remediation:** Build the stores from a small factory over the delegate accessors. Use a Record<ServiceName, ServiceStore>, and derive the worker's relay list from Object.keys of that record or an exported constant.
@@ -1350,6 +1368,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-03: recorded: LOW maintainability at `packages/messaging/src/service-store.ts:55`, standards axis (ticket 08 review-2 standards, run 20261103-160343)
   - 2026-11-05: seen again: LOW maintainability at `packages/messaging/src/service-store.ts:77`, standards axis (ticket 09 review-3 standards, run 20261105-075349)
   - 2026-11-06: triaged: MAINTAINABILITY, no owner: deferred, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-14: copy count corrected, triage unchanged: service-store.ts:33, :55 and :77 hold three copies (notificationStore added by ticket 09), and worker.ts:46 hard-codes all three names; serviceStore now selects through a Record<ServiceName, ServiceStore> (line 99), so only the worker's list is unchecked by the compiler (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-053: Payment redelivery/poison paths are untested
 
@@ -1500,19 +1519,19 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 ### TD-059: Rejected work is imported as ordinary branches
 
 - **Status:** PLANNED
-- **Severity:** LOW
+- **Severity:** MEDIUM
 - **Risk:** SECURITY
-- **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
-- **Escalation:** none
+- **Triage:** 2026-11-14: maintainer, approving Claude's technical-debt audit of main at a3bb37f (chore/debt-audit-triage)
+- **Escalation:** Risk reassessment approved by the maintainer on 2026-11-14: LOW -> MEDIUM (technical-debt audit of main at a3bb37f); a manual severity revision, not an automatic escalation. The risk has materialised. `refs/heads/rejected/12-lock-timeout-and-deadlock-retry-20261106-132615` (d456fda, the same commit as the local branch) is on the public GitHub repository, so unreviewed agent output is published. A read-only check on 2026-11-14 found no `.github/` or env files in its diff, no credential patterns in the added lines of its six commits, and only the commit identity already public on main. Treated as a pre-run security blocker whatever its severity: it Blocks every ticket Ralph can select until ticket 52 resolves it. The remote ref stays until its evidence is preserved and the maintainer approves its removal (ticket 52).
 - **Source:** ticket 47 (`47-sandbox-trust-boundary`), Spec review round 4 (2026-11-04)
 - **Evidence:** `scripts/ralph-accept.mjs` (`createBranch` for `rejected/<slug>-<run-id>`), `docs/workflow/index.md` (trust boundary, blocked-status commit)
 - **Components:** `scripts/ralph-accept.mjs:926`, `scripts/ralph-batch.mjs:222`
 - **Problem:** A rejected run's work is imported as `refs/heads/rejected/<slug>-<run-id>`. Its tree passed no path rule. Only a documentation note says to inspect it with `git log -p` or `git show` rather than check it out, and a broad push (`git push --all`) would publish it, so its own `.github/workflows` would run on GitHub.
 - **Impact:** None while operators follow the note and push only `main`, as the batch does. A careless checkout writes untrusted files into the host working tree; a broad push runs untrusted workflows with the repository's secrets.
-- **Justification:** Deferred from ticket 47: the batch (`rejectedRefs`) and `ralph-loop.sh` outside the sandbox both find rejections under `refs/heads/rejected/`, so moving them changes the batch's rejection detection and the non-sandbox loop together. The batch itself never checks out or pushes these branches. Triage 2026-11-06: rejected work lands under refs/heads/, so a broad push would run its workflows; harness-only, done in a human-reviewed commit (ticket 52) and blocks no feature ticket.
+- **Justification:** Deferred from ticket 47: the batch (`rejectedRefs`) and `ralph-loop.sh` outside the sandbox both find rejections under `refs/heads/rejected/`, so moving them changes the batch's rejection detection and the non-sandbox loop together. The batch itself never checks out or pushes these branches. Triage 2026-11-06: rejected work lands under refs/heads/, so a broad push would run its workflows; harness-only, done in a human-reviewed commit (ticket 52) and blocks no feature ticket. Reassessed 2026-11-14: no longer harness-only in effect, because one rejected branch was pushed to the public remote. Until ticket 52 moves quarantine out of refs/heads/, no Ralph production run may start; tickets 49, 52 and 58 are worked by hand and are not blocked. `Blocks` is the global hold (`ALL_AGENT_TICKETS`, ADR 0020): every ticket that is not `ready-for-human` waits, including tickets created later, so no list has to be kept current by hand. Ticket 52's global gate and its rejected-push controls are in place; the quarantine namespace move, the ptrace regression test (TD-060) and the maintainer's evidence-first cleanup of the public ref remain, so the entry stays unresolved.
 - **Remediation:** Import rejected work under `refs/ralph/rejected/<slug>-<run-id>` (outside `refs/heads`) and have the batch detect rejections there; keep `refs/heads/rejected/` only for runs outside the sandbox.
 - **Target:** ticket 52 (`issues/52-harness-quarantine-and-ptrace-refusal-coverage.md`)
-- **Blocks:** none
+- **Blocks:** ALL_AGENT_TICKETS
 - **Acceptance:** none
 - **Resolution:** none
 - **Verification:** none
@@ -1520,6 +1539,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-04: recorded: LOW finding deferred from ticket 47's Spec review (round 4)
   - 2026-11-06: triaged: SECURITY, owned by ticket 52, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-14: severity revised LOW -> MEDIUM (approved risk reassessment, not an automatic escalation): SECURITY, owned by ticket 52, blocks every ticket Ralph can select (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 43, 44, 45, 46, 50, 51, 54, 55, 57, 59) until it is resolved; public remote ref confirmed, no secrets found by a read-only scan, remote ref not deleted (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
+  - 2026-11-14: Blocks switched from the explicit list (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 43, 44, 45, 46, 50, 51, 54, 55, 57, 59) to the global hold ALL_AGENT_TICKETS (ADR 0020), in the same commit that introduces the global gate, so no commit leaves a ticket Ralph can select clear; the entry stays PLANNED and unresolved (maintainer instruction of 2026-11-14 to implement ticket 52's global safety gate, fix/ticket-52-ralph-safety-gate)
 
 ### TD-060: The verifier's Yama refusal has no regression test
 
@@ -1769,7 +1790,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-070: Metrics adapter is never wired in production code
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** OPERABILITY
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -1779,9 +1800,9 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `docs/index.md:67`
 - **Problem:** bookingServiceFor in apps/web/src/server/routers/booking.ts:70-76 builds the service without `metrics`, and no other non-test caller uses createRedisBookingMetrics. In the app, hold_ok, seat_unavailable and race_lost are therefore never counted. The docs state that counters go to Redis.
 - **Impact:** The docs overstate current behaviour. The counters exist only in tests until a later ticket wires a Redis client into the app. The ACs only require the port and the adapter, so this is not an AC failure.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: the docs overstate where counters go; the admin snapshot (35) reports 'the metrics available so far', so it does not rely on them being wired.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: the docs overstate where counters go; the admin snapshot (35) reports 'the metrics available so far', so it does not rely on them being wired. Owner set 2026-11-14: ticket 57's Wiring criterion is this fix; the ticket resolves the entry with its tests.
 - **Remediation:** Either soften the docs sentence to say the adapter exists but is not yet wired, or name the ticket that wires it in.
-- **Target:** none
+- **Target:** ticket 57 (`issues/57-production-booking-metrics.md`)
 - **Blocks:** none
 - **Acceptance:** none
 - **Resolution:** none
@@ -1792,6 +1813,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-05: seen again: LOW spec_gap at `docs/index.md:67`, spec axis (ticket 10 host review spec, run 20261105-153541-378)
   - 2026-11-06: triaged: OPERABILITY, no owner: deferred, blocks no ticket (initial triage, ticket 53)
   - 2026-11-08: seen again: LOW regression_risk at `apps/web/src/server/trpc.ts:27`, standards axis (ticket 56 host review standards, run replay-20261108122117-29384)
+  - 2026-11-14: planned for ticket 57, blocks no ticket: ticket 57's Wiring criterion is this fix; the ticket resolves the entry with its tests. (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-071: Saturation tests assume the occupier holds the only connection after a fixed 50 ms sleep
 
@@ -1919,7 +1941,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-076: buyer(), freeSeats(), service() and DB setup are copied across new test files
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** MAINTAINABILITY
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -1929,9 +1951,9 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `packages/booking/src/hold-seat-count.test.ts:18`; `packages/booking/src/hold-buyer-limit.test.ts:179`
 - **Problem:** hold-seat-count.test.ts and hold-buyer-limit.test.ts repeat the same db(), buyer(n), freeSeats() and service() helpers, plus the beforeAll/afterAll scaffolding (lines 7-43 here, 7-42 there).
 - **Impact:** Fixture drift between the files, and more places to edit when the setup changes.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: duplicated test helpers; no unfinished ticket relies on the affected behaviour.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: duplicated test helpers; no unfinished ticket relies on the affected behaviour. Owner set 2026-11-14: the copied helpers violate ticket 55's one-helper-module criterion, which covers these files.
 - **Remediation:** Move the shared helpers into a test support module in packages/booking/src.
-- **Target:** none
+- **Target:** ticket 55 (`issues/55-deterministic-transaction-tests.md`)
 - **Blocks:** none
 - **Acceptance:** none
 - **Resolution:** none
@@ -1941,6 +1963,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-06: recorded: LOW maintainability at `packages/booking/src/hold-seat-count.test.ts:18`, standards axis (ticket 11 review-2 standards, run 20261106-073411)
   - 2026-11-06: seen again: the lock-holder helper `holdBuyerLock` in `hold-buyer-limit.test.ts` repeats the locker-pid pattern of `lockSeatElsewhere` in `hold-fast-path.test.ts`, with its own wait query (independent Standards review of `fix/buyer-lock-order-tests`)
   - 2026-11-06: triaged: MAINTAINABILITY, no owner: deferred, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-14: planned for ticket 55, blocks no ticket: the copied helpers violate ticket 55's one-helper-module criterion, which covers these files. (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-077: Index summary omits the new limit_exceeded counter
 
@@ -1994,7 +2017,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-079: Race cases assume the queuedFirst request runs first without asserting it
 
-- **Status:** OPEN
+- **Status:** PLANNED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -2004,9 +2027,9 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Components:** `packages/booking/src/hold-buyer-limit.test.ts:277`
 - **Problem:** Each test.each case of the TD-026 race fixes which request queues first on the buyer advisory lock and relies on Postgres granting waiters of one lock in arrival order. That is how the lock manager works, but it is not a documented guarantee, and the test never checks which request actually committed first.
 - **Impact:** If that behaviour changed, 'both orders run' would silently collapse to one order; the test still passes because the outcome is the same either way.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when both independent reviewers approved the remediation. Escalate if its real impact grows. Triage 2026-11-06: reviewed separately: the race test relies on Postgres granting one lock's waiters in arrival order, which the lock manager does but does not document; both orders give the same outcome, so a change there weakens the test, not the guarantee it checks. Kept deferred and documented; escalate if the outcome ever depends on the order.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when both independent reviewers approved the remediation. Escalate if its real impact grows. Triage 2026-11-06: reviewed separately: the race test relies on Postgres granting one lock's waiters in arrival order, which the lock manager does but does not document; both orders give the same outcome, so a change there weakens the test, not the guarantee it checks. Kept deferred and documented; escalate if the outcome ever depends on the order. Owner set 2026-11-14: ticket 55 rewrites the synchronisation of the hold-buyer-limit race tests, where the arrival-order assumption lives.
 - **Remediation:** Record the commit order (for example by comparing database-clock timestamps of the order row and the second hold row) and assert it matches queuedFirst, or accept the documented reasoning in the test comment.
-- **Target:** none
+- **Target:** ticket 55 (`issues/55-deterministic-transaction-tests.md`)
 - **Blocks:** none
 - **Acceptance:** none
 - **Resolution:** none
@@ -2015,6 +2038,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-06: recorded: LOW missing_test at `packages/booking/src/hold-buyer-limit.test.ts:277`, standards axis (fix/buyer-lock-order-tests confirmation review standards, run a2ba22b)
   - 2026-11-06: triaged: VERIFICATION, no owner: deferred, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-14: planned for ticket 55, blocks no ticket: ticket 55 rewrites the synchronisation of the hold-buyer-limit race tests, where the arrival-order assumption lives. (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-080: Race test titles read 'a hold of 1 seats'
 
@@ -2116,15 +2140,15 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 - **Status:** OPEN
 - **Severity:** LOW
-- **Risk:** UNTRIAGED
-- **Triage:** pending
+- **Risk:** VERIFICATION
+- **Triage:** 2026-11-14: maintainer, approving Claude's technical-debt audit of main at a3bb37f (chore/debt-audit-triage)
 - **Escalation:** none
 - **Source:** ticket 56 (`56-metrics-configuration-bootstrap`)
 - **Evidence:** `.ralph/host-review/replay-20261108122117-29384/56-metrics-configuration-bootstrap.standards.json`
-- **Components:** `apps/web/src/server/routers/health.test.ts:19`
+- **Components:** `apps/web/src/server/routers/health.test.ts:19`; `apps/web/src/server/routers/session.test.ts:15`
 - **Problem:** vi.unstubAllEnvs() runs as the last statement of the test body. If the caller or an assertion throws first, the stubbed SESSION_SECRET, DATABASE_URL and blank Upstash values leak into later tests in the same worker. session.test.ts has the same pattern at line 15.
 - **Impact:** A failing test can cascade into misleading failures in other tests that share the worker. The existing trpc.test.ts uses a shared cleanup.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows. Triage 2026-11-14: a leaked stub needs a test that has already failed, so the suite still fails closed. The same pattern is in session.test.ts:15 and, as TD-045, in logger.test.ts:35; fix the three together (for example `unstubEnvs: true` in apps/web/vitest.config.ts). No unfinished ticket relies on the affected behaviour.
 - **Remediation:** Move vi.unstubAllEnvs() into afterEach, as trpc.test.ts and proxy.test.ts do, or wrap the body in try/finally.
 - **Target:** none
 - **Blocks:** none
@@ -2135,20 +2159,21 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-08: recorded: LOW maintainability at `apps/web/src/server/routers/health.test.ts:19`, standards axis; suggested risk MAINTAINABILITY, awaiting triage (ticket 56 host review standards, run replay-20261108122117-29384)
   - 2026-11-08: seen again: LOW missing_test at `apps/web/src/server/routers/health.test.ts:19`, spec axis (ticket 56 host review spec, run replay-20261108122117-29384)
+  - 2026-11-14: triaged: VERIFICATION, no owner: deferred, blocks no ticket; confirmed at health.test.ts:19 and session.test.ts:15, and the same root cause as TD-045 at logger.test.ts:35 (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-085: Needless per-test dynamic imports and repeated failure assertions
 
 - **Status:** OPEN
 - **Severity:** LOW
-- **Risk:** UNTRIAGED
-- **Triage:** pending
+- **Risk:** MAINTAINABILITY
+- **Triage:** 2026-11-14: maintainer, approving Claude's technical-debt audit of main at a3bb37f (chore/debt-audit-triage)
 - **Escalation:** none
 - **Source:** ticket 56 (`56-metrics-configuration-bootstrap`)
 - **Evidence:** `.ralph/host-review/replay-20261108122117-29384/56-metrics-configuration-bootstrap.standards.json`
 - **Components:** `apps/web/src/server/upstash-metrics.test.ts:52`
 - **Problem:** Each test re-imports ./upstash-metrics dynamically with no module state or mocks that need it. Three tests repeat the same instanceof, HINCRBY and not-token assertions.
 - **Impact:** Noise, and extra places to edit when the error contract changes.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows. Triage 2026-11-14: test-code noise only; the assertions are correct and no unfinished ticket relies on the affected behaviour.
 - **Remediation:** Import statically at the top of the file and extract a small helper such as expectRejectsNamingCommand(promise).
 - **Target:** none
 - **Blocks:** none
@@ -2158,20 +2183,21 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `apps/web/src/server/upstash-metrics.test.ts#needless-per-test-dynamic-imports-and-repeated-failure-asser`
 - **History:**
   - 2026-11-08: recorded: LOW maintainability at `apps/web/src/server/upstash-metrics.test.ts:52`, standards axis; suggested risk MAINTAINABILITY, awaiting triage (ticket 56 host review standards, run replay-20261108122117-29384)
+  - 2026-11-14: triaged: MAINTAINABILITY, no owner: deferred, blocks no ticket (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-086: A failed resolution is cached for the life of the process
 
 - **Status:** OPEN
 - **Severity:** LOW
-- **Risk:** UNTRIAGED
-- **Triage:** pending
+- **Risk:** OPERABILITY
+- **Triage:** 2026-11-14: maintainer, approving Claude's technical-debt audit of main at a3bb37f (chore/debt-audit-triage)
 - **Escalation:** none
 - **Source:** ticket 56 (`56-metrics-configuration-bootstrap`)
 - **Evidence:** `.ralph/host-review/replay-20261108122117-29384/56-metrics-configuration-bootstrap.standards.json`
 - **Components:** `apps/web/src/server/upstash-metrics.ts:84`
 - **Problem:** createLazyMetrics caches the failure permanently, and the recorded outcome includes failures other than configuration errors, such as an unexpected throw from createRedisBookingMetrics. Fixing the environment needs a restart. The log line always says "metrics configuration is invalid".
 - **Impact:** This is intended by AC5 and documented. If the construction step later gains non-config failure modes, the log text will mislead.
-- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows.
+- **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the host's own review approved the ticket. Escalate if its real impact grows. Triage 2026-11-14: caching the failure is intended (ticket 56 AC5). Today only parseMetricsEnv can throw inside the try (the constructors do no I/O), so the misleading log text is latent; no unfinished ticket relies on the affected behaviour.
 - **Remediation:** Keep the behaviour. Restrict the try block to parseMetricsEnv, or word the log neutrally, so only configuration errors are labelled that way.
 - **Target:** none
 - **Blocks:** none
@@ -2181,6 +2207,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Fingerprints:** `apps/web/src/server/upstash-metrics.ts#a-failed-resolution-is-cached-for-the-life-of-the-process`
 - **History:**
   - 2026-11-08: recorded: LOW unverified_assumption at `apps/web/src/server/upstash-metrics.ts:84`, standards axis; suggested risk VERIFICATION, awaiting triage (ticket 56 host review standards, run replay-20261108122117-29384)
+  - 2026-11-14: triaged: OPERABILITY, no owner: deferred, blocks no ticket (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
 
 ### TD-087: The workspace module's signal handlers have never been observed running
 

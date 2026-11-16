@@ -140,6 +140,18 @@ debt is resolved or triaged):
 A ticket that cannot get through RED, GREEN, DOCS, REVIEW or VERIFY is **rejected**: its failing work is
 committed to a quarantine branch `rejected/<NN>-<slug>-<run-id>` (never to a slice branch or
 `main`), the ticket is marked `blocked` on `main`, and the loop stops for a human to look.
+Rejected work is never pushed by default ([ADR 0021](../adr/0021-rejected-work-is-not-published-by-default.md)):
+inside the sandbox it goes only to the container's staging repository, which the host validates;
+anywhere else it stays on the local branch, and only the blocked status is pushed. Publishing it
+needs both `--push-rejected NN` for that ticket on that run's command line (there is no
+environment variable or config for it) and a passing `scripts/ralph-push-inspect.mjs` over exactly
+the commits the push would send (no `.github/`, env or key files, no credential patterns, no
+binary content; a finding, a failure or an inspection that cannot run blocks it). Paused work is
+likewise pushed only to the staging repository, and the harness never deletes a remote ref
+outside it: removing one is a maintainer's decision. Git's error output, and the push remote
+wherever the harness names it, are scrubbed of credentials (URL userinfo, secret query
+parameters, `Authorization` values, known token formats) before they reach the terminal, the
+logs or the batch's state.
 Agent transcripts, gate output and review reports are kept in `.ralph/logs/<run-id>/`
 (git-ignored); see [Run artifacts](#run-artifacts) for what is kept and for how long.
 
@@ -225,6 +237,14 @@ failure the provider's) would grant free attempts. So:
   cannot clear up within the run, and rejecting good work over an expired token would be wrong.
   If the work cannot be parked (a git step fails), the run fails (exit 1) without writing resume
   state and leaves the work on the slice branch for a human; it is never reported as paused.
+  In the sandbox the parked ref must also reach the staging repository, since the clone dies with
+  the container. If the push remote is not the staging repository, or the push fails, the run
+  likewise fails (exit 1) instead of pausing. Nothing in `.ralph/state/` changes, so a pause the
+  host already holds for the ticket stays valid and resumable. The new work is saved as
+  `.ralph/logs/<run-id>/<slug>.paused-work.patch`, a patch series on the base that the host imports
+  with the logs; recover it with `git switch -c slice/<slug> <base>` and
+  `git am --empty=keep <patch>` (its last commit is the interrupted phase's unchecked work, empty
+  when the phase had written nothing, which a plain `git am` refuses), or rerun to start over.
 - **Resume** (manual: run the same command again). The harness recreates the slice branch at the
   gated checkpoint with the interrupted phase's work uncommitted on top, then continues at that
   phase and attempt. Phases already passed are not rerun; every later gate (review, debt, VERIFY)
@@ -384,12 +404,25 @@ commits. `node scripts/ralph-debt.mjs gate` prints every unfinished ticket's ver
 | Verdict        | Cause                                                                                                                                                                                                                                                    |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `needs-triage` | an unresolved `MEDIUM`+ entry is untriaged or unowned (all tickets); an untriaged `LOW` found by a ticket this one builds on, or owned by it, or found outside any ticket's review (all tickets); an entry back in triage that still `Blocks` the ticket |
-| `waiting`      | a triaged unresolved entry lists the ticket in `Blocks`                                                                                                                                                                                                  |
+| `waiting`      | a triaged unresolved entry lists the ticket in `Blocks`, or holds it with `Blocks: ALL_AGENT_TICKETS`                                                                                                                                                    |
 | `clear`        | neither                                                                                                                                                                                                                                                  |
+- **Global hold** ([ADR 0020](../adr/0020-global-fail-closed-debt-hold.md)). `Blocks:
+  ALL_AGENT_TICKETS` holds every unfinished ticket that is not `ready-for-human`, including
+  tickets created later and tickets with a missing or misspelt status, until the entry is
+  resolved. Its owner must be `ready-for-human`, so the fix is worked by hand. A `Blocks` value
+  the gate cannot read holds every ticket.
 - **Selection and batch.** `next_ticket` picks the first cleared ticket, so independent work
   continues; the batch stops `needs-triage` (exit 4, resumable) once no cleared ticket is left
   and one needs triage, and re-checks a paused ticket before resuming it. An invalid register
-  clears nothing.
+  clears nothing: `ralph-loop.sh` and the Lead driver stop with an error before selecting
+  anything, and a ticket without a verdict is never `clear`. Each run keeps the verdicts it
+  selected by in `.ralph/logs/<run-id>/debt-gate.tsv`.
+- **Where agent work starts.** Selection is not the only check. Both drivers ask the gate again
+  for the one ticket when its work starts or resumes, and only `clear` proceeds; the agent,
+  reviewer and Lead launchers refuse a ticket that check has not cleared in the same process
+  ([ADR 0020](../adr/0020-global-fail-closed-debt-hold.md)). Every such verdict, refusals
+  included, is appended to `.ralph/logs/<run-id>/debt-gate-verdicts.tsv` (time, driver, ticket,
+  verdict, base commit, reasons).
 - **Importer.** The host refuses (exit 3) a ticket the base's gate does not clear, and a slice
   whose register changes anything but resolving entries and the recorder's own additions
   (`slice` rules: severity, risk, triage, target, blocks, acceptance and history are fixed), or
@@ -500,7 +533,8 @@ Nothing else is mounted. That excludes the host repository, its `.git`, `.ralph/
 `.ralph/state`, the Docker socket, and GitHub credentials. The container runs with
 `--cap-drop ALL` and `no-new-privileges`. Inside it, the entrypoint clones the bundle into a
 private staging bare repository and a workspace, and Ralph pushes to that staging repository
-(`RALPH_PUSH_REMOTE=origin`). At exit, the staging repository's branches are bundled into
+(`RALPH_PUSH_REMOTE=origin`, with `RALPH_STAGING_REMOTE` naming it, the only remote rejected or
+paused work reaches without an operator's authorization: ADR 0021). At exit, the staging repository's branches are bundled into
 `result.bundle`, whatever the outcome.
 
 `scripts/ralph-accept.mjs` then decides on the host. It is the only code that changes the host

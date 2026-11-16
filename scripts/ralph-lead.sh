@@ -212,6 +212,9 @@ lead_handed_off() {
 lead_session() {
   local ticket=$1 out=$2 err=$3 prompt=$4 session config status=0 started record outcome=ok
   local -a argv
+  # The only launcher of the Lead: it starts nothing for a ticket the debt gate has not cleared in
+  # this run (lead_ticket's require_debt_clear), whatever called it.
+  require_debt_cleared
   IFS=' ' read -r -a argv <<<"${LEAD_CMD}"
   session="$(node -e 'console.log(require("node:crypto").randomUUID())')"
   config="$(mktemp -d "${TMPDIR:-/tmp}/ralph-lead.XXXXXX")"
@@ -425,11 +428,16 @@ lead_ticket() {
   git show-ref --quiet "refs/heads/${branch}" && die "branch ${branch} already exists"
   [[ ! -e "${STATE_DIR}/${slug}.pause" ]] ||
     die "${slug} is paused by the Ralph driver: resume it with that driver, not the lead driver"
+  # The global hold where the Lead starts, not only at selection (ADR 0020); before any branch,
+  # status or file changes.
+  require_debt_clear "${ticket}" lead
 
   # lead_ticket runs under `|| exit`, where errexit is off: every step that matters is checked.
   base_sha="$(git rev-parse HEAD)"
   git switch --quiet -c "${branch}" "${BASE_BRANCH}" || die "could not create ${branch}"
   CURRENT_BRANCH="${branch}"
+  # reject_slice (ralph-loop.sh) refuses to commit or push if the base branch moved from here.
+  SLICE_BASE="$(git rev-parse "refs/heads/${BASE_BRANCH}")"
   LEAD_SLUG="${slug}" LEAD_BRANCH="${branch}" LEAD_BASE="${base_sha}" LEAD_CANDIDATE=""
   trap 'lead_interrupt 130' INT
   trap 'lead_interrupt 143' TERM
@@ -508,6 +516,8 @@ lead_main() {
   [[ -z "${LEAD_BUDGET}" || "${LEAD_BUDGET}" =~ ^[0-9]+(\.[0-9]+)?$ ]] ||
     die "RALPH_LEAD_MAX_BUDGET_USD must be a number"
   preflight
+  # A gate that cannot reach a verdict is not a ticket that is merely not ready: say which.
+  require_debt_verdicts
 
   local ticket
   if [[ "${DRY_RUN}" == true ]]; then
@@ -530,6 +540,7 @@ lead_main() {
     die "refusing to run a permission-skipping lead outside the sandbox; use ./scripts/sandbox.sh"
   fi
   start_run
+  require_debt_verdicts "${LOG_DIR}/debt-gate.tsv"
   # Refused before any agent runs: not ready-for-agent, blocked, or held by the debt gate.
   ticket="$(next_ticket)" ||
     die "ticket ${ONLY_TICKET} is not ready: status, blockers or the debt gate (nothing was run)"

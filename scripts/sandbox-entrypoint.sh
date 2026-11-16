@@ -5,7 +5,9 @@
 #   /ralph-in   read-only: repo.bundle (the base branch and parked work) and state/ (resume state
 #               the host vouches for)
 #   /ralph-out  this run's output: logs/ as they happen, then state/ and result.bundle at exit
-# Ralph pushes to a staging bare repository that only this container has. When the loop ends,
+# Ralph pushes to a staging bare repository that only this container has (RALPH_STAGING_REMOTE
+# tells ralph-loop.sh that its remote is this repository, the only place rejected or paused work
+# may go without an operator's authorization: ADR 0021). When the loop ends,
 # its branches leave as a Git bundle, which is data: the host validates it
 # (scripts/ralph-accept.mjs) and is the only one that changes the host repository.
 #
@@ -206,8 +208,8 @@ if ralph_driver_forwards_signals "${driver}"; then
   # would be killed with no result.bundle and no logs. The lead driver stops its session and saves
   # the work on a signal, so pass the signal on and wait for it to finish (ADR 0017). Ralph's own
   # line below is unchanged.
-  RALPH_PUSH_REMOTE=origin RALPH_LOG_ROOT="${OUT}/logs" RALPH_STATE_DIR="${STATE}" \
-    "${driver}" "$@" &
+  RALPH_PUSH_REMOTE=origin RALPH_STAGING_REMOTE="${STAGING}" RALPH_LOG_ROOT="${OUT}/logs" \
+    RALPH_STATE_DIR="${STATE}" "${driver}" "$@" &
   driver_pid=$!
   trap 'kill -TERM "${driver_pid}" 2>/dev/null || true' INT TERM
   while kill -0 "${driver_pid}" 2>/dev/null; do
@@ -220,8 +222,8 @@ if ralph_driver_forwards_signals "${driver}"; then
   }
   trap - INT TERM
 else
-  RALPH_PUSH_REMOTE=origin RALPH_LOG_ROOT="${OUT}/logs" RALPH_STATE_DIR="${STATE}" \
-    "${driver}" "$@" || status=$?
+  RALPH_PUSH_REMOTE=origin RALPH_STAGING_REMOTE="${STAGING}" RALPH_LOG_ROOT="${OUT}/logs" \
+    RALPH_STATE_DIR="${STATE}" "${driver}" "$@" || status=$?
 fi
 mkdir -p "${OUT}/state"
 cp -R "${STATE}/." "${OUT}/state/"

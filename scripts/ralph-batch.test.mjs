@@ -127,7 +127,9 @@ function fixture(
     join(source, "scripts", "ralph-batch.mjs"),
     join(host, "scripts", "ralph-batch.mjs"),
   );
-  copyFileSync(join(source, "scripts", "ralph-debt.mjs"), join(host, "scripts", "ralph-debt.mjs"));
+  for (const script of ["ralph-debt.mjs", "ralph-artifacts.mjs"]) {
+    copyFileSync(join(source, "scripts", script), join(host, "scripts", script));
+  }
   mkdirSync(join(host, "docs"), { recursive: true });
   writeFileSync(join(host, "docs", "technical-debt.md"), debtRegister(...entries));
   writeFileSync(join(host, ".gitignore"), ".ralph/\n");
@@ -388,6 +390,28 @@ describe("bounded batch", () => {
     assert.equal(code, 1, out);
     assert.match(out, /ambiguous-merge: the runner reported success, but ticket 01 is not merged/);
     assert.equal(state(fx).status, "running");
+  });
+
+  it("keeps a remote's credentials out of a failed push's report and state", () => {
+    const fx = fixture();
+    // Synthetic, built at run time. Only the push URL carries it, so the batch reaches the push;
+    // the slash makes Git reject the URL locally and quote it back, password included.
+    const password = `pw-${"s3cr/t".repeat(3)}`;
+    git(
+      fx.host,
+      "remote",
+      "set-url",
+      "--push",
+      "origin",
+      `https://bot:${password}@127.0.0.1:9/r.git`,
+    );
+    const { code, out } = batch(fx, ["--max-tickets", "1"]);
+    assert.notEqual(code, 0, out);
+    assert.match(out, /push-failed: could not push main/);
+    const saved = readFileSync(join(fx.host, ".ralph", "batch", "state.json"), "utf8");
+    assert.ok(!out.includes(password), out);
+    assert.ok(!saved.includes(password), saved);
+    assert.match(saved, /https:\/\/\*\*\*@127\.0\.0\.1/);
   });
 });
 

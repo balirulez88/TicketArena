@@ -66,7 +66,13 @@ switch (action) {
     process.exit(1);
   }
   case "reject-side": {
-    // The host refused the base branch: the quarantine branch arrives, the blocked status does not.
+    // The host refused the base branch: the quarantine ref arrives, the blocked status does not.
+    git("update-ref", "refs/ralph/rejected/" + slug + "-run1", "HEAD", "");
+    git("branch", "ralph/blocked-run1");
+    process.exit(1);
+  }
+  case "reject-side-legacy": {
+    // A runner outside the sandbox (ralph-loop.sh) still quarantines on an ordinary branch.
     git("branch", "rejected/" + slug + "-run1");
     git("branch", "ralph/blocked-run1");
     process.exit(1);
@@ -324,6 +330,10 @@ describe("bounded batch", () => {
     const { code, out } = batch(fx, ["--max-tickets", "3"], { plan: { "01": ["reject"] } });
     assert.equal(code, 1, out);
     assert.match(out, /STOPPED: rejected: ticket 01 was rejected/);
+    assert.match(
+      out,
+      /see refs\/ralph\/rejected\/ or refs\/ralph\/incoming\/ \(the importer's log names it\) and \.ralph\/logs/,
+    );
     assert.deepEqual(runnerCalls(fx), ["01"]);
     assert.equal(state(fx).tickets[0].stage, "rejected");
   });
@@ -369,8 +379,29 @@ describe("bounded batch", () => {
       out,
       /STOPPED: rejected: ticket 01 was rejected and is blocked on a ralph\/blocked-\* side branch/,
     );
+    assert.match(out, /see refs\/ralph\/rejected\/01-t01-run1 and \.ralph\/logs/);
     assert.deepEqual(runnerCalls(fx), ["01"]);
     assert.equal(state(fx).tickets[0].stage, "rejected");
+  });
+
+  it("still recognizes a rejection quarantined on an ordinary rejected/* branch", () => {
+    const fx = fixture();
+    const { code, out } = batch(fx, ["--max-tickets", "3"], {
+      plan: { "01": ["reject-side-legacy"] },
+    });
+    assert.equal(code, 1, out);
+    assert.match(out, /STOPPED: rejected: ticket 01 was rejected/);
+    assert.match(out, /see refs\/heads\/rejected\/01-t01-run1 and \.ralph\/logs/);
+    assert.equal(state(fx).tickets[0].stage, "rejected");
+  });
+
+  it("does not mistake an earlier run's quarantine ref for a new rejection", () => {
+    const fx = fixture();
+    git(fx.host, "update-ref", "refs/ralph/rejected/01-t01-run0", "HEAD");
+    const { code, out } = batch(fx, ["--max-tickets", "3"], { plan: { "01": ["crash"] } });
+    assert.equal(code, 1, out);
+    assert.match(out, /STOPPED \(resumable\): runner-failed/);
+    assert.notEqual(state(fx).tickets[0].stage, "rejected");
   });
 
   it("a half-merged ticket blocks the batch, and blocks it again on the rerun", () => {

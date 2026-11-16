@@ -14,6 +14,10 @@ ticket has since been amended. The only remaining route was to pay for a new imp
 
 ## Decision
 
+> Note (TD-059, 2026-11-16): the host now keeps host-review rejections as
+> `refs/ralph/rejected/<slug>-<run>`, not as branches. Replay does not accept those yet; that is
+> ticket 52's open replay criterion. See `docs/workflow/index.md`, Replaying a rejected candidate.
+
 `scripts/ralph-replay.mjs` is a host-side tool, run by a human from a clean checkout of the base
 branch, never inside the sandbox. For a quarantine branch pinned by its full commit it:
 

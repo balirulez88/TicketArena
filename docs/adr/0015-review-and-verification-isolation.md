@@ -57,7 +57,8 @@ the path rules and the gate passed:
   must exist in the candidate's tree. An invalid report is asked for once more with the gate's
   reasons, in a new container, as in the loop. Both axes must approve.
 - Not approved: nothing of the run reaches `main`. The host blocks the ticket in its own commit
-  and keeps the candidate on `rejected/<slug>-<run>`, so the batch stops as `rejected`. A
+  and keeps the candidate on `rejected/<slug>-<run>` (since TD-059's namespace move, the ref
+  `refs/ralph/rejected/<slug>-<run>`, outside `refs/heads/`), so the batch stops as `rejected`. A
   reviewer the provider cut off leaves the host untouched (`review-unavailable`); the batch stops
   resumably.
 - Approved: the host records the review's deferred findings in the debt register, in its own
@@ -143,7 +144,8 @@ Slices may still add, upgrade and drop ordinary dependencies.
 - Changing test configuration, `tsconfig*.json`, the test infrastructure, Prisma generators or the
   toolchain's versions (including adding an optional peer that changes a toolchain package's
   locked entry), and adding a workspace package that needs its own Vitest configuration, now
-  takes a human-reviewed commit. The run's work stays on a quarantine branch to build on.
+  takes a human-reviewed commit. The run's work stays in quarantine (a `refs/ralph/rejected/`
+  ref since TD-059's namespace move) to build on.
 - A run that merges several tickets is accepted all or nothing: if the host does not approve one
   of them, none of the run lands. The batch runs one ticket per run.
 - **Remaining limitations:**

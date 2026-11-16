@@ -139,7 +139,10 @@ debt is resolved or triaged):
 
 A ticket that cannot get through RED, GREEN, DOCS, REVIEW or VERIFY is **rejected**: its failing work is
 committed to a quarantine branch `rejected/<NN>-<slug>-<run-id>` (never to a slice branch or
-`main`), the ticket is marked `blocked` on `main`, and the loop stops for a human to look.
+`main`), the ticket is marked `blocked` on `main`, and the loop stops for a human to look. A run
+outside the sandbox keeps that local branch. After a sandbox run the host imports the work as
+the ref `refs/ralph/rejected/<NN>-<slug>-<run-id>` instead, outside `refs/heads/` (see
+[Quarantine refs](#quarantine-refs-td-059)).
 Rejected work is never pushed by default ([ADR 0021](../adr/0021-rejected-work-is-not-published-by-default.md)):
 inside the sandbox it goes only to the container's staging repository, which the host validates;
 anywhere else it stays on the local branch, and only the blocked status is pushed. Publishing it
@@ -282,8 +285,10 @@ validating the run. A rerun therefore resumes at the right checkpoint (run, push
 CI) and never runs a merged ticket twice. The limit is stored with the batch; a conflicting
 `--max-tickets` is refused. Every step first rechecks that `main` is checked out and clean
 (`checkout-changed` otherwise), so what is pushed is exactly what was accepted. A run that leaves
-a new `rejected/<slug>-*` branch is a rejection. A run whose output the host refused (sandbox
-exit 3) ends the batch with `untrusted-result`; it is never retried automatically.
+a new `refs/ralph/rejected/<slug>-*` ref is a rejection (so is a new `rejected/<slug>-*` branch,
+which only a runner outside the sandbox leaves), and the stop message names that ref. A run
+whose output the host refused (sandbox exit 3) ends the batch with `untrusted-result`; it is
+never retried automatically.
 `.ralph/batch/lock` (an atomic `mkdir`)
 admits one batch at a time, and `pnpm sandbox` refuses (best effort) to run beside one. A lock left by a killed batch is never taken over
 automatically: the message says so, and a human removes it after checking that no batch or
@@ -552,9 +557,11 @@ repository from a run, and everything in `out/` is data to it:
     an identical tree, Ralph's commit subject, and a ticket that was `ready-for-agent` with all
     blockers `done` (and is the `--ticket` the run was given). The only issue-file change is the
     archive to `issues/done/`: `done`, `Completed`, ticked checkboxes, nothing else.
-  - a **blocked-status commit** that changes only that ticket's status line. Its quarantine
-    branch `rejected/<slug>-<run-id>` is imported as a new branch. Its tree is unvalidated:
-    inspect it with `git log -p` or `git show`, never by checking it out.
+  - a **blocked-status commit** that changes only that ticket's status line. The run's quarantine
+    branch `rejected/<slug>-<run-id>` is imported as the new ref
+    `refs/ralph/rejected/<slug>-<run-id>` (same commits), never as a branch. Its tree is
+    unvalidated: inspect it with `git log -p` or `git show`, never by checking it out. See
+    [Quarantine refs](#quarantine-refs-td-059).
 - **Protected paths** may not change through a run: `ralph-loop.sh`, `scripts/`, `Dockerfile`,
   `.dockerignore`, `.github/`, `skills/`, `infra/`, `docs/workflow/`, `packages/test-infra/`,
   `tsconfig.base.json`, `turbo.json`, `.nvmrc`; and in any directory `.gitignore` (the host-only
@@ -605,8 +612,8 @@ repository from a run, and everything in `out/` is data to it:
   only if Yama restricts `ptrace`. The verdict is the containers' exit status, nothing else.
 - The **host's own review** then judges the exact slice commit (see Independent review). If it
   does not approve, none of the run lands: the host blocks the ticket in its own commit and keeps
-  the work on `rejected/<slug>-<run>`. A reviewer cut off by the provider leaves the host
-  unchanged.
+  the work on `refs/ralph/rejected/<slug>-<run>`. A reviewer cut off by the provider leaves the
+  host unchanged.
 - A **pause** is adopted only if it is exactly what `pause_ticket` writes. It must belong to the
   run's ticket and to parked work that is in the bundle on the base, with `paused^ = gated` and
   attempt and round within limits, and the parked work must obey the path rules. The host
@@ -649,6 +656,36 @@ use it after changing the image. The agent runs with permission prompts disabled
 the container (`RALPH_SANDBOX=1`); the script refuses to do so elsewhere unless explicitly
 overridden.
 
+### Quarantine refs (TD-059)
+
+Rejected work is unreviewed agent output. After a sandbox run, `scripts/ralph-accept.mjs` keeps it
+as `refs/ralph/rejected/<NN>-<slug>-<run-id>`, both when the run rejected itself and when the host
+review did not approve. The ref points at the run's own commits, with their full history and
+identities. The importer never creates `refs/heads/rejected/*` for a sandbox run.
+
+- **Create-only.** An existing quarantine ref is never moved or overwritten. Sometimes the ref
+  cannot be created: another commit already has the name, or Git refuses it for another reason
+  (a stale lock, or a ref already named like the directory). Then the host logs why and leaves
+  the run's incoming refs in `refs/ralph/incoming/<run>/` instead of clearing them, so the work
+  stays recoverable. The host review's block commit then names that location, not a quarantine
+  ref, and the batch's stop message points to both places.
+- **Inspect, never check out:** `git for-each-ref refs/ralph/rejected/`,
+  `git log -p refs/ralph/rejected/<name>`, `git show refs/ralph/rejected/<name>:<path>`.
+- **What it protects against.** A ref outside `refs/heads/` is not a branch. `git push --all`
+  and `git push --branches` do not send it, `git branch` does not list it, and tools that only
+  check out branches do not offer it.
+- **What it does not protect against.** `git push --mirror` and refspecs that cover `refs/*`
+  (for example `git push origin 'refs/*:refs/*'`, or a `remote.<name>.push` or `mirror`
+  setting) still publish it. So does an explicit push of the ref. The publishing controls of
+  [ADR 0021](../adr/0021-rejected-work-is-not-published-by-default.md) still apply, and they are
+  what keep it local. Never push the host repository with `--mirror` or a `refs/*` refspec.
+- **Not yet covered.** The namespace move alone does not resolve TD-059. Rejected branches
+  created before this change, or by `ralph-loop.sh` outside the sandbox, stay under
+  `refs/heads/rejected/`. Neither is migrated or deleted automatically. The rejected branch that
+  is already on the public remote, and its evidence-first cleanup, are maintainer steps of ticket
+  52. `ralph-replay.mjs` still reads only `rejected/<slug>-<run>` branches. Accepting a candidate
+  under `refs/ralph/rejected/` is still open in ticket 52.
+
 ## Replaying a rejected candidate ([ADR 0018](../adr/0018-host-side-replay-of-a-rejected-candidate.md))
 
 When the host review blocked a slice because of its ticket (for example a documentation-only
@@ -663,3 +700,11 @@ It reproduces the implementation byte for byte, re-proves RED in the hardened co
 the bundle to `ralph-accept.mjs`, which still runs the path rules, the debt gate, the hardened gate
 and fresh independent reviews. It is host-only, never writes the quarantine branch and refuses a
 moved candidate or a base that changed the candidate's files.
+
+**Not yet for `refs/ralph/rejected/`.** Replay still reads only `rejected/<slug>-<run>` branches,
+and it looks for the host's old block-commit wording ("preserved on rejected/…"). A candidate the
+host review rejected after the quarantine namespace move (TD-059) is kept as
+`refs/ralph/rejected/<slug>-<run>`, and its block commit names that ref. So replay refuses it
+until ticket 52's replay criterion is implemented. Do not recreate it as a branch to get around
+this. Until then, the global debt hold (TD-059, `ALL_AGENT_TICKETS`) stops every sandbox run, so
+no such candidate can arise.

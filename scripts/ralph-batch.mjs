@@ -232,10 +232,17 @@ function mergeState(slug) {
   return !done && merge === "" && archived.status !== 0 ? "absent" : "ambiguous";
 }
 
-// A rejection always leaves a new quarantine branch, even when the sandbox could not move the
-// base branch and its blocked status went to a ralph/blocked-* side branch instead.
+// A rejection always leaves a new quarantine ref, even when the sandbox could not move the base
+// branch and its blocked status went to a ralph/blocked-* side branch instead. The host imports a
+// sandbox run's under refs/ralph/rejected/ (TD-059); a runner outside the sandbox still leaves a
+// rejected/* branch. Either one stops the batch: counting both can only stop it more often.
 function rejectedRefs(slug) {
-  return gitOut("for-each-ref", "--format=%(refname)", `refs/heads/rejected/${slug}-*`)
+  return gitOut(
+    "for-each-ref",
+    "--format=%(refname)",
+    `refs/ralph/rejected/${slug}-*`,
+    `refs/heads/rejected/${slug}-*`,
+  )
     .split("\n")
     .filter(Boolean);
 }
@@ -397,7 +404,8 @@ function runTicket(state, entry) {
         : `is blocked on a ralph/blocked-* side branch (merge it into ${BASE})`;
     throw new Stop(
       "rejected",
-      `ticket ${entry.number} was rejected and ${blocked}; see its rejected/* branch and .ralph/logs`,
+      // No new quarantine ref: the importer kept the work in refs/ralph/incoming/ and logged why.
+      `ticket ${entry.number} was rejected and ${blocked}; see ${quarantine ?? "refs/ralph/rejected/ or refs/ralph/incoming/ (the importer's log names it)"} and .ralph/logs`,
     );
   }
   throw new Stop(

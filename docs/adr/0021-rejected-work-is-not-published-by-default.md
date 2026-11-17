@@ -62,8 +62,9 @@ work (`ralph/paused/*`) and deleted it from the remote after a resume.
   repository. Anywhere else an obsolete ref is evidence; removing it is a maintainer's explicit
   decision, after the evidence is preserved (ticket 52's maintainer steps).
 
-The batch already pushes only the base branch, and the importer creates quarantine branches only
-locally; neither changes.
+The batch already pushes only the base branch, and the importer creates quarantine refs only
+locally (quarantine branches before TD-059's namespace move, `refs/ralph/rejected/` since);
+neither changes.
 
 ## Alternatives considered
 
@@ -80,5 +81,7 @@ locally; neither changes.
 - Publishing rejected work is a deliberate, inspected, per-run act, and the inspection's
   conservative rules may refuse harmless work (for example a test fixture with a connection
   string). That is the intended trade.
-- The quarantine namespace move (`refs/ralph/rejected/`), the remaining part of TD-059, is
-  separate work under ticket 52.
+- The quarantine namespace move (`refs/ralph/rejected/`) is separate work under ticket 52. The
+  host's sandbox importer now uses it (`docs/workflow/index.md`, Quarantine refs). It keeps
+  rejected work out of `git push --all`, but not out of `git push --mirror` or a `refs/*`
+  refspec, so this decision's controls still govern publishing.

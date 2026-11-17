@@ -295,10 +295,12 @@ show_output() { ((failures == 0)) || sed 's/^/      | /' "$1.out" | tail -n 40; 
 
 status_on() { git -C "$1" show "$2:issues/01-demo.md" | sed -n 's/^\*\*Status:\*\* //p'; }
 first_branch() { git -C "$1" for-each-ref --format='%(refname:short)' "refs/heads/$2" | head -n 1; }
+# The host keeps rejected work outside refs/heads/ (TD-059), so a branch push cannot publish it.
+first_quarantine() { git -C "$1" for-each-ref --format='%(refname)' "refs/ralph/rejected/$2" | head -n 1; }
 # Everything a forged run must leave alone: refs, checkout, Git config, hooks, host scripts.
 fingerprint() {
   {
-    git -C "$1" for-each-ref --format='%(refname) %(objectname)' refs/heads/
+    git -C "$1" for-each-ref --format='%(refname) %(objectname)' refs/heads/ refs/ralph/rejected/
     git -C "$1" status --porcelain
     cat "$1/.git/config"
     ls "$1/.git/hooks"
@@ -331,9 +333,10 @@ echo "rejected run:"
 host="$(new_host_repo reject)"
 code="$(run_sandbox "${host}" "" high)"
 check "sandbox exits 1" "[[ ${code} == 1 ]]"
-rejected="$(first_branch "${host}" 'rejected/*')"
-check "quarantine branch on host" "[[ '${rejected}' == rejected/01-demo-* ]]"
-check "quarantine branch holds the work" "git -C '${host}' cat-file -e '${rejected}:feature.txt' 2>/dev/null"
+rejected="$(first_quarantine "${host}" '01-demo-*')"
+check "quarantine ref on host" "[[ '${rejected}' == refs/ralph/rejected/01-demo-* ]]"
+check "no ordinary rejected branch" "[[ -z \$(first_branch '${host}' 'rejected/*') ]]"
+check "quarantine ref holds the work" "git -C '${host}' cat-file -e '${rejected}:feature.txt' 2>/dev/null"
 check "ticket blocked on host main" "[[ \$(status_on '${host}' main) == blocked ]]"
 check "host checkout updated" "grep -q 'Status:\*\* blocked' '${host}/issues/01-demo.md'"
 check "work not merged into main" "! git -C '${host}' cat-file -e main:feature.txt 2>/dev/null"
@@ -442,8 +445,9 @@ check "the host's review blocked it" "grep -q 'host review of .*: blocked' '${ho
 check "work not merged into main" "! git -C '${host}' cat-file -e main:feature.txt 2>/dev/null"
 check "ticket blocked by the host" "[[ \$(status_on '${host}' main) == blocked ]]"
 check "the host blocked it in its own commit" "git -C '${host}' log -1 --format=%s main | grep -q 'after the host review'"
-rejected="$(first_branch "${host}" 'rejected/*')"
-check "candidate kept on a quarantine branch" "git -C '${host}' cat-file -e '${rejected}:feature.txt' 2>/dev/null"
+rejected="$(first_quarantine "${host}" '01-demo-*')"
+check "no ordinary rejected branch" "[[ -z \$(first_branch '${host}' 'rejected/*') ]]"
+check "candidate kept on a quarantine ref" "git -C '${host}' cat-file -e '${rejected}:feature.txt' 2>/dev/null"
 probe="$(cat "${host}"/.ralph/host-review/*/01-demo/standards.stderr.log 2>/dev/null || true)"
 check "the reviewer saw exactly the candidate" "grep -q \"^review head: \$(git -C '${host}' rev-parse '${rejected}')\$\" <<<'${probe}'"
 check "the reviewer's workspace is read-only" "grep -q '^review workspace: read-only$' <<<'${probe}'"
@@ -590,7 +594,8 @@ check_lead_started "${host}"
 check "sandbox exits 1" "[[ ${code} == 1 ]]"
 check "host repository, refs and checkout unchanged" "[[ \$(fingerprint '${host}') == ${before} ]]"
 check "the ticket is not blocked" "[[ \$(status_on '${host}' main) == ready-for-agent ]]"
-check "no quarantine branch" "[[ -z \$(first_branch '${host}' 'rejected/*') ]]"
+check "no quarantine ref" \
+  "[[ -z \$(first_branch '${host}' 'rejected/*')\$(first_quarantine '${host}' '*') ]]"
 check "the work survives on the host as a patch" \
   "grep -q 'partial work' '${host}'/.ralph/logs/*/01-demo.lead-work.patch"
 check "exactly one lead session, no Ralph agent" \
@@ -604,8 +609,9 @@ host="$(new_host_repo lead-reject)"
 code="$(run_lead_sandbox "${host}" notest lead --ticket 01)"
 check_lead_started "${host}"
 check "sandbox exits 1" "[[ ${code} == 1 ]]"
-rejected="$(first_branch "${host}" 'rejected/*')"
-check "quarantine branch on host" "[[ '${rejected}' == rejected/01-demo-* ]]"
+rejected="$(first_quarantine "${host}" '01-demo-*')"
+check "quarantine ref on host" "[[ '${rejected}' == refs/ralph/rejected/01-demo-* ]]"
+check "no ordinary rejected branch" "[[ -z \$(first_branch '${host}' 'rejected/*') ]]"
 check "ticket blocked on host main" "[[ \$(status_on '${host}' main) == blocked ]]"
 check "work not merged into main" "! git -C '${host}' cat-file -e main:feature.txt 2>/dev/null"
 check "RED was refused for want of a test" "grep -q 'no test file was added' '${host}'/.ralph/logs/*/01-demo.lead.red.log"

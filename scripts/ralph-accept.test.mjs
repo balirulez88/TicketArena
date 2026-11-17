@@ -316,6 +316,12 @@ function accept(host, run, { base, exit = 0, ticket = "01", verify = 0, review =
 
 const snapshot = (host) => ({
   refs: git(host, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"),
+  quarantine: git(
+    host,
+    "for-each-ref",
+    "--format=%(refname) %(objectname)",
+    "refs/ralph/rejected/",
+  ),
   head: git(host, "rev-parse", "HEAD"),
   status: git(host, "status", "--porcelain"),
   config: readFileSync(join(host, ".git", "config"), "utf8"),
@@ -1037,22 +1043,101 @@ describe("ralph-accept: attack path 4, pause and resume checkpoints", () => {
   });
 });
 
+// TD-059: the host keeps rejected work outside refs/heads/, so a branch push cannot publish it.
+const QUARANTINE = "refs/ralph/rejected";
+const legacyRejected = (host) => git(host, "for-each-ref", "refs/heads/rejected/");
+
 describe("ralph-accept: rejected and interrupted runs", () => {
-  it("adopts a genuine rejection: blocked status on main, work on its quarantine branch", () => {
+  it("adopts a genuine rejection: blocked status on main, work on its quarantine ref", () => {
     const host = hostRepo();
     const base = git(host, "rev-parse", "main");
     const ws = container(host);
     reject(ws);
+    const work = git(ws, "rev-parse", `rejected/01-demo-${RUN}`);
     const result = accept(host, finish(host, ws), { base, exit: 1 });
     assert.equal(result.code, 1, result.output);
     assert.match(readFileSync(join(host, "issues/01-demo.md"), "utf8"), /\*\*Status:\*\* blocked/);
-    assert.equal(git(host, "cat-file", "-p", `rejected/01-demo-${RUN}:half-done.txt`), "wip");
+    assert.equal(
+      git(host, "rev-parse", `${QUARANTINE}/01-demo-${RUN}`),
+      work,
+      "the container's own commit, not a copy",
+    );
+    assert.equal(git(host, "cat-file", "-p", `${QUARANTINE}/01-demo-${RUN}:half-done.txt`), "wip");
+    assert.equal(legacyRejected(host), "", "no ordinary rejected/* branch is created");
     assert.equal(
       existsSync(join(host, "half-done.txt")),
       false,
       "rejected work never reaches main",
     );
+    assert.match(result.output, new RegExp(`${QUARANTINE}/01-demo-${RUN}`));
+    assert.equal(git(host, "for-each-ref", "refs/ralph/incoming/"), "", "nothing left behind");
     assert.deepEqual(result.verified, []);
+  });
+
+  it("keeps the whole history of a multi-commit rejection under the quarantine ref", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    git(ws, "switch", "--quiet", "-c", `rejected/01-demo-${RUN}`);
+    write(ws, "a.txt", "1\n");
+    git(ws, "add", "-A");
+    git(ws, "commit", "--quiet", "-m", "wip(ralph): green checkpoint");
+    write(ws, "b.txt", "2\n");
+    git(ws, "add", "-A");
+    git(ws, "commit", "--quiet", "-m", "wip(ralph): rejected: review");
+    const history = git(ws, "rev-list", `main..rejected/01-demo-${RUN}`);
+    git(ws, "switch", "--quiet", "main");
+    const ticket = readFileSync(join(ws, "issues/01-demo.md"), "utf8");
+    write(ws, "issues/01-demo.md", ticket.replace(/^\*\*Status:\*\* .*$/m, "**Status:** blocked"));
+    git(
+      ws,
+      "commit",
+      "--quiet",
+      "-am",
+      "chore(issues): block issues/01-demo.md after rejected agent run",
+    );
+    const result = accept(host, finish(host, ws), { base, exit: 1 });
+    assert.equal(result.code, 1, result.output);
+    assert.equal(git(host, "rev-list", `main..${QUARANTINE}/01-demo-${RUN}`), history);
+  });
+
+  it("never overwrites an existing quarantine ref, and keeps the run's copy recoverable", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    git(host, "update-ref", `${QUARANTINE}/01-demo-${RUN}`, base);
+    const ws = container(host);
+    reject(ws);
+    const work = git(ws, "rev-parse", `rejected/01-demo-${RUN}`);
+    const result = accept(host, finish(host, ws), { base, exit: 1 });
+    assert.equal(result.code, 1, result.output);
+    assert.equal(git(host, "rev-parse", `${QUARANTINE}/01-demo-${RUN}`), base, "not overwritten");
+    assert.equal(legacyRejected(host), "", "no fallback to an ordinary branch");
+    const kept = `refs/ralph/incoming/run1/rejected/01-demo-${RUN}`;
+    assert.equal(git(host, "rev-parse", kept), work, "the run's copy is not cleared away");
+    assert.match(
+      result.output,
+      new RegExp(`kept the host's existing ${QUARANTINE}/01-demo-${RUN}`),
+    );
+    assert.match(result.output, /refs\/ralph\/incoming\/run1\//);
+  });
+
+  it("keeps the run's copy when the quarantine ref cannot be created, and says why", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    // A ref one level below the name makes Git refuse it as a directory/file conflict.
+    const blocker = `${QUARANTINE}/01-demo-${RUN}/other`;
+    git(host, "update-ref", blocker, base);
+    const ws = container(host);
+    reject(ws);
+    const work = git(ws, "rev-parse", `rejected/01-demo-${RUN}`);
+    const result = accept(host, finish(host, ws), { base, exit: 1 });
+    assert.equal(result.code, 1, result.output);
+    assert.equal(git(host, "rev-parse", blocker), base, "the existing ref is untouched");
+    assert.equal(legacyRejected(host), "", "no fallback to an ordinary branch");
+    const kept = `refs/ralph/incoming/run1/rejected/01-demo-${RUN}`;
+    assert.equal(git(host, "rev-parse", kept), work, "the run's copy is not cleared away");
+    assert.match(result.output, new RegExp(`could not create ${QUARANTINE}/01-demo-${RUN}`));
+    assert.doesNotMatch(result.output, /kept the host's existing/, "no ref was there to keep");
   });
 
   it("refuses a blocked-status commit that changes more than the status line", () => {
@@ -1160,7 +1245,7 @@ describe("ralph-accept: what the container leaves in out/", () => {
 const statusOf = (host, rev, file = "issues/01-demo.md") =>
   /^\*\*Status:\*\* (.*)$/m.exec(git(host, "show", `${rev}:${file}`))?.[1];
 const rejectedBranches = (host) =>
-  git(host, "for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/rejected/")
+  git(host, "for-each-ref", "--format=%(refname) %(objectname)", `${QUARANTINE}/`)
     .split("\n")
     .filter(Boolean);
 const verdictOf = (run) => JSON.parse(readFileSync(join(run, "verdict.json"), "utf8")).outcome;
@@ -1177,8 +1262,15 @@ function assertReviewRejected(host, result, { slice, base }) {
   assert.equal(git(host, "show", "main:app.txt"), "v1");
   assert.equal(existsSync(join(host, "feature.txt")), false, "the slice is not on the host");
   const [branch = ""] = rejectedBranches(host);
-  assert.match(branch, /^rejected\/01-demo-\d{8}-\d{6} /);
+  assert.match(branch, /^refs\/ralph\/rejected\/01-demo-\d{8}-\d{6} /);
   assert.equal(branch.split(" ")[1], slice, "the candidate is kept for a human");
+  assert.match(
+    git(host, "log", "-1", "--format=%b", "main"),
+    new RegExp(`preserved on ${branch.split(" ")[0]}`),
+    "the host's record names where the candidate is",
+  );
+  assert.equal(legacyRejected(host), "", "no ordinary rejected/* branch is created");
+  assert.equal(git(host, "for-each-ref", "refs/ralph/incoming/"), "", "nothing left behind");
   assert.equal(git(host, "for-each-ref", "refs/heads/slice/"), "");
   assert.equal(git(host, "status", "--porcelain"), "");
 }
@@ -1242,6 +1334,27 @@ describe("ralph-accept: the host's own review of the exact candidate (TD-058)", 
       assert.equal(result.reviewed.length, 3, "the invalid axis is asked once more, and only once");
     });
   }
+
+  it("never overwrites an existing quarantine ref when the host review rejects", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    const name = "20261104-130000-4242";
+    const target = `${QUARANTINE}/01-demo-20261104-130000`;
+    git(host, "update-ref", target, base);
+    const ws = container(host);
+    const { slice } = merge(ws);
+    const result = accept(host, finish(host, ws, { name }), { base, review: "critical" });
+    assert.equal(result.code, 1, result.output);
+    assert.equal(statusOf(host, "main"), "blocked");
+    assert.equal(git(host, "rev-parse", target), base, "not overwritten");
+    assert.equal(legacyRejected(host), "", "no fallback to an ordinary branch");
+    const kept = `refs/ralph/incoming/${name}/main`;
+    assert.equal(git(host, "rev-parse", `${kept}^2`), slice, "the candidate stays recoverable");
+    const record = git(host, "log", "-1", "--format=%b", "main");
+    assert.doesNotMatch(record, /preserved on refs\/ralph\/rejected/, "no false claim");
+    assert.match(record, new RegExp(`refs/ralph/incoming/${name}/`));
+    assert.match(record, new RegExp(slice.slice(0, 12)));
+  });
 
   it("blocks the ticket when the host's reviewers find a blocking problem", () => {
     const host = hostRepo();
@@ -2080,7 +2193,7 @@ describe("ralph-accept: the lead driver's output (ADR 0017)", () => {
     assert.deepEqual(result.verified, [], "an untrusted tree is never even re-gated");
   });
 
-  it("imports a rejection as Ralph's blocked-status commit and quarantine branch", () => {
+  it("imports a rejection as Ralph's blocked-status commit and quarantine ref", () => {
     const host = leadHost();
     const base = git(host, "rev-parse", "main");
     const ws = container(host);
@@ -2093,7 +2206,11 @@ describe("ralph-accept: the lead driver's output (ADR 0017)", () => {
       readFileSync(join(host, "issues", "01-demo.md"), "utf8"),
       /\*\*Status:\*\* blocked/,
     );
-    assert.match(git(host, "branch", "--list", "rejected/01-demo-*"), /rejected\/01-demo-/);
+    assert.match(
+      git(host, "for-each-ref", "--format=%(refname)", `${QUARANTINE}/`),
+      /^refs\/ralph\/rejected\/01-demo-/,
+    );
+    assert.equal(legacyRejected(host), "", "no ordinary rejected/* branch is created");
     assert.equal(JSON.parse(readFileSync(join(run, "verdict.json"), "utf8")).outcome, "rejected");
   });
 

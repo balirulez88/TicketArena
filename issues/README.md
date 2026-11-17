@@ -14,13 +14,13 @@ The harness parses these files, so the format is strict:
   `**Blocked by:** 03, 04` (two-digit numbers; titles may follow in parentheses).
 - **Status:** exactly one line `**Status:** <value>`.
 
-| Status            | Meaning                                                                                                       |
-| ----------------- | ------------------------------------------------------------------------------------------------------------- |
-| `ready-for-agent` | Approved; the harness may pick it up once its blockers are `done`                                             |
-| `in-progress`     | Claimed by a running harness                                                                                  |
-| `done`            | Merged as a green slice; archived in `issues/done/`                                                           |
-| `blocked`         | The harness rejected it; needs a human (see the local `rejected/*` branch: never pushed by default, ADR 0021) |
-| `ready-for-human` | Approved, but a human implements it (harness and trust-boundary work); Ralph never selects it                 |
+| Status            | Meaning                                                                                                               |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `ready-for-agent` | Approved; the harness may pick it up once its blockers are `done`                                                     |
+| `in-progress`     | Claimed by a running harness                                                                                          |
+| `done`            | Merged as a green slice; archived in `issues/done/`                                                                   |
+| `blocked`         | The harness rejected it; needs a human (see the local `refs/ralph/rejected/*` ref: never pushed by default, ADR 0021) |
+| `ready-for-human` | Approved, but a human implements it (harness and trust-boundary work); Ralph never selects it                         |
 
 ## Lifecycle
 

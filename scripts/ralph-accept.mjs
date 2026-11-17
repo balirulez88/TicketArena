@@ -33,7 +33,8 @@
 //   - The host's own Standards and Spec reviewers, each in an isolated read-only container with a
 //     snapshot of exactly the slice commit, approve it (scripts/ralph-host-review.mjs). Nothing the
 //     agent's container produced about its reviews is read. Not approved: the host blocks the
-//     ticket in its own commit and keeps the slice on rejected/<slug>-<run> (exit 1). A provider
+//     ticket in its own commit and keeps the slice on refs/ralph/rejected/<slug>-<run>, never a
+//     branch (TD-059), as it does with a run's own rejected/<slug>-<run> (exit 1). A provider
 //     cut-off leaves the host unchanged (exit 1). Approved: the host records the review's deferred
 //     findings in the register in its own commit.
 //   - A pause is adopted only if it is exactly what Ralph writes for the ticket's parked ref. It
@@ -1378,6 +1379,35 @@ function createBranch(name, sha) {
   }
 }
 
+// Rejected work is unreviewed agent output, so the host keeps it outside refs/heads/ (TD-059):
+// `git push --all` and `--branches` do not send it and nothing offers it for checkout. A mirror push
+// or a refs/* refspec still would; ADR 0021's controls are what keep it local.
+const QUARANTINE = "refs/ralph/rejected";
+
+/**
+ * Keeps rejected work at refs/ralph/rejected/<name>. Create-only: the zero old value makes Git
+ * refuse an existing ref atomically, so earlier evidence is never moved. Returns the ref, or null
+ * when the name is taken by another commit; the caller must then keep the run's incoming refs,
+ * the only other place the work is reachable from.
+ */
+function quarantine(name, sha, namespace) {
+  const ref = `${QUARANTINE}/${name}`;
+  const created = git(["update-ref", ref, sha, ZERO]);
+  if (created.status === 0) {
+    return ref;
+  }
+  const existing = git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).stdout.trim();
+  if (existing === sha) {
+    return ref;
+  }
+  // A stale lock or a ref named like a directory fails too; only an existing ref was "kept".
+  const why = existing
+    ? `kept the host's existing ${ref} (${short(existing)})`
+    : `could not create ${ref}: ${created.stderr.split("\n")[0]}`;
+  log(`${why}; the run's work (${short(sha)}) stays in ${namespace}/ for inspection`);
+  return null;
+}
+
 /** Everything the run's output claims, validated; refuses on the first thing that is not. */
 function validate(outDir, { base, status, only, namespace }) {
   const incoming = fetchBundle(join(outDir, "result.bundle"), namespace);
@@ -1423,13 +1453,13 @@ const stampOf = (label) =>
 
 /**
  * The host's review did not approve a slice: none of the run reaches the base branch. As
- * reject_slice does, the work is kept on a new quarantine branch and the ticket is blocked, here
- * in the host's own commit, so the batch stops on it as a rejection.
+ * reject_slice does, the work is kept in quarantine and the ticket is blocked, here in the host's
+ * own commit, so the batch stops on it as a rejection. The commit names where the work really is.
  */
 function applyReviewRejection({ review }, { namespace }) {
   const { slug, slice, verdict } = review.rejected;
-  const quarantine = `rejected/${slug}-${stampOf(basename(namespace))}`;
-  createBranch(quarantine, slice);
+  const kept = quarantine(`${slug}-${stampOf(basename(namespace))}`, slice, namespace);
+  const where = kept ?? `${namespace}/, as no quarantine ref could be created`;
   const file = `issues/${slug}.md`;
   const text = readFileSync(join(root, file), "utf8");
   writeFileSync(join(root, file), text.replace(/^(\*\*Status:\*\* ).*$/m, "$1blocked"));
@@ -1441,11 +1471,13 @@ function applyReviewRejection({ review }, { namespace }) {
     `chore(issues): block ${file} after the host review`,
     "-m",
     `The host's isolated Standards and Spec review of slice/${slug} (${short(slice)}) was ` +
-      `${verdict}, so the slice did not merge. It is preserved on ${quarantine}. ` +
+      `${verdict}, so the slice did not merge. It is ${kept ? "preserved on" : "kept in"} ${where}. ` +
       `Report: .ralph/host-review/${basename(namespace)}/${slug}/review.md`,
   );
-  clearNamespace(namespace);
-  log(`ticket ${slug} blocked: the host review was ${verdict}; the work is on ${quarantine}`);
+  if (kept) {
+    clearNamespace(namespace);
+  }
+  log(`ticket ${slug} blocked: the host review was ${verdict}; the work is in ${where}`);
 }
 
 function apply({ tip, outcomes, pause, quarantines, review }, { base, namespace }) {
@@ -1468,8 +1500,15 @@ function apply({ tip, outcomes, pause, quarantines, review }, { base, namespace 
     clearState(outcome.slug);
     log(`accepted: ticket ${outcome.slug} ${outcome.kind}`);
   }
+  // The run's own rejected/<slug>-<run> branch, imported under its own name and commit.
+  let keepIncoming = false;
   for (const [name, sha] of quarantines) {
-    createBranch(name, sha);
+    const kept = quarantine(name.slice("rejected/".length), sha, namespace);
+    if (kept) {
+      log(`the rejected work is on ${kept}; inspect it with git log -p, never check it out`);
+    } else {
+      keepIncoming = true;
+    }
   }
   if (pause) {
     gitOut("update-ref", `refs/heads/${pause.fields.ref}`, pause.fields.paused);
@@ -1502,7 +1541,9 @@ function apply({ tip, outcomes, pause, quarantines, review }, { base, namespace 
     );
     log("recorded the host review's deferred findings in the debt register");
   }
-  clearNamespace(namespace);
+  if (!keepIncoming) {
+    clearNamespace(namespace);
+  }
 }
 
 function decide(runDir, run) {

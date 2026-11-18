@@ -194,3 +194,27 @@ Login rate limiting and logout?
 Assumed: Neither built in this ticket; form POST to /api/admin/login with 303 redirects; missing/invalid cookie is UNAUTHORIZED
 
 Answer: (open)
+
+## 2026-11-18 15:33 ticket 37
+
+What does 'results appear in the feed' mean before the feed (ticket 36) exists?
+
+Assumed: The winning hold's normal seat.held outbox row is the race's feed entry; runRace returns its holdId and correlationId; losers write nothing; no new event type, no feed UI
+
+Answer: (open)
+
+## 2026-11-18 15:33 ticket 37
+
+What blocks the demo reset, and what does it delete?
+
+Assumed: Blocked by PENDING_PAYMENT demo orders or order_payments with REFUND_REQUESTED or MANUAL_REVIEW; deletes demo holds, orders, order_lines, order_payments and the event's Redis keys; keeps outbox_events, processed_messages, payment and notification schemas
+
+Answer: (open)
+
+## 2026-11-18 15:33 ticket 37
+
+How is the 1-per-10s limit stored and enforced?
+
+Assumed: SET admin:rate:<action> NX PX 10000 on the shared Upstash store, global per action, taken before other checks, fails closed; refusal is TOO_MANY_REQUESTS with retry seconds
+
+Answer: (open)

@@ -53,6 +53,12 @@ function caller(principal: Principal, now: Date, random: Random = { next: () => 
     metricsReader: () => {
       throw new Error("metrics are not read here");
     },
+    metricsReset: () => {
+      throw new Error("metrics are not reset here");
+    },
+    rateLimiter: () => {
+      throw new Error("nothing is rate-limited here");
+    },
     queueStore: async () =>
       createRedisQueueStore(redisClient, { prefix: `${redis.prefix}${queuePrefix}` }),
     random,
@@ -259,6 +265,12 @@ describe("admission slots", () => {
         metrics: () => ({ increment: async () => undefined }),
         metricsReader: () => {
           throw new Error("metrics are not read here");
+        },
+        metricsReset: () => {
+          throw new Error("metrics are not reset here");
+        },
+        rateLimiter: () => {
+          throw new Error("nothing is rate-limited here");
         },
         queueStore: () => Promise.reject(new Error("redis is down")),
         random: { next: () => 0.5 },

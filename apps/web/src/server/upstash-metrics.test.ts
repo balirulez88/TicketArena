@@ -116,6 +116,17 @@ describe("createUpstashMetricsClient against an Upstash-compatible endpoint", ()
     expect(await client.hGetAll(key)).toEqual({ hold_ok: "2", race_lost: "1" });
   });
 
+  test("del removes the hash and reports how many keys it deleted", async () => {
+    const { createUpstashMetricsClient } = await import("./upstash-metrics");
+    const client = createUpstashMetricsClient({ url: upstash.url, token: upstash.token });
+    const key = `${upstash.prefix}booking:metrics:${randomUUID()}`;
+    await client.hIncrBy(key, "hold_ok", 1);
+
+    expect(await client.del(key)).toBe(1);
+    expect(await client.hGetAll(key)).toEqual({});
+    expect(await client.del(key)).toBe(0);
+  });
+
   test("hGetAll of a missing key is an empty record", async () => {
     const { createUpstashMetricsClient } = await import("./upstash-metrics");
     const client = createUpstashMetricsClient({ url: upstash.url, token: upstash.token });

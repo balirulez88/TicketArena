@@ -1,13 +1,22 @@
 import {
   type BookingMetrics,
   type BookingMetricsReader,
+  type BookingMetricsReset,
   createRedisBookingMetrics,
   createRedisBookingMetricsReader,
+  createRedisBookingMetricsReset,
   type RedisMetricsClient,
+  type RedisMetricsDeleteClient,
   type RedisMetricsReadClient,
 } from "@ticketarena/booking";
 import type { Logger } from "@ticketarena/contracts";
 import { parseMetricsEnv } from "./env";
+import { createAdminRateLimiter, type RateLimitClient, type RateLimiter } from "./rate-limiter";
+
+type UpstashClient = RedisMetricsClient &
+  RedisMetricsReadClient &
+  RedisMetricsDeleteClient &
+  RateLimitClient;
 
 const DEFAULT_TIMEOUT_MS = 2000;
 
@@ -21,9 +30,7 @@ interface UpstashClientConfig {
  * Upstash REST client for the commands metrics need. Errors name the command and the cause but
  * never include the token or the request headers.
  */
-export function createUpstashMetricsClient(
-  config: UpstashClientConfig,
-): RedisMetricsClient & RedisMetricsReadClient {
+export function createUpstashMetricsClient(config: UpstashClientConfig): UpstashClient {
   async function command(args: readonly (string | number)[]): Promise<unknown> {
     const name = String(args[0]);
     let response: Response;
@@ -68,7 +75,24 @@ export function createUpstashMetricsClient(
       }
       return record;
     },
+    async del(key) {
+      return integerResult("DEL", await command(["DEL", key]));
+    },
+    async setNxPx(key, value, ttlMs) {
+      // Upstash answers "OK" when the key was set and null when NX found it already there.
+      return (await command(["SET", key, value, "NX", "PX", ttlMs])) === "OK";
+    },
+    async pTtl(key) {
+      return integerResult("PTTL", await command(["PTTL", key]));
+    },
   };
+}
+
+function integerResult(name: string, result: unknown): number {
+  if (typeof result !== "number") {
+    throw new Error(`Upstash ${name} failed: response has no numeric result`);
+  }
+  return result;
 }
 
 function fieldOf(body: unknown, name: string): unknown {
@@ -89,7 +113,7 @@ interface LazyMetricsConfig {
  */
 function lazyFromUpstash<T>(
   { readEnv, logger }: LazyMetricsConfig,
-  build: (client: RedisMetricsClient & RedisMetricsReadClient) => T,
+  build: (client: UpstashClient) => T,
 ): () => T {
   let outcome: { value: T } | { failure: Error } | undefined;
   return () => {
@@ -125,4 +149,17 @@ export function createLazyMetrics(config: LazyMetricsConfig): () => BookingMetri
 /** The booking counters reader for the admin snapshot, built lazily like the writer. */
 export function createLazyMetricsReader(config: LazyMetricsConfig): () => BookingMetricsReader {
   return lazyFromUpstash(config, (client) => createRedisBookingMetricsReader(client));
+}
+
+/** Zeroes an event's booking counters (the demo reset); built lazily like the writer. */
+export function createLazyMetricsReset(config: LazyMetricsConfig): () => BookingMetricsReset {
+  return lazyFromUpstash(config, (client) => createRedisBookingMetricsReset(client));
+}
+
+/**
+ * The admin actions' rate limiter. It lives in the same Upstash store as the counters because
+ * that store is shared by every serverless instance, which a global limit needs.
+ */
+export function createLazyAdminRateLimiter(config: LazyMetricsConfig): () => RateLimiter {
+  return lazyFromUpstash(config, (client) => createAdminRateLimiter(client));
 }

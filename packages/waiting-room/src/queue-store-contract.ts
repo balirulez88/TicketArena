@@ -266,6 +266,26 @@ export function describeQueueStoreContract(
       expect(await store.counts(eventId)).toEqual({ queued: 0, active: 1 });
     });
 
+    test("clearEvent drops the event's queue, slots, admissions and bucket, and no other event's", async () => {
+      const store = storeWith("clear:");
+      const eventId = randomUUID();
+      const otherId = randomUUID();
+      await queueOf(store, eventId, 3);
+      await queueOf(store, otherId, 2);
+      const [admission] = await store.admit(eventId, request(T0, 1, 10));
+      await store.admit(otherId, request(T0, 1, 10));
+
+      await store.clearEvent(eventId);
+
+      expect(await store.counts(eventId)).toEqual({ queued: 0, active: 0 });
+      expect(await store.isAdmitted(eventId, admission?.jti ?? "", T0)).toBe(false);
+      // The bucket starts full again and the sequence restarts, as for a never-seen event.
+      await queueOf(store, eventId, 3);
+      expect(await store.position(eventId, "m1")).toBe(1);
+      expect(await store.admit(eventId, request(T0, 2, 10))).toHaveLength(2);
+      expect(await store.counts(otherId)).toEqual({ queued: 1, active: 1 });
+    });
+
     test("an admission is valid until its expiry", async () => {
       const store = storeWith("expiry:");
       const eventId = randomUUID();

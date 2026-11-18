@@ -89,8 +89,29 @@ ADR 0009), and per event (all events, by `onSaleAt`) seats by stored status, `qu
 (`createRedisBookingMetricsReader` over the Upstash client's `HGETALL`). Counters are best-effort:
 when they cannot be read the event's `metrics` is `null` and the rest is still returned. A `HELD`
 seat whose hold lapsed counts as held until the sweeper expires it. The figures are separate reads,
-not one transaction. Outbox, consumer and NATS figures, the live feed, stuck refunds, run race and
-reset are not built yet.
+not one transaction. Outbox, consumer and NATS figures, the live feed and stuck refunds are not
+built yet.
+
+**Demo actions.** Both take no input: the server picks the one event flagged `demo` (anything but
+exactly one is `PRECONDITION_FAILED`), so no request can aim them at a real event. Both are limited
+to **1 per 10 s per action, globally** (not per session) by `ctx.rateLimiter()`
+(`rate-limiter.ts`: `SET admin:rate:<action> 1 NX PX 10000` on the Upstash store, shared by every
+instance; a refusal is `TOO_MANY_REQUESTS` naming the seconds to wait from `PTTL`). The limit is
+taken first, so a refused call has no effect.
+
+- `admin.runRace`: picks the demo event's first `AVAILABLE` seat (none: `PRECONDITION_FAILED`,
+  reset first) and has 100 synthetic sessions (fresh random session id = buyer key each) call
+  `BookingService.holdSeats` on it concurrently, in-process, bypassing admission by design. Returns
+  `buyers`, `successes`, `seatUnavailable`, `bookingBusy`, `otherErrors`, `durationMs` (injected
+  clock) and the `winner` (`holdId`, `correlationId`). Only the winner writes an outbox event, its
+  normal `seat.held`; that row is the race's entry for the live feed (ticket 36), found by the
+  winner's `correlationId`. Counters go to `ctx.metrics()` when configured.
+- `admin.resetDemo`: `BookingService.resetEvent(demoId)` (see
+  [database](../database/index.md#demo-reset)); `RESET_BLOCKED`/`NOT_DEMO_EVENT` become
+  `PRECONDITION_FAILED`. After it commits, the demo event's booking counters
+  (`ctx.metricsReset()`, `DEL` of the counter hash) and its waiting-room keys
+  (`QueueStore.clearEvent`) are deleted. Postgres goes first because it is the authority; a Redis
+  failure fails the call, and repeating it is harmless.
 
 ## Catalog API
 
@@ -112,7 +133,11 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
 - **Admin dashboard** (`components/admin/admin-dashboard.tsx`): polls `admin.snapshot` every 1 s
   (`refetchInterval`, `SNAPSHOT_POLL_MS`) and shows pending payments, an "Orders by status" table
   and a "Seats, queue and metrics per event" table. Polling stops once a poll returns
-  `UNAUTHORIZED`, and the page offers a link back to the login.
+  `UNAUTHORIZED`, and the page offers a link back to the login. A "Demo event" card has "Run race"
+  and "Reset demo" buttons (`useMutation`); the result shows in a `role="status"` line ("Race
+  result": successes, seat unavailable, booking busy, duration, winner's correlation id; "Reset
+  result": holds, orders and ledger rows deleted, seats freed) and a failure, such as the rate
+  limit, in a `role="alert"` line. The next poll shows the new seat state.
 - **Server state:** components read `events.list`, `events.get`, `seats.map` and `admin.snapshot` through TanStack
   Query (`useTRPC().….queryOptions`) under `TRPCReactProvider`; no server data is copied into
   client stores. The on-sale badge compares `onSaleAt` with the visitor's clock and is only a

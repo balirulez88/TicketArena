@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { setupTestRedis } from "@ticketarena/test-infra";
 import { createClient } from "redis";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { createRedisBookingMetrics, createRedisBookingMetricsReader } from "./index";
+import {
+  createRedisBookingMetrics,
+  createRedisBookingMetricsReader,
+  createRedisBookingMetricsReset,
+} from "./index";
 
 const redis = setupTestRedis();
 const redisClient = createClient({ url: redis.url });
@@ -41,5 +45,22 @@ describe("createRedisBookingMetricsReader", () => {
     );
 
     expect(Object.values(read).every((value) => value === 0)).toBe(true);
+  });
+});
+
+describe("createRedisBookingMetricsReset", () => {
+  test("zeroes every counter of the event and leaves other events' counters alone", async () => {
+    const eventId = randomUUID();
+    const otherId = randomUUID();
+    const metrics = createRedisBookingMetrics(redisClient, redis.prefix);
+    await metrics.increment("hold_ok", eventId);
+    await metrics.increment("seat_unavailable", eventId);
+    await metrics.increment("hold_ok", otherId);
+
+    await createRedisBookingMetricsReset(redisClient, redis.prefix).reset(eventId);
+
+    const reader = createRedisBookingMetricsReader(redisClient, redis.prefix);
+    expect(Object.values(await reader.read(eventId)).every((value) => value === 0)).toBe(true);
+    expect((await reader.read(otherId)).hold_ok).toBe(1);
   });
 });

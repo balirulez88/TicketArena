@@ -10,11 +10,21 @@ export interface RedisMetricsReadClient {
   hGetAll(key: string): Promise<Readonly<Record<string, string>>>;
 }
 
+/** The one Redis command the reset needs. */
+export interface RedisMetricsDeleteClient {
+  del(key: string): Promise<number>;
+}
+
 export type BookingMetricCounts = Readonly<Record<BookingMetric, number>>;
 
 /** Reads an event's counters, e.g. for the admin dashboard. */
 export interface BookingMetricsReader {
   read(eventId: string): Promise<BookingMetricCounts>;
+}
+
+/** Zeroes an event's counters, e.g. when the demo event is reset. */
+export interface BookingMetricsReset {
+  reset(eventId: string): Promise<void>;
 }
 
 function metricsKey(prefix: string, eventId: string): string {
@@ -47,6 +57,18 @@ export function createRedisBookingMetricsReader(
         booking_busy: count("booking_busy"),
         limit_exceeded: count("limit_exceeded"),
       };
+    },
+  };
+}
+
+/** Deletes the event's counter hash; a deleted counter reads as 0, like one never incremented. */
+export function createRedisBookingMetricsReset(
+  client: RedisMetricsDeleteClient,
+  prefix = "",
+): BookingMetricsReset {
+  return {
+    async reset(eventId) {
+      await client.del(metricsKey(prefix, eventId));
     },
   };
 }

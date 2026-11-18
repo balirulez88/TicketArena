@@ -31,6 +31,12 @@ function caller(principal: Principal) {
     metricsReader: () => {
       throw new Error("metrics are not read here");
     },
+    metricsReset: () => {
+      throw new Error("metrics are not reset here");
+    },
+    rateLimiter: () => {
+      throw new Error("nothing is rate-limited here");
+    },
     queueStore: () => Promise.reject(new Error("the queue is not used here")),
     random: { next: () => 0 },
   });
@@ -297,6 +303,12 @@ describe("booking.placeOrder / getOrder", () => {
       metricsReader: () => {
         throw new Error("metrics are not read here");
       },
+      metricsReset: () => {
+        throw new Error("metrics are not reset here");
+      },
+      rateLimiter: () => {
+        throw new Error("nothing is rate-limited here");
+      },
       queueStore: () => Promise.reject(new Error("the queue is not used here")),
       random: { next: () => 0 },
     });
@@ -343,6 +355,12 @@ describe("booking.holdSeats saturation", () => {
           metrics: () => ({ increment: async () => undefined }),
           metricsReader: () => {
             throw new Error("metrics are not read here");
+          },
+          metricsReset: () => {
+            throw new Error("metrics are not reset here");
+          },
+          rateLimiter: () => {
+            throw new Error("nothing is rate-limited here");
           },
           queueStore: () => Promise.reject(new Error("the queue is not used here")),
           random: { next: () => 0 },

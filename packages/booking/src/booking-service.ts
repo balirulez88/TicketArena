@@ -109,6 +109,23 @@ export interface BookingService {
    * next sweep finds them if they still match.
    */
   sweepExpired(): Promise<SweepResult>;
+  /**
+   * Returns the demo event to its seeded state so the demo can run again: deletes its holds,
+   * orders, order lines and ledger rows and sets every seat back to `AVAILABLE`, in one
+   * transaction. `NOT_DEMO_EVENT` for any other event; `RESET_BLOCKED` while a demo order is
+   * `PENDING_PAYMENT` or a refund obligation is open, since either still owes a buyer an outcome.
+   * Outbox events stay: they are history the relay may still be publishing.
+   */
+  resetEvent(eventId: string): Promise<ResetResult>;
+}
+
+export interface ResetResult {
+  readonly eventId: string;
+  readonly holdsDeleted: number;
+  readonly ordersDeleted: number;
+  readonly ledgerRowsDeleted: number;
+  /** Seats that were not already plain `AVAILABLE`. */
+  readonly seatsFreed: number;
 }
 
 export interface SweepResult {
@@ -192,6 +209,26 @@ export class LimitExceededError extends Error {
       `LIMIT_EXCEEDED: ${used} seat(s) in use plus ${requested} requested exceeds ${MAX_SEATS_PER_BUYER}`,
     );
     this.name = "LimitExceededError";
+  }
+}
+
+/** Only the event flagged `demo` may be reset; nothing else is ever touched. */
+export class NotDemoEventError extends Error {
+  readonly code = "NOT_DEMO_EVENT";
+
+  constructor(eventId: string) {
+    super(`NOT_DEMO_EVENT: ${eventId} is not the demo event`);
+    this.name = "NotDemoEventError";
+  }
+}
+
+/** The demo event still has a booking whose outcome is owed; the reset changed nothing. */
+export class ResetBlockedError extends Error {
+  readonly code = "RESET_BLOCKED";
+
+  constructor(reason: string) {
+    super(`RESET_BLOCKED: ${reason}`);
+    this.name = "ResetBlockedError";
   }
 }
 
@@ -1131,6 +1168,78 @@ export function createBookingService({
           return { expiredHoldIds, expiredOrderIds };
         }
       }
+    },
+
+    async resetEvent(eventId) {
+      const result = await db.$transaction(async (tx) => {
+        const events = await tx.$queryRaw<{ demo: boolean }[]>`
+          SELECT demo FROM events WHERE id = ${eventId}::uuid`;
+        if (events[0]?.demo !== true) {
+          throw new NotDemoEventError(eventId);
+        }
+        // Lock order holds, orders, seats: placeOrder locks a hold before its seats and the saga
+        // an order before its seats, so none of them can hold what this waits for while waiting
+        // for what this holds (ADR 0005). A placeOrder that committed while this waited on its
+        // hold is seen by the fresh orders read below (READ COMMITTED).
+        const holds = await tx.$queryRaw<{ id: string }[]>`
+          SELECT id::text AS id FROM holds
+          WHERE "eventId" = ${eventId}::uuid ORDER BY id FOR UPDATE`;
+        const holdIds = holds.map((hold) => hold.id);
+        const orders = await tx.$queryRaw<{ id: string; status: string }[]>`
+          SELECT id::text AS id, status::text AS status FROM orders
+          WHERE "holdId" = ANY(${holdIds}::uuid[]) ORDER BY id FOR UPDATE`;
+        const pending = orders.filter((order) => order.status === "PENDING_PAYMENT").length;
+        if (pending > 0) {
+          throw new ResetBlockedError(`${pending} demo order(s) are PENDING_PAYMENT`);
+        }
+        const orderIds = orders.map((order) => order.id);
+        // MANUAL_REVIEW is an obligation escalated to a human: the money is still not returned.
+        const [obligations] = await tx.$queryRaw<{ open: bigint }[]>`
+          SELECT count(*) AS open FROM order_payments
+          WHERE "orderId" = ANY(${orderIds}::uuid[])
+            AND disposition::text IN ('REFUND_REQUESTED', 'MANUAL_REVIEW')`;
+        const open = Number(obligations?.open ?? 0);
+        if (open > 0) {
+          throw new ResetBlockedError(`${open} demo refund obligation(s) are open`);
+        }
+        const seats = await tx.$queryRaw<
+          { id: string; status: string; holdId: string | null; claimBuyerKey: string | null }[]
+        >`
+          SELECT id::text AS id, status::text AS status, "holdId"::text AS "holdId", "claimBuyerKey"
+          FROM seats WHERE "eventId" = ${eventId}::uuid ORDER BY id FOR UPDATE`;
+        // With every seat locked no booking can change seat state any more, but one that
+        // committed a new hold after the holds were locked would be wiped unaccounted for (and
+        // could carry an order this check never saw), so the reset gives up instead.
+        const known = new Set(holdIds);
+        if (seats.some((seat) => seat.holdId !== null && !known.has(seat.holdId))) {
+          throw new ResetBlockedError("a demo booking changed during the reset; retry");
+        }
+        const dirty = seats
+          .filter(
+            (seat) =>
+              seat.status !== "AVAILABLE" || seat.holdId !== null || seat.claimBuyerKey !== null,
+          )
+          .map((seat) => seat.id);
+
+        // Children before parents: seats and ledger rows reference holds and orders.
+        await tx.seat.updateMany({
+          where: { id: { in: dirty } },
+          data: { status: "AVAILABLE", holdId: null, claimBuyerKey: null },
+        });
+        const ledger = await tx.orderPayment.deleteMany({ where: { orderId: { in: orderIds } } });
+        await tx.orderLine.deleteMany({ where: { orderId: { in: orderIds } } });
+        await tx.order.deleteMany({ where: { id: { in: orderIds } } });
+        await tx.hold.deleteMany({ where: { id: { in: holdIds } } });
+        return {
+          eventId,
+          holdsDeleted: holdIds.length,
+          ordersDeleted: orderIds.length,
+          ledgerRowsDeleted: ledger.count,
+          seatsFreed: dirty.length,
+        };
+      });
+      logger.info({ ...result }, "demo event reset");
+      return result;
     },
 
     async getOrder(buyer, orderId) {

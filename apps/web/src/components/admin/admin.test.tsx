@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { createTRPCClient, httpLink } from "@trpc/client";
 import type { ReactNode } from "react";
 import superjson from "superjson";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { AppRouter } from "@/server/routers/_app";
-import type { AdminSnapshot } from "@/server/routers/admin";
+import type { AdminSnapshot, RaceResult, ResetDemoResult } from "@/server/routers/admin";
 import { TRPCProvider } from "@/trpc/react";
 import { AdminDashboard } from "./admin-dashboard";
 import { AdminLoginForm } from "./admin-login-form";
@@ -38,13 +38,56 @@ function snapshotWith(holdOk: number): AdminSnapshot {
   };
 }
 
+const RACE: RaceResult = {
+  eventId: EVENT_ID,
+  seatId: "22222222-2222-4222-8222-222222222222",
+  buyers: 100,
+  successes: 1,
+  seatUnavailable: 97,
+  bookingBusy: 2,
+  otherErrors: 0,
+  durationMs: 42,
+  winner: {
+    holdId: "33333333-3333-4333-8333-333333333333",
+    correlationId: "44444444-4444-4444-8444-444444444444",
+  },
+};
+
+const RESET: ResetDemoResult = {
+  eventId: EVENT_ID,
+  holdsDeleted: 2,
+  ordersDeleted: 1,
+  ledgerRowsDeleted: 1,
+  seatsFreed: 3,
+};
+
 let snapshotCalls = 0;
 let unauthorized = false;
+let rateLimited = false;
+const actionCalls: string[] = [];
 
-/** Answers `admin.snapshot` the way the API route does; the network is the faked boundary. */
+function trpcError(message: string, code: string, httpStatus: number): Response {
+  const error = { message, code: -32029, data: { code, httpStatus } };
+  return Response.json({ error: superjson.serialize(error) }, { status: httpStatus });
+}
+
+/** Answers the admin procedures the way the API route does; the network is the faked boundary. */
 async function fakeApi(input: RequestInfo | URL): Promise<Response> {
   const url = new URL(input instanceof Request ? input.url : String(input));
-  if (url.pathname !== "/api/trpc/admin.snapshot") {
+  const action = url.pathname.replace("/api/trpc/", "");
+  if (action === "admin.runRace" || action === "admin.resetDemo") {
+    actionCalls.push(action);
+    if (rateLimited) {
+      return trpcError(
+        `${action} is limited to 1 per 10 s; retry in 7 s`,
+        "TOO_MANY_REQUESTS",
+        429,
+      );
+    }
+    const data = action === "admin.runRace" ? RACE : RESET;
+    return Response.json({ result: { data: superjson.serialize(data) } });
+  }
+  if (action !== "admin.snapshot") {
     return Response.json({}, { status: 404 });
   }
   if (unauthorized) {
@@ -77,6 +120,8 @@ function renderWithApi(ui: ReactNode) {
 beforeEach(() => {
   snapshotCalls = 0;
   unauthorized = false;
+  rateLimited = false;
+  actionCalls.length = 0;
   // Time is the faked boundary; it still advances on its own so Testing Library can wait.
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
@@ -137,6 +182,45 @@ describe("AdminDashboard", () => {
     expect(within(alert).getByRole("link", { name: "Log in" }).getAttribute("href")).toBe(
       "/admin/login",
     );
+  });
+});
+
+describe("AdminDashboard demo actions", () => {
+  test("Run race shows the race's successes, refusals and duration", async () => {
+    renderWithApi(<AdminDashboard />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Run race" }));
+
+    const result = await screen.findByRole("status", { name: "Race result" });
+    expect(actionCalls).toEqual(["admin.runRace"]);
+    expect(result.textContent).toContain("1 success");
+    expect(result.textContent).toContain("97 seat unavailable");
+    expect(result.textContent).toContain("2 booking busy");
+    expect(result.textContent).toContain("42 ms");
+    expect(result.textContent).toContain(RACE.winner?.correlationId);
+  });
+
+  test("Reset demo shows what was cleared", async () => {
+    renderWithApi(<AdminDashboard />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Reset demo" }));
+
+    const result = await screen.findByRole("status", { name: "Reset result" });
+    expect(actionCalls).toEqual(["admin.resetDemo"]);
+    expect(result.textContent).toContain("2 holds");
+    expect(result.textContent).toContain("1 order");
+    expect(result.textContent).toContain("1 ledger row");
+    expect(result.textContent).toContain("3 seats freed");
+  });
+
+  test("a rate-limited action says when to retry", async () => {
+    rateLimited = true;
+    renderWithApi(<AdminDashboard />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Run race" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("retry in 7 s");
   });
 });
 

@@ -109,6 +109,12 @@ describe("admin.snapshot", () => {
       // Booking records counters fire-and-forget; the test writes them itself, awaited.
       metrics: () => ({ increment: async () => undefined }),
       metricsReader: () => createRedisBookingMetricsReader(upstashClient, upstash.prefix),
+      metricsReset: () => {
+        throw new Error("metrics are not reset here");
+      },
+      rateLimiter: () => {
+        throw new Error("nothing is rate-limited here");
+      },
       queueStore: async () => queueStore(),
       random: { next: () => 0 },
       ...overrides,

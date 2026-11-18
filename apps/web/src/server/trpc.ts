@@ -1,4 +1,8 @@
-import type { BookingMetrics, BookingMetricsReader } from "@ticketarena/booking";
+import type {
+  BookingMetrics,
+  BookingMetricsReader,
+  BookingMetricsReset,
+} from "@ticketarena/booking";
 import type { Logger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
 import type { QueueStore, Random } from "@ticketarena/waiting-room";
@@ -9,7 +13,13 @@ import { ADMIN_COOKIE, verifyAdminCookieValue } from "./identity/admin-session";
 import { type CookieReader, createIdentityService, type Principal } from "./identity/identity";
 import { createWebLogger } from "./logger";
 import { createLazyQueueStore } from "./queue-store";
-import { createLazyMetrics, createLazyMetricsReader } from "./upstash-metrics";
+import type { RateLimiter } from "./rate-limiter";
+import {
+  createLazyAdminRateLimiter,
+  createLazyMetrics,
+  createLazyMetricsReader,
+  createLazyMetricsReset,
+} from "./upstash-metrics";
 
 /**
  * Per-request context. Infrastructure (clock, and later db/redis/outbox) is injected here
@@ -35,6 +45,10 @@ export interface TRPCContext {
   readonly metrics: () => BookingMetrics;
   /** Reads the same counters for the admin snapshot; resolved lazily like `metrics`. */
   readonly metricsReader: () => BookingMetricsReader;
+  /** Zeroes an event's counters for the demo reset; resolved lazily like `metrics`. */
+  readonly metricsReset: () => BookingMetricsReset;
+  /** Limits the destructive admin actions globally; resolved lazily like `metrics`. */
+  readonly rateLimiter: () => RateLimiter;
   /**
    * The waiting-room queue store, connected on first call and shared per process, so `REDIS_URL`
    * is read only by the queue procedures; rejects when that configuration is invalid.
@@ -62,6 +76,10 @@ const metrics = createLazyMetrics({ readEnv: () => process.env, logger });
 
 const metricsReader = createLazyMetricsReader({ readEnv: () => process.env, logger });
 
+const metricsReset = createLazyMetricsReset({ readEnv: () => process.env, logger });
+
+const rateLimiter = createLazyAdminRateLimiter({ readEnv: () => process.env, logger });
+
 const queueStore = createLazyQueueStore({ readEnv: () => process.env, logger, prefix: "" });
 
 const random: Random = { next: () => Math.random() };
@@ -84,6 +102,8 @@ export async function createTRPCContext({ req }: { req: Request }): Promise<TRPC
     logger,
     metrics,
     metricsReader,
+    metricsReset,
+    rateLimiter,
     queueStore,
     random,
   };

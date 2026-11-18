@@ -36,6 +36,9 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Buyer limit**        | At most 6 seats per BuyerKey and event, counting held (unexpired), in-checkout and sold seats.         |
 | **Race lost**          | A hold refused because another buyer locked the seat first: a prevented double booking.                |
 | **Snapshot fast path** | Lock-free read in `holdSeats` that refuses visibly taken seats before any lock; advisory only.         |
+| **Demo event**         | The one Event flagged `demo`; the only target of the admin race and reset.                             |
+| **Race (demo)**        | `admin.runRace`: 100 synthetic sessions hold one demo seat at once; exactly one may win.               |
+| **Demo reset**         | `admin.resetDemo`: deletes the demo event's holds, orders and ledger rows and frees its seats.         |
 | **Oversell**           | Selling the same seat twice. Must be impossible, not merely unlikely.                                  |
 | **Integration event**  | A fact published to other services via the outbox (e.g. `order.confirmed`).                            |
 | **Outbox**             | The `outbox_events` table; integration events committed atomically with business data.                 |

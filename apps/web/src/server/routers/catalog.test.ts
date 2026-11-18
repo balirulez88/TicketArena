@@ -24,6 +24,12 @@ function caller() {
     metricsReader: () => {
       throw new Error("metrics are not read here");
     },
+    metricsReset: () => {
+      throw new Error("metrics are not reset here");
+    },
+    rateLimiter: () => {
+      throw new Error("nothing is rate-limited here");
+    },
     queueStore: () => Promise.reject(new Error("the queue is not used here")),
     random: { next: () => 0 },
   });

@@ -19,6 +19,7 @@ export {
   MAX_SEATS_PER_BUYER,
   MixedCurrencyError,
   NotDemoEventError,
+  NotOnSaleError,
   type OrderLineView,
   type OrderView,
   ResetBlockedError,

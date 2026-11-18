@@ -49,6 +49,18 @@ describe("seedCatalog", () => {
     expect(seatStatuses.map((group) => group.status)).toEqual(["AVAILABLE"]);
   });
 
+  it("puts the demo event on sale before the seeding instant, with its queue closed; the others are upcoming", async () => {
+    await seedCatalog(client(), NOW);
+
+    const demo = await client().event.findFirstOrThrow({ where: { demo: true } });
+    const others = await client().event.findMany({ where: { demo: false } });
+
+    // holdSeats refuses before onSaleAt, so the demo (run race, holds) must be on sale at once.
+    expect(demo.onSaleAt.getTime()).toBeLessThan(NOW.getTime());
+    expect(demo.queueClosesAt.getTime()).toBeLessThanOrEqual(NOW.getTime());
+    expect(others.every((event) => event.onSaleAt.getTime() > NOW.getTime())).toBe(true);
+  });
+
   it("is idempotent: a second run changes no row counts", async () => {
     const count = async () => ({
       venues: await client().venue.count(),

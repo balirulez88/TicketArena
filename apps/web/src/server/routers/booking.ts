@@ -12,6 +12,7 @@ import {
   LimitExceededError,
   MAX_SEATS_PER_BUYER,
   MixedCurrencyError,
+  NotOnSaleError,
   SeatUnavailableError,
 } from "@ticketarena/booking";
 import type { Logger } from "@ticketarena/contracts";
@@ -120,6 +121,13 @@ export const bookingRouter = createTRPCRouter({
         }
         if (error instanceof InvalidSeatSelectionError) {
           throw new TRPCError({ code: "BAD_REQUEST", message: error.message, cause: error });
+        }
+        if (error instanceof NotOnSaleError) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: error.message,
+            cause: error,
+          });
         }
         throw error;
       }

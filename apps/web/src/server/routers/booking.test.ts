@@ -91,6 +91,23 @@ describe("booking.holdSeats", () => {
     });
   });
 
+  test("before the event's on-sale is PRECONDITION_FAILED naming NOT_ON_SALE, and nothing is held", async () => {
+    const upcoming = await db().event.findFirstOrThrow({ where: { demo: false } });
+    const seat = await db().seat.findFirstOrThrow({
+      where: { eventId: upcoming.id, status: "AVAILABLE" },
+    });
+
+    await expect(
+      caller(alice).booking.holdSeats({ eventId: upcoming.id, seatIds: [seat.id] }),
+    ).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+      message: expect.stringContaining("NOT_ON_SALE"),
+    });
+    expect((await db().seat.findUniqueOrThrow({ where: { id: seat.id } })).status).toBe(
+      "AVAILABLE",
+    );
+  });
+
   test("rejects a malformed seat id naming the field", async () => {
     const { eventId } = await availableSeat();
 

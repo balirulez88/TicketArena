@@ -112,16 +112,43 @@ describe("QueueService.join", () => {
     expect(await service.join(event, "c")).toMatchObject({ status: "QUEUED", position: 3 });
   });
 
-  test("outside the queue window, join reports immediate admission eligibility and queues nothing", async () => {
+  test("before queueOpensAt, join answers NOT_OPEN with the opening time, queues nothing and admits no one", async () => {
     const event = schedule();
-    const clock = { now: new Date("2027-05-01T09:00:00.000Z") };
+    const clock = { now: new Date("2027-05-01T09:54:59.999Z") };
     const service = serviceAt(clock);
 
-    expect(await service.join(event, "too-early")).toEqual({ status: "ADMISSIBLE" });
-    clock.now = new Date("2027-05-01T11:00:00.000Z");
-    expect(await service.join(event, "after-close")).toEqual({ status: "ADMISSIBLE" });
+    expect(await service.join(event, "too-early")).toEqual({
+      status: "NOT_OPEN",
+      queueOpensAt: event.queueOpensAt,
+    });
 
     expect(await service.status(event.id, "too-early")).toEqual({ status: "NOT_QUEUED" });
+    expect(await service.counts(event.id)).toEqual({ queued: 0, active: 0 });
+  });
+
+  test("at exactly queueOpensAt, join queues the buyer in the pre-queue", async () => {
+    const event = schedule();
+    const clock = { now: event.queueOpensAt };
+    const service = serviceAt(clock, scriptedRandom([0.9]));
+
+    expect(await service.join(event, "first")).toMatchObject({ status: "QUEUED", position: 1 });
+
+    clock.now = AFTER_ON_SALE;
+    await service.join(event, "later");
+    // A later join scores at least 2, so "first" holds a pre-queue score in [0, 1).
+    expect(await service.status(event.id, "first")).toMatchObject({ position: 1 });
+  });
+
+  test("at or after queueClosesAt, join reports immediate admission eligibility and queues nothing", async () => {
+    const event = schedule();
+    const clock = { now: event.queueClosesAt };
+    const service = serviceAt(clock);
+
+    expect(await service.join(event, "at-close")).toEqual({ status: "ADMISSIBLE" });
+    clock.now = new Date("2027-05-01T12:00:00.000Z");
+    expect(await service.join(event, "after-close")).toEqual({ status: "ADMISSIBLE" });
+
+    expect(await service.status(event.id, "at-close")).toEqual({ status: "NOT_QUEUED" });
     expect(await service.status(event.id, "after-close")).toEqual({ status: "NOT_QUEUED" });
   });
 });
@@ -307,10 +334,11 @@ describe("AdmissionPolicy (schedule)", () => {
   const policy = createScheduleAdmissionPolicy();
   const event = schedule();
 
-  test("the queue is active from queueOpensAt up to, not including, queueClosesAt", () => {
-    expect(policy.isQueueActive(event, new Date("2027-05-01T09:54:59.999Z"))).toBe(false);
-    expect(policy.isQueueActive(event, event.queueOpensAt)).toBe(true);
-    expect(policy.isQueueActive(event, AFTER_ON_SALE)).toBe(true);
-    expect(policy.isQueueActive(event, event.queueClosesAt)).toBe(false);
+  test("the queue is NOT_OPEN before queueOpensAt, ACTIVE from it up to queueClosesAt, CLOSED from then on", () => {
+    expect(policy.phase(event, new Date("2027-05-01T09:54:59.999Z"))).toBe("NOT_OPEN");
+    expect(policy.phase(event, event.queueOpensAt)).toBe("ACTIVE");
+    expect(policy.phase(event, AFTER_ON_SALE)).toBe("ACTIVE");
+    expect(policy.phase(event, new Date("2027-05-01T10:59:59.999Z"))).toBe("ACTIVE");
+    expect(policy.phase(event, event.queueClosesAt)).toBe("CLOSED");
   });
 });

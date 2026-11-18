@@ -181,7 +181,12 @@ describe("AT-44: race and reset only touch the demo event and are rate-limited",
     const otherIds = others.map((event) => event.id);
     const other = others[0];
     const [seat] = await db().seat.findMany({ where: { eventId: other?.id ?? "" }, take: 1 });
-    await caller().booking.holdSeats({ eventId: other?.id ?? "", seatIds: [seat?.id ?? ""] });
+    // Non-demo events are upcoming at NOW, so the hold is made at the event's on-sale.
+    const onSaleAt = other?.onSaleAt ?? NOW;
+    await caller({ now: () => onSaleAt }).booking.holdSeats({
+      eventId: other?.id ?? "",
+      seatIds: [seat?.id ?? ""],
+    });
     const before = await otherEventsState(otherIds);
 
     await caller().admin.runRace();

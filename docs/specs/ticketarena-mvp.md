@@ -187,7 +187,9 @@ Interfaces (shape level):
 
 ### Holding seats (`holdSeats`)
 
-Requires admission (see Waiting room). 1–6 seat ids, all from one event.
+Requires admission (see Waiting room). 1–6 seat ids, all from one event. Before the event's
+`onSaleAt` it fails with `NOT_ON_SALE` (tRPC `PRECONDITION_FAILED`) and changes nothing, whatever
+admission the buyer holds (defence in depth).
 
 1. **Snapshot fast path (no locks):** if any requested seat is visibly `SOLD`, `IN_CHECKOUT`, or
    `HELD` with an unexpired hold, return `SEAT_UNAVAILABLE` with those seat ids and count
@@ -403,8 +405,14 @@ Principle: **replaying processed messages is acceptable; silently skipping unpro
 
 ### Waiting room
 
-- Event schedule: `onSaleAt`, `queueOpensAt`, `queueClosesAt`. `AdmissionPolicy.isQueueActive`
-  reads it; when inactive, `join` admits immediately (a token is still issued).
+- Event schedule: `onSaleAt`, `queueOpensAt`, `queueClosesAt`. `AdmissionPolicy.phase` reads it
+  and answers one of three phases: `NOT_OPEN` before `queueOpensAt`, `ACTIVE` in
+  `[queueOpensAt, queueClosesAt)`, `CLOSED` from `queueClosesAt` on.
+  - Before the queue opens, `join` answers `NOT_OPEN` with `queueOpensAt` (a result, not an
+    error), queues nothing and admits no one: an early admission would still be valid at
+    `onSaleAt` and skip the randomized pre-queue.
+  - While it is active, `join` queues the buyer (in the pre-queue before `onSaleAt`).
+  - Only after the queue closes does `join` admit immediately (a token is still issued).
 - Redis per event (all mutations are Lua scripts, all keys carry a configurable prefix):
   - queue ZSET: score is a random value in `[0, 1)` for joins before `onSaleAt` (injected
     `Random`), `1 + sequence` afterwards; `ZADD NX`, so refresh and second tabs keep the position.
@@ -413,7 +421,8 @@ Principle: **replaying processed messages is acceptable; silently skipping unpro
   - admitted set: `jti` with expiry.
   - counters for booking metrics.
 - **Admission ticker** (worker, every 1s): admits from the queue head while tokens and
-  `maxActive` allow; admitted sessions enter the active set. The web app mints the JWT on the
+  `maxActive` allow, and no one before the event's `onSaleAt`, so the pre-queue is admitted in its
+  random order; admitted sessions enter the active set. The web app mints the JWT on the
   admitted session's next `queue.status` poll.
 - **Admission token:** JWT HS256 (`ADMISSION_SECRET`), claims `sub = sessionId`, `eid = eventId`,
   `jti`, `exp = admittedAt + 30 min` (fixed, no renewal), in httpOnly cookie `ta_adm_<eventId>`.
@@ -433,7 +442,7 @@ Principle: **replaying processed messages is acceptable; silently skipping unpro
 - Admitted: `booking.holdSeats`.
 - Admin: `admin.snapshot`, `admin.feed(cursor)`, `admin.stuckRefunds`, `admin.retryRefund`,
   `admin.runRace`, `admin.resetDemo`.
-- Domain errors are typed: `SEAT_UNAVAILABLE` (with seat ids), `LIMIT_EXCEEDED`, `BOOKING_BUSY`,
+- Domain errors are typed: `SEAT_UNAVAILABLE` (with seat ids), `LIMIT_EXCEEDED`, `NOT_ON_SALE`, `BOOKING_BUSY`,
   `HOLD_EXPIRED`, `IDEMPOTENCY_KEY_REUSED`, `NOT_FOUND`, `FORBIDDEN`. Inputs validated with zod.
 
 ### Frontend (React 19, Next.js 16 App Router)

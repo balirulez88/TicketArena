@@ -72,7 +72,9 @@ async function scheduledEvent() {
     eventId: event.id,
     beforeOnSale: new Date(event.onSaleAt.getTime() - 60_000),
     afterOnSale: new Date(event.onSaleAt.getTime() + 60_000),
-    outsideWindow: new Date(event.queueOpensAt.getTime() - 60_000),
+    queueOpensAt: event.queueOpensAt,
+    beforeQueueOpens: new Date(event.queueOpensAt.getTime() - 1),
+    afterQueueCloses: new Date(event.queueClosesAt.getTime() + 60_000),
   };
 }
 
@@ -113,10 +115,23 @@ describe("queue.join", () => {
     });
   });
 
-  test("outside the queue window reports immediate admission eligibility", async () => {
-    const { eventId, outsideWindow } = await scheduledEvent();
+  test("before the queue opens returns NOT_OPEN with the opening time and queues nothing", async () => {
+    const { eventId, queueOpensAt, beforeQueueOpens } = await scheduledEvent();
+    const early = guest();
 
-    expect(await caller(guest(), outsideWindow).queue.join({ eventId })).toEqual({
+    expect(await caller(early, beforeQueueOpens).queue.join({ eventId })).toEqual({
+      status: "NOT_OPEN",
+      queueOpensAt,
+    });
+    expect(await caller(early, beforeQueueOpens).queue.status({ eventId })).toEqual({
+      status: "NOT_QUEUED",
+    });
+  });
+
+  test("after the queue closes reports immediate admission eligibility", async () => {
+    const { eventId, afterQueueCloses } = await scheduledEvent();
+
+    expect(await caller(guest(), afterQueueCloses).queue.join({ eventId })).toEqual({
       status: "ADMISSIBLE",
     });
   });

@@ -6,6 +6,7 @@ import {
   type Buyer,
   createBookingService,
   InvalidSeatSelectionError,
+  NotOnSaleError,
   SeatUnavailableError,
 } from "./booking-service";
 
@@ -116,11 +117,39 @@ describe("holdSeats", () => {
     expect(await db().outboxEvent.count()).toBe(outboxBefore);
   });
 
+  test("before the event's onSaleAt is NOT_ON_SALE and changes nothing; 1 ms after it, the hold succeeds", async () => {
+    const event = await db().event.findFirstOrThrow({ where: { demo: false } });
+    const seat = await db().seat.findFirstOrThrow({
+      where: { eventId: event.id, status: "AVAILABLE" },
+      orderBy: { id: "asc" },
+    });
+    const holdsBefore = await db().hold.count();
+    const outboxBefore = await db().outboxEvent.count();
+    const onSaleAt = event.onSaleAt.getTime();
+
+    const failure = await service(new Date(onSaleAt - 1))
+      .holdSeats(alice, event.id, [seat.id])
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(NotOnSaleError);
+    expect(failure).toMatchObject({ code: "NOT_ON_SALE", onSaleAt: event.onSaleAt });
+    expect(await db().hold.count()).toBe(holdsBefore);
+    expect(await db().outboxEvent.count()).toBe(outboxBefore);
+    expect((await db().seat.findUniqueOrThrow({ where: { id: seat.id } })).status).toBe(
+      "AVAILABLE",
+    );
+
+    const hold = await service(new Date(onSaleAt + 1)).holdSeats(alice, event.id, [seat.id]);
+    expect(hold).toMatchObject({ status: "HELD", seatIds: [seat.id] });
+  });
+
   test("a seat of another event is SEAT_UNAVAILABLE", async () => {
     const { seatIds } = await freshSeats(1);
     const other = await db().event.findFirstOrThrow({ where: { demo: false } });
+    // After the other event's on-sale, so only the seat's event can refuse the hold.
+    const onSale = new Date(other.onSaleAt.getTime() + 1);
 
-    await expect(service().holdSeats(alice, other.id, seatIds)).rejects.toMatchObject({
+    await expect(service(onSale).holdSeats(alice, other.id, seatIds)).rejects.toMatchObject({
       code: "SEAT_UNAVAILABLE",
       seatIds,
     });

@@ -24,8 +24,14 @@ export interface QueuedView {
   readonly etaSeconds: number;
 }
 
-/** Outside the queue window the buyer may proceed at once (spec: "join admits immediately"). */
-export type JoinResult = QueuedView | { readonly status: "ADMISSIBLE" };
+/**
+ * `NOT_OPEN` before the queue opens (nothing queued, no one admitted); `ADMISSIBLE` once the queue
+ * has closed: the buyer may proceed at once (spec: "join admits immediately").
+ */
+export type JoinResult =
+  | QueuedView
+  | { readonly status: "NOT_OPEN"; readonly queueOpensAt: Date }
+  | { readonly status: "ADMISSIBLE" };
 
 /** `ADMITTED`: the session holds one of the event's active slots. */
 export type StatusResult =
@@ -77,7 +83,13 @@ export function createQueueService(deps: QueueServiceDeps): QueueService {
   return {
     async join(event, sessionId) {
       const now = deps.clock.now();
-      if (!deps.policy.isQueueActive(event, now)) {
+      const phase = deps.policy.phase(event, now);
+      // Admitting before the queue opens would hand an early arrival an admission still valid at
+      // onSaleAt, skipping the randomized pre-queue (ADR 0008); so it only says when to come back.
+      if (phase === "NOT_OPEN") {
+        return { status: "NOT_OPEN", queueOpensAt: event.queueOpensAt };
+      }
+      if (phase === "CLOSED") {
         return { status: "ADMISSIBLE" };
       }
       // A random score below every later score is equivalent to shuffling the whole pre-queue at

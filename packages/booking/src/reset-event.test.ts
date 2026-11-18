@@ -14,8 +14,11 @@ function db(): PrismaClient {
 
 const NOW = new Date("2027-03-01T12:00:00.000Z");
 
-const service = () =>
-  createBookingService({ db: db(), clock: { now: () => NOW }, newId: randomUUID });
+const service = (now = NOW) =>
+  createBookingService({ db: db(), clock: { now: () => now }, newId: randomUUID });
+
+/** A non-demo event is upcoming at NOW; holding its seats needs a clock past its on-sale. */
+const onSale = (event: { onSaleAt: Date }) => service(event.onSaleAt);
 
 /** Past every hold's expiry and every order's payment deadline plus settlement grace. */
 const SWEPT_AT = new Date(NOW.getTime() + 11 * 60_000);
@@ -104,7 +107,11 @@ describe("BookingService.resetEvent", () => {
         createdAt: NOW,
       },
     });
-    const otherHold = await service().holdSeats(buyer(), other.id, await freeSeats(other.id, 1));
+    const otherHold = await onSale(other).holdSeats(
+      buyer(),
+      other.id,
+      await freeSeats(other.id, 1),
+    );
     const outboxBefore = await db().outboxEvent.count();
 
     const result = await service().resetEvent(event.id);
@@ -213,7 +220,7 @@ describe("BookingService.resetEvent", () => {
 
   test("an event that is not the demo event, or does not exist, is refused untouched", async () => {
     const other = await db().event.findFirstOrThrow({ where: { demo: false } });
-    await service().holdSeats(buyer(), other.id, await freeSeats(other.id, 1));
+    await onSale(other).holdSeats(buyer(), other.id, await freeSeats(other.id, 1));
     const holdsBefore = await db().hold.count({ where: { eventId: other.id } });
 
     await expect(service().resetEvent(other.id)).rejects.toMatchObject({ code: "NOT_DEMO_EVENT" });

@@ -8,6 +8,7 @@ export type {
   EventSchedule,
   JoinScore,
   QueueCounts,
+  QueuePhase,
   QueueStore,
   Random,
   ReapCutoffs,

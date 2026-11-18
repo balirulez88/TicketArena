@@ -41,7 +41,11 @@ Catalog data is seeded, never edited through the API. `seedCatalog(prisma, now)`
 (`packages/db/src/seed.ts`, run with `pnpm --filter @ticketarena/db db:seed`) only inserts
 missing rows, so re-running it keeps seat state. Seats are unique on `(eventId, rowId, number)`
 and indexed on `(eventId, status)` and on `holdId`. `venues.name` is unique, so `seedCatalog` upserts venues
-and concurrent seed runs leave one row per venue.
+and concurrent seed runs leave one row per venue. The demo event goes on sale one day before the
+seeding instant (its queue window has closed), so holds and `admin.runRace` work at once; the
+other events go on sale 14 and 30 days after it. A database seeded before this rule keeps its
+demo event's later `onSaleAt` (re-running the seed never updates a row); reset the database to
+pick it up.
 
 ### Indexes and unique constraints
 
@@ -67,7 +71,10 @@ and concurrent seed runs leave one row per venue.
 
 Booking: `booking.holdSeats` (1–6 seats of one event, all or nothing) and `booking.getHold` (owner only, else
 `NOT_FOUND`) delegate to `BookingService` (`packages/booking`). `holdSeats` rejects an empty, duplicated or longer-than-6 `seatIds` list with `INVALID_SEAT_SELECTION` (tRPC
-`BAD_REQUEST`) before writing. It then takes a lock-free snapshot read (`seats` joined to `holds`) and
+`BAD_REQUEST`) before writing. Before the event's `onSaleAt` it refuses with `NOT_ON_SALE` (tRPC
+`PRECONDITION_FAILED`, naming the on-sale time) and writes nothing, whatever admission the buyer
+holds (defence in depth behind the waiting room, ADR 0008); an unknown event passes this check and
+its seats are `SEAT_UNAVAILABLE`. It then takes a lock-free snapshot read (`seats` joined to `holds`) and
 refuses with `SEAT_UNAVAILABLE` any seat visibly `SOLD`, `IN_CHECKOUT` or `HELD` with an unexpired hold,
 without locking; the snapshot is advisory and only ever refuses, so the locked step decides
 success (ADR 0005). Otherwise it runs one transaction: first the buyer lock

@@ -15,7 +15,7 @@ interface VenuePlan {
 interface EventPlan {
   readonly name: string;
   readonly venue: string;
-  /** Days from the seeding instant until the on-sale opens. */
+  /** Days from the seeding instant until the on-sale opens; negative means already on sale. */
   readonly onSaleInDays: number;
   readonly demo: boolean;
 }
@@ -34,8 +34,10 @@ const VENUES: readonly VenuePlan[] = [
   },
 ];
 
+// The demo event is on sale (and its queue closed) from seeding: holdSeats refuses before onSaleAt,
+// and the demo (run race, holds) must work at once. The other events stay upcoming.
 const EVENTS: readonly EventPlan[] = [
-  { name: "Demo Race", venue: "Arena Central", onSaleInDays: 1, demo: true },
+  { name: "Demo Race", venue: "Arena Central", onSaleInDays: -1, demo: true },
   { name: "Midnight Symphony", venue: "Arena Central", onSaleInDays: 14, demo: false },
   { name: "Riverside Jazz Night", venue: "Riverside Theatre", onSaleInDays: 30, demo: false },
 ];

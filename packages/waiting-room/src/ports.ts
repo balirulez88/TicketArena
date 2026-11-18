@@ -100,7 +100,13 @@ export interface AdmissionLimits {
   readonly maxActive: number;
 }
 
-/** Decides whether an event's waiting room is in force; load-based activation is phase 2. */
+/**
+ * Where an event's waiting room stands: `NOT_OPEN` (nobody may join or be admitted yet), `ACTIVE`
+ * (joins queue) or `CLOSED` (joins are admissible at once).
+ */
+export type QueuePhase = "NOT_OPEN" | "ACTIVE" | "CLOSED";
+
+/** Decides an event's queue phase; load-based activation is phase 2. */
 export interface AdmissionPolicy {
-  isQueueActive(event: EventSchedule, now: Date): boolean;
+  phase(event: EventSchedule, now: Date): QueuePhase;
 }

@@ -22,12 +22,14 @@ gating `holdSeats` with it arrive with ticket 31; until then nothing is gated by
 | `SLOT_IDLE_TIMEOUT_MS`, `ADMISSION_TTL_MS` | 90 s idle before reaping; 30 min admission validity from admission (fixed)                                                                          |
 | `createRedisQueueStore`                    | node-redis adapter over the narrow `RedisQueueClient` (`eval`, `zRank`); options: `prefix`                                                          |
 | `createUpstashQueueStore`                  | Upstash REST adapter (`fetch`); options: `url`, `token`, `prefix`, `timeoutMs` (default 2000)                                                       |
-| `AdmissionPolicy` (port)                   | `isQueueActive(event, now)`                                                                                                                         |
-| `createScheduleAdmissionPolicy`            | MVP policy: active from `queueOpensAt` (inclusive) to `queueClosesAt` (exclusive)                                                                   |
+| `AdmissionPolicy` (port)                   | `phase(event, now)`: a `QueuePhase`, `NOT_OPEN`, `ACTIVE` or `CLOSED`                                                                               |
+| `createScheduleAdmissionPolicy`            | MVP policy: `NOT_OPEN` before `queueOpensAt`, `ACTIVE` from it (inclusive) to `queueClosesAt` (exclusive), `CLOSED` from then on                    |
 | `Clock`, `Random`, `newId`                 | Injected; the module never reads the system clock, `Math.random` or a UUID source. `Random.next()` returns `[0, 1)`; `newId` makes admission `jti`s |
 
-`join` results: outside the queue window `{ status: "ADMISSIBLE" }` (immediate admission
-eligibility; nothing is queued), else `{ status: "QUEUED", position, etaSeconds }`. `status`
+`join` results: before `queueOpensAt` `{ status: "NOT_OPEN", queueOpensAt }` (nothing is queued
+and no one is admitted; the page can say when to come back); from `queueClosesAt` on
+`{ status: "ADMISSIBLE" }` (immediate admission eligibility; nothing is queued); in the window
+`[queueOpensAt, queueClosesAt)` `{ status: "QUEUED", position, etaSeconds }`. `status`
 heartbeats the session's slot and returns `ADMITTED` when it holds one, else `QUEUED` with position
 and ETA, or `NOT_QUEUED`. `leave` leaves the queue and frees the slot in one atomic step; `{ left }` is true if
 either happened. `admitTick` admits no one before the event's `onSaleAt`. ETA = `ceil(position / admitRatePerSecond)`; the web app assumes 10 admissions
@@ -112,6 +114,11 @@ CI start. Adapter-specific tests cover the stored key layout and scores, and for
   refill, the cap check and the pop are one script against one bucket.
 - **No admission before the on-sale:** the ticker admits no one before the event's `onSaleAt`, so
   the randomized pre-queue is admitted in its random order, not in order of arrival.
+- **No admission before the queue opens:** `join` before `queueOpensAt` answers `NOT_OPEN` and
+  issues nothing; only after the queue closes does `join` admit immediately. Otherwise a buyer
+  arriving just before the queue opens would hold a 30-minute admission still valid at
+  `onSaleAt` and skip the pre-queue. As defence in depth, `holdSeats` refuses any hold before the
+  event's `onSaleAt` (`NOT_ON_SALE`, see [Database](../database/index.md)).
 - **A freed slot revokes its admission (AT-39):** leave, order placed and reaping remove the slot
   and its `jti` in the same script, so no valid `jti` outlives its slot.
 - **Redis decides only order:** losing the queue degrades fairness, never seat correctness
@@ -121,7 +128,8 @@ CI start. Adapter-specific tests cover the stored key layout and scores, and for
 
 `queue.join`, `queue.status` and `queue.leave` take `{ eventId }` (zod `uuid`; a malformed id is
 `BAD_REQUEST` naming `eventId`). `join` reads the event schedule from Postgres (`NOT_FOUND` for an
-unknown event) and hands it to the policy. The service is built per request from the context:
+unknown event) and hands it to the policy; `NOT_OPEN` is returned to the client as a result
+(with `queueOpensAt`), not as an error. The service is built per request from the context:
 `ctx.now`, `ctx.random` (`Math.random` at the app boundary), `randomUUID` for `newId` and
 `ctx.queueStore()`. `booking.holdSeats` and `booking.placeOrder` build the same service for the
 heartbeat and the slot release.

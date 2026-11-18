@@ -266,3 +266,27 @@ Matrix gaps the spec leaves open?
 Assumed: refunded with APPLIED ledger -> noop refund_not_requested; final failed on PENDING with APPLIED -> noop payment_applied; late and mismatched on PENDING -> late rule wins (EXPIRED + refund); on-time payment on EXPIRED order -> refund reason late_delivery
 
 Answer: Accepted (2026-11-18): every gap resolves towards returning the money.
+
+## 2026-11-18 22:20 ticket 61
+
+Which tRPC code does NOT_ON_SALE map to, and is a hold at exactly onSaleAt allowed?
+
+Assumed: PRECONDITION_FAILED (time precondition, like HOLD_EXPIRED); 'before' is strict, so a hold at exactly onSaleAt succeeds, matching the ticker's now < onSaleAt rule
+
+Answer: (open)
+
+## 2026-11-18 22:20 ticket 61
+
+How do the demo event and admin.runRace keep working once holds before onSaleAt are refused?
+
+Assumed: Seed puts the demo event on sale 1 day before seeding (queue already closed, join stays ADMISSIBLE); existing databases keep the old future onSaleAt and need a reset and re-seed (noted in docs/database/index.md)
+
+Answer: (open)
+
+## 2026-11-18 22:20 ticket 61
+
+ADR 0008 says 'outside the queue window the policy admits immediately'. Edit or supersede it?
+
+Assumed: Left the accepted ADR unchanged; it now reads as 'after the queue closes' per the ticket 28 answer. A human may add a clarifying note or a superseding ADR
+
+Answer: (open)

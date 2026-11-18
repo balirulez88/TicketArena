@@ -24,6 +24,8 @@ const queuedOutput = z.object({
 
 const joinOutput = z.discriminatedUnion("status", [
   queuedOutput,
+  // A result, not an error: the page shows when the queue opens.
+  z.object({ status: z.literal("NOT_OPEN"), queueOpensAt: z.date() }),
   z.object({ status: z.literal("ADMISSIBLE") }),
 ]);
 

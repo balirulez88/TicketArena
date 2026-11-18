@@ -6,7 +6,9 @@
 
 **Blocked by:** 10
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** frontend chain first (61, 62, 31, 33, 34); restore to ready-for-agent after run
 
 **Unblocked 2026-11-18 (devflow):** the earlier block was a harness-v1 limitation (it could not add a dependency and prove RED in one run). Under devflow the implementer adds `@neondatabase/serverless` as an exact-version devDependency of `packages/booking` in this ticket. The 2026-11-08 candidate counts as reference only, like the rejected attempts of ticket 12.
 

@@ -4,16 +4,16 @@
 
 ## Module boundaries
 
-| Workspace            | Responsibility                                                                                                                                                                                                                    | Depends on                   |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| `apps/web`           | Next.js App Router UI and the tRPC API (the only public entry)                                                                                                                                                                    | `db`, `booking`, `contracts` |
-| `packages/db`        | Prisma schema, migrations, client factory over the Neon adapter                                                                                                                                                                   | (none)                       |
-| `packages/contracts` | Zod schemas for the event envelope and payloads (`seat.held`, `hold.released`, `hold.expired`, `order.placed`, `payment.succeeded`, `order.confirmed`, `order.expired`); `Logger` port, id helpers                                | (none)                       |
-| `packages/booking`   | `BookingService`: `holdSeats` (1–6 seats, buyer limit), `getHold`, `releaseHold`, `placeOrder`, `getOrder`, `sweepExpired` (sweeper step: holds, then overdue orders); payment saga handler; `BookingMetrics` port, Redis adapter | `contracts`, `db`            |
-| `packages/messaging` | `MessageBus` port, JetStream adapter (the only `@nats-io/*` importer), outbox relay, consumer runner                                                                                                                              | `db`                         |
-| `apps/worker`        | Long-running worker: validates env, ensures the topology, runs the relay, the sweeper and consumer runners, serves `/health`; hosts the mock Payment and Notification modules                                                     | `db`, `booking`, `messaging` |
+| Workspace               | Responsibility                                                                                                                                                                                                                    | Depends on                                   |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `apps/web`              | Next.js App Router UI and the tRPC API (the only public entry)                                                                                                                                                                    | `db`, `booking`, `contracts`, `waiting-room` |
+| `packages/db`           | Prisma schema, migrations, client factory over the Neon adapter                                                                                                                                                                   | (none)                                       |
+| `packages/contracts`    | Zod schemas for the event envelope and payloads (`seat.held`, `hold.released`, `hold.expired`, `order.placed`, `payment.succeeded`, `order.confirmed`, `order.expired`); `Logger` port, id helpers                                | (none)                                       |
+| `packages/booking`      | `BookingService`: `holdSeats` (1–6 seats, buyer limit), `getHold`, `releaseHold`, `placeOrder`, `getOrder`, `sweepExpired` (sweeper step: holds, then overdue orders); payment saga handler; `BookingMetrics` port, Redis adapter | `contracts`, `db`                            |
+| `packages/waiting-room` | `QueueService` (`join`, `status`, `leave`), `QueueStore` port with a node-redis adapter (atomic Lua scripts, prefixed keys), `AdmissionPolicy` (schedule). See [waiting-room](waiting-room.md)                                    | (none)                                       |
+| `packages/messaging`    | `MessageBus` port, JetStream adapter (the only `@nats-io/*` importer), outbox relay, consumer runner                                                                                                                              | `db`                                         |
+| `apps/worker`           | Long-running worker: validates env, ensures the topology, runs the relay, the sweeper and consumer runners, serves `/health`; hosts the mock Payment and Notification modules                                                     | `db`, `booking`, `messaging`                 |
 
-Planned (created by tickets, not up front): a waiting-room module (Redis queue logic).
 New modules are added when a slice needs them, not speculatively.
 
 ## Conventions that shape the code
@@ -24,7 +24,7 @@ New modules are added when a slice needs them, not speculatively.
   procedures through `TRPCContext`. Procedures never import a client directly, which keeps them
   testable through `createCaller` with fakes at system boundaries only.
 - **Deep modules, narrow interfaces:** each module exposes a small surface (e.g.
-  `enqueue/position/admit` for the waiting room) and hides its storage layout.
+  `join/status/leave` for the waiting room) and hides its storage layout.
 - **Packages ship TypeScript source** (`exports` → `src/index.ts`); there is no package build
   step. Turborepo caches `typecheck`, `test`, `build` and `db:generate`.
 - **Errors:** validate at boundaries (zod), fail fast with actionable messages, and surface
@@ -99,4 +99,4 @@ failed sweep is logged and retried next time; `stop()` cancels the wait at once)
 
 ## Children
 
-None yet. Add `waiting-room.md`, `booking.md` here as those modules land (see `skills/update-docs.md`).
+- [Waiting room](waiting-room.md): queue keys, Lua scripts, ordering invariants, `queue.*` API.

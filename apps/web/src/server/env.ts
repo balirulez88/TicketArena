@@ -4,6 +4,8 @@ const serverEnvSchema = z.object({
   DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
   UPSTASH_REDIS_REST_URL: z.url({ protocol: /^https$/ }),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
+  /** node-redis connection for the waiting-room queue (`redis://` locally, `rediss://` hosted). */
+  REDIS_URL: z.url({ protocol: /^rediss?$/ }),
   SESSION_SECRET: z
     .string()
     .refine((secret) => new TextEncoder().encode(secret).length >= 32, "must be at least 32 bytes"),
@@ -15,6 +17,8 @@ const metricsEnvSchema = serverEnvSchema.pick({
   UPSTASH_REDIS_REST_URL: true,
   UPSTASH_REDIS_REST_TOKEN: true,
 });
+
+const queueEnvSchema = serverEnvSchema.pick({ REDIS_URL: true });
 
 const databaseEnvSchema = serverEnvSchema.pick({ DATABASE_URL: true });
 
@@ -61,4 +65,12 @@ export function parseMetricsEnv(
   source: EnvSource,
 ): Pick<ServerEnv, "UPSTASH_REDIS_REST_URL" | "UPSTASH_REDIS_REST_TOKEN"> {
   return parseEnv(metricsEnvSchema, source, "metrics");
+}
+
+/**
+ * Validates only the waiting-room Redis URL, resolved lazily by the queue store so a missing value
+ * breaks only the queue procedures.
+ */
+export function parseQueueEnv(source: EnvSource): Pick<ServerEnv, "REDIS_URL"> {
+  return parseEnv(queueEnvSchema, source, "queue");
 }

@@ -27,6 +27,8 @@ function caller(principal: Principal) {
     db: db(),
     logger: silentLogger,
     metrics: () => ({ increment: async () => undefined }),
+    queueStore: () => Promise.reject(new Error("the queue is not used here")),
+    random: { next: () => 0 },
   });
 }
 
@@ -287,6 +289,8 @@ describe("booking.placeOrder / getOrder", () => {
       db: db(),
       logger: silentLogger,
       metrics: () => ({ increment: async () => undefined }),
+      queueStore: () => Promise.reject(new Error("the queue is not used here")),
+      random: { next: () => 0 },
     });
 
     await expect(
@@ -328,6 +332,8 @@ describe("booking.holdSeats saturation", () => {
           db: tight,
           logger: silentLogger,
           metrics: () => ({ increment: async () => undefined }),
+          queueStore: () => Promise.reject(new Error("the queue is not used here")),
+          random: { next: () => 0 },
         }).booking.holdSeats({ eventId, seatIds: [seatId] }),
       ).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS", message: /BOOKING_BUSY/ });
     } finally {

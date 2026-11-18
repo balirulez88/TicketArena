@@ -74,3 +74,35 @@ What is the canonical request for requestHash?
 Assumed: hold id, email, phone (null when absent) in fixed order; email not normalized (no lowercase/trim)
 
 Answer: (open)
+
+## 2026-11-18 12:58 ticket 28
+
+How does the web app reach Redis for the queue?
+
+Assumed: node-redis via a new REDIS_URL (parseQueueEnv in parseServerEnv), lazy single connection; ticket 29 may replace it with the Upstash adapter
+
+Answer: (open)
+
+## 2026-11-18 12:58 ticket 28
+
+What does join return before queueOpensAt?
+
+Assumed: ADMISSIBLE, following the spec's 'when inactive, join admits immediately'; the window is [queueOpensAt, queueClosesAt); change in AdmissionPolicy if wrong
+
+Answer: (open)
+
+## 2026-11-18 12:58 ticket 28
+
+How is the ETA computed?
+
+Assumed: etaSeconds = ceil(position / admitRatePerSecond), 1-based position, constant 10/s until ticket 30
+
+Answer: (open)
+
+## 2026-11-18 12:58 ticket 28
+
+Queue key names and member id?
+
+Assumed: <prefix>waiting-room:{eventId}:queue and :seq (hash tag for one cluster slot); member = principal.sessionId; later joins score 1 + INCR (first later join scores 2)
+
+Answer: (open)

@@ -11,6 +11,8 @@ import {
   HoldSeatSetMissingError,
   IdempotencyKeyReusedError,
   MixedCurrencyError,
+  type OrderView,
+  requestHash,
   SeatUnavailableError,
 } from "./booking-service";
 
@@ -45,6 +47,34 @@ async function heldSeat() {
   const hold = await service().holdSeats(alice, event.id, [seat.id]);
   return { hold, seatId: seat.id };
 }
+
+/** True once a placeOrder in this database waits on a seat row lock. */
+async function waitingOnSeatLock(): Promise<boolean> {
+  const rows = await db().$queryRaw<{ waiting: number }[]>`
+    SELECT count(*)::int AS waiting FROM pg_stat_activity
+    WHERE datname = current_database() AND wait_event_type = 'Lock'
+      AND query LIKE '%FROM seats WHERE id = ANY%'`;
+  return (rows[0]?.waiting ?? 0) > 0;
+}
+
+describe("requestHash", () => {
+  const holdId = "6f1c1f43-5e0a-4a43-9d0e-4a3c6f2b1a10";
+
+  test("depends only on the canonical request: hold id, email and phone", () => {
+    const base = requestHash(holdId, { email: "alice@example.com", phone: "+3612345" });
+
+    expect(requestHash(holdId, { phone: "+3612345", email: "alice@example.com" })).toBe(base);
+    expect(requestHash(holdId, { email: "alice@example.com" })).toBe(
+      requestHash(holdId, { email: "alice@example.com", phone: undefined }),
+    );
+    expect(requestHash(randomUUID(), { email: "alice@example.com", phone: "+3612345" })).not.toBe(
+      base,
+    );
+    expect(requestHash(holdId, { email: "bob@example.com", phone: "+3612345" })).not.toBe(base);
+    expect(requestHash(holdId, { email: "alice@example.com", phone: "+3699999" })).not.toBe(base);
+    expect(requestHash(holdId, { email: "alice@example.com" })).not.toBe(base);
+  });
+});
 
 beforeAll(async () => {
   await seedCatalog(db(), NOW);
@@ -104,7 +134,7 @@ describe("placeOrder", () => {
     });
   });
 
-  test("returns the same order for a repeated idempotencyKey, even after the hold expired", async () => {
+  test("AT-12: returns the same order for a repeated idempotencyKey, even after the hold expired", async () => {
     const { hold } = await heldSeat();
     const key = randomUUID();
     const first = await service().placeOrder(alice, hold.id, contact, key);
@@ -112,15 +142,16 @@ describe("placeOrder", () => {
     const replay = await service(new Date("2027-03-01T13:00:00.000Z")).placeOrder(
       alice,
       hold.id,
-      contact,
+      { phone: undefined, ...contact },
       key,
     );
 
     expect(replay).toEqual(first);
     expect(await db().order.count({ where: { holdId: hold.id } })).toBe(1);
+    expect(await db().outboxEvent.count({ where: { aggregateId: first.id } })).toBe(1);
   });
 
-  test("resolves concurrent duplicates to a single order", async () => {
+  test("AT-12: concurrent duplicates yield one order, one set of lines and one order.placed event", async () => {
     const { hold } = await heldSeat();
     const key = randomUUID();
 
@@ -128,10 +159,22 @@ describe("placeOrder", () => {
       Array.from({ length: 5 }, () => service().placeOrder(alice, hold.id, contact, key)),
     );
 
-    expect(new Set(orders.map((order) => order.id)).size).toBe(1);
+    const [first] = orders;
+    if (first === undefined) {
+      throw new Error("no order returned");
+    }
+    expect(new Set(orders.map((order) => order.id))).toEqual(new Set([first.id]));
+    expect(await db().order.count({ where: { holdId: hold.id } })).toBe(1);
+    expect(await db().orderLine.count({ where: { order: { holdId: hold.id } } })).toBe(1);
+    expect(
+      await db().outboxEvent.count({
+        where: { eventType: "order.placed", payload: { path: ["holdId"], equals: hold.id } },
+      }),
+    ).toBe(1);
+    expect(await db().outboxEvent.count({ where: { aggregateId: first.id } })).toBe(1);
   });
 
-  test("rejects a reused key carrying a different request", async () => {
+  test("AT-13: rejects a reused key carrying a different contact", async () => {
     const { hold } = await heldSeat();
     const key = randomUUID();
     await service().placeOrder(alice, hold.id, contact, key);
@@ -139,6 +182,72 @@ describe("placeOrder", () => {
     await expect(
       service().placeOrder(alice, hold.id, { email: "other@example.com" }, key),
     ).rejects.toBeInstanceOf(IdempotencyKeyReusedError);
+    await expect(
+      service().placeOrder(alice, hold.id, { ...contact, phone: "+3612345" }, key),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+  });
+
+  test("AT-13: rejects a reused key carrying a different hold and leaves that hold untouched", async () => {
+    const first = await heldSeat();
+    const key = randomUUID();
+    await service().placeOrder(alice, first.hold.id, contact, key);
+    const second = await heldSeat();
+
+    await expect(service().placeOrder(alice, second.hold.id, contact, key)).rejects.toBeInstanceOf(
+      IdempotencyKeyReusedError,
+    );
+    expect(await db().order.count({ where: { holdId: second.hold.id } })).toBe(0);
+    expect(await service().getHold(alice, second.hold.id)).toMatchObject({ status: "HELD" });
+  });
+
+  test("a duplicate that loses the unique-constraint race re-reads and returns the winner's order", async () => {
+    const { hold, seatId } = await heldSeat();
+    const other = await heldSeat();
+    const key = randomUUID();
+    const winnerId = randomUUID();
+    let loser: Promise<OrderView> | undefined;
+
+    await db().$transaction(
+      async (tx) => {
+        // Holding the seat lock parks the loser after its in-transaction duplicate check.
+        await tx.$queryRaw`SELECT id FROM seats WHERE id = ${seatId}::uuid FOR UPDATE`;
+        loser = service().placeOrder(alice, hold.id, contact, key);
+        await expect.poll(waitingOnSeatLock, { timeout: 5000 }).toBe(true);
+        // The winner commits the same (sessionId, idempotencyKey) and request hash meanwhile.
+        // It references another hold so its foreign-key check does not wait on the loser.
+        await tx.order.create({
+          data: {
+            id: winnerId,
+            holdId: other.hold.id,
+            sessionId: alice.sessionId,
+            buyerKey: alice.buyerKey,
+            contactEmail: contact.email,
+            totalMinor: 0,
+            currency: "EUR",
+            paymentDeadline: NOW,
+            idempotencyKey: key,
+            requestHash: requestHash(hold.id, contact),
+            correlationId: other.hold.correlationId,
+            createdAt: NOW,
+          },
+        });
+      },
+      { timeout: 10_000 },
+    );
+
+    if (loser === undefined) {
+      throw new Error("the losing placeOrder never started");
+    }
+    const order = await loser;
+
+    expect(order.id).toBe(winnerId);
+    expect(await db().order.count({ where: { holdId: hold.id } })).toBe(0);
+    expect(await service().getHold(alice, hold.id)).toMatchObject({ status: "HELD" });
+    expect(
+      await db().outboxEvent.count({
+        where: { eventType: "order.placed", payload: { path: ["holdId"], equals: hold.id } },
+      }),
+    ).toBe(0);
   });
 
   test("hides a hold from anyone but its owner", async () => {

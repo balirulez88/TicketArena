@@ -22,8 +22,8 @@ type Bindings = Record<string, unknown>;
 function recordingLogger() {
   const lines: Bindings[] = [];
   const make = (bound: Bindings): Logger => {
-    const write = (fields: object) => {
-      lines.push({ ...bound, ...fields });
+    const write = (fields: object, message?: string) => {
+      lines.push({ ...bound, ...fields, ...(message === undefined ? {} : { msg: message }) });
     };
     return {
       info: write,
@@ -74,5 +74,33 @@ describe("booking logging", () => {
     for (const line of lines.slice(held)) {
       expect(line).toMatchObject({ orderId: order.id });
     }
+  });
+
+  test("a replayed placeOrder logs no 'order placed' line and returns the original order view", async () => {
+    const { logger, lines } = recordingLogger();
+    const booking = createBookingService({
+      db: db(),
+      clock: { now: () => NOW },
+      newId: randomUUID,
+      logger,
+    });
+    const event = await db().event.findFirstOrThrow({ where: { demo: true } });
+    const seat = await db().seat.findFirstOrThrow({
+      where: { eventId: event.id, status: "AVAILABLE" },
+    });
+    const hold = await booking.holdSeats(alice, event.id, [seat.id]);
+    const key = randomUUID();
+    const contact = { email: "alice@example.com" };
+
+    const [first, ...duplicates] = await Promise.all(
+      Array.from({ length: 4 }, () => booking.placeOrder(alice, hold.id, contact, key)),
+    );
+    const replay = await booking.placeOrder(alice, hold.id, contact, key);
+
+    for (const duplicate of [...duplicates, replay]) {
+      expect(duplicate).toEqual(first);
+      expect(duplicate).not.toHaveProperty("kind");
+    }
+    expect(lines.filter(({ msg }) => msg === "order placed")).toHaveLength(1);
   });
 });

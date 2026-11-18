@@ -66,3 +66,11 @@ Add an index on orders(status, paymentDeadline) for the sweep?
 Assumed: No migration in ticket 15; the sweep scans orders
 
 Answer: (open)
+
+## 2026-11-18 12:46 ticket 16
+
+What is the canonical request for requestHash?
+
+Assumed: hold id, email, phone (null when absent) in fixed order; email not normalized (no lowercase/trim)
+
+Answer: (open)

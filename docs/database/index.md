@@ -115,9 +115,15 @@ missing `seat.held` event is `HOLD_SEAT_SET_MISSING` (`CONFLICT`). Lines, total 
 update use exactly that seat set; seats of mixed currencies fail with `MIXED_CURRENCY`. It then writes the `orders`
 row (`PENDING_PAYMENT`, `paymentDeadline = T + 5 min`, the hold's `correlationId`) with
 `order_lines` copying seat prices, sets the hold `ORDERED` and seats `IN_CHECKOUT`, and writes an
-`order.placed` outbox row. Idempotency: a repeated `(sessionId, idempotencyKey)` returns the
-stored order; the same key with a different `requestHash` (hold + contact) fails with a
-`CONFLICT`. `holdId` is unique on `orders`, so a hold yields at most one order.
+`order.placed` outbox row. Idempotency (ADR 0007): `requestHash` is the SHA-256 of the canonical
+request (hold id, email, phone or null, in that order), so equal requests hash equally whatever
+their object shape. A repeated `(sessionId, idempotencyKey)` with the same hash returns the stored
+order, checked before any hold logic so a replay succeeds even after the hold expired; the same key
+with a different hash fails with `IDEMPOTENCY_KEY_REUSED` (tRPC `CONFLICT`). A concurrent duplicate
+that waited on the hold lock finds the winner's order inside its transaction; one that still loses
+the unique-constraint race (`P2002`) rolls back and re-reads the winner's order. Either way one
+order, one set of lines and one `order.placed` row exist, and only the request that created the
+order logs "order placed" (the transaction returns a result tagged `created` or `replayed`). `holdId` is unique on `orders`, so a hold yields at most one order.
 
 Releasing: `booking.releaseHold` (owner only, else `NOT_FOUND`) gives back a `HELD` hold; any
 other status is `HOLD_NOT_ACTIVE` (tRPC `CONFLICT`). An expired but unswept hold is still `HELD`

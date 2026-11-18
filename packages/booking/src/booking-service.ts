@@ -340,7 +340,12 @@ function orderPlacedEnvelope(eventId: string, facts: OrderPlacedFacts) {
   });
 }
 
-function requestHash(holdId: string, contact: Contact): string {
+/**
+ * Fingerprint of the canonical placeOrder request (ADR 0007): hold id, email and phone in a fixed
+ * order, an absent phone encoded as null, so equal requests hash equally whatever their object
+ * shape. A reused idempotency key is accepted only with the same fingerprint.
+ */
+export function requestHash(holdId: string, contact: Contact): string {
   return createHash("sha256")
     .update(JSON.stringify([holdId, contact.email, contact.phone ?? null]))
     .digest("hex");
@@ -929,7 +934,7 @@ export function createBookingService({
           // A duplicate that waited on the hold lock now sees the winner's committed order.
           const duplicate = await findByIdempotencyKey(tx, buyer, idempotencyKey, hash);
           if (duplicate !== null) {
-            return duplicate;
+            return { kind: "replayed", order: duplicate } as const;
           }
           // Refused before the event is read: a settled hold needs no seat set.
           assertHeld(holdId, hold.status);
@@ -1007,9 +1012,14 @@ export function createBookingService({
             },
           });
 
-          return { order: toOrderView(created), correlationId: hold.correlationId };
+          return {
+            kind: "created",
+            order: toOrderView(created),
+            correlationId: hold.correlationId,
+          } as const;
         });
-        if ("order" in placed) {
+        // Only a request that wrote the order may claim it was placed; a replay stays silent.
+        if (placed.kind === "created") {
           logger
             .child(
               envelopeLogBindings({
@@ -1020,9 +1030,8 @@ export function createBookingService({
               }),
             )
             .info({ totalMinor: placed.order.totalMinor }, "order placed");
-          return placed.order;
         }
-        return placed;
+        return placed.order;
       } catch (error) {
         // A concurrent duplicate lost the unique-constraint race: return the winner's order.
         if (isUniqueViolation(error)) {

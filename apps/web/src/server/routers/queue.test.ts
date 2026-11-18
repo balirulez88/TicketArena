@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { silentLogger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase, setupTestRedis } from "@ticketarena/test-infra";
-import { createRedisQueueStore, type Random } from "@ticketarena/waiting-room";
+import {
+  createQueueService,
+  createRedisQueueStore,
+  createScheduleAdmissionPolicy,
+  type Random,
+} from "@ticketarena/waiting-room";
 import { createClient } from "redis";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import type { Principal } from "../identity/identity";
@@ -148,5 +153,118 @@ describe("queue.status and queue.leave", () => {
       code: "BAD_REQUEST",
       message: expect.stringContaining("eventId"),
     });
+  });
+});
+
+describe("admission slots", () => {
+  // The worker's ticker and reaper run the same service; here it is driven at the test's clock.
+  function queueServiceAt(now: Date) {
+    return createQueueService({
+      store: createRedisQueueStore(redisClient, { prefix: `${redis.prefix}${queuePrefix}` }),
+      policy: createScheduleAdmissionPolicy(),
+      clock: { now: () => now },
+      random: { next: () => 0.5 },
+      newId: randomUUID,
+      admitRatePerSecond: 10,
+    });
+  }
+
+  async function admitted(eventId: string, now: Date, principal: Principal) {
+    await caller(principal, now).queue.join({ eventId });
+    const ticker = queueServiceAt(now);
+    const [admission] = await ticker.admitTick(eventId, { admitRate: 1, maxActive: 10 });
+    return { ticker, jti: admission?.jti ?? "" };
+  }
+
+  function later(now: Date, ms: number) {
+    return new Date(now.getTime() + ms);
+  }
+
+  test("an admitted session's status poll reports ADMITTED and heartbeats its slot", async () => {
+    const { eventId, afterOnSale } = await scheduledEvent();
+    const alice = guest();
+    const { ticker } = await admitted(eventId, afterOnSale, alice);
+
+    expect(await caller(alice, later(afterOnSale, 60_000)).queue.status({ eventId })).toEqual({
+      status: "ADMITTED",
+    });
+
+    // Last seen at +60 s, so a reap at +120 s (cutoff +30 s) keeps the slot.
+    expect(await queueServiceAt(later(afterOnSale, 120_000)).reap(eventId)).toEqual([]);
+    expect(await ticker.counts(eventId)).toEqual({ queued: 0, active: 1 });
+  });
+
+  test("AT-39: leave frees the slot and revokes the admission", async () => {
+    const { eventId, afterOnSale } = await scheduledEvent();
+    const alice = guest();
+    const { ticker, jti } = await admitted(eventId, afterOnSale, alice);
+
+    expect(await caller(alice, afterOnSale).queue.leave({ eventId })).toEqual({ left: true });
+
+    expect(await ticker.isAdmitted(eventId, jti)).toBe(false);
+    expect(await ticker.counts(eventId)).toEqual({ queued: 0, active: 0 });
+  });
+
+  test("an admitted call (holdSeats) heartbeats the slot", async () => {
+    const { eventId, afterOnSale } = await scheduledEvent();
+    const alice = guest();
+    await admitted(eventId, afterOnSale, alice);
+    const seat = await db().seat.findFirstOrThrow({ where: { eventId, status: "AVAILABLE" } });
+
+    await caller(alice, later(afterOnSale, 60_000)).booking.holdSeats({
+      eventId,
+      seatIds: [seat.id],
+    });
+
+    expect(await queueServiceAt(later(afterOnSale, 120_000)).reap(eventId)).toEqual([]);
+  });
+
+  test("AT-39: placing an order frees the slot and revokes the admission; the order stands", async () => {
+    const { eventId, afterOnSale } = await scheduledEvent();
+    const alice = guest();
+    const { ticker, jti } = await admitted(eventId, afterOnSale, alice);
+    const seat = await db().seat.findFirstOrThrow({ where: { eventId, status: "AVAILABLE" } });
+    const hold = await caller(alice, afterOnSale).booking.holdSeats({
+      eventId,
+      seatIds: [seat.id],
+    });
+
+    const order = await caller(alice, afterOnSale).booking.placeOrder({
+      holdId: hold.id,
+      contact: { email: "alice@example.com" },
+      idempotencyKey: randomUUID(),
+    });
+
+    expect(order.status).toBe("PENDING_PAYMENT");
+    expect(await ticker.isAdmitted(eventId, jti)).toBe(false);
+    expect(await ticker.counts(eventId)).toEqual({ queued: 0, active: 0 });
+  });
+
+  test("placing an order succeeds even when the queue store is unavailable", async () => {
+    const { eventId, afterOnSale } = await scheduledEvent();
+    const alice = guest();
+    const seat = await db().seat.findFirstOrThrow({ where: { eventId, status: "AVAILABLE" } });
+    const unavailable = (now: Date) =>
+      createCaller({
+        now: () => now,
+        principal: alice,
+        db: db(),
+        logger: silentLogger,
+        metrics: () => ({ increment: async () => undefined }),
+        queueStore: () => Promise.reject(new Error("redis is down")),
+        random: { next: () => 0.5 },
+      });
+    const hold = await unavailable(afterOnSale).booking.holdSeats({
+      eventId,
+      seatIds: [seat.id],
+    });
+
+    const order = await unavailable(afterOnSale).booking.placeOrder({
+      holdId: hold.id,
+      contact: { email: "alice@example.com" },
+      idempotencyKey: randomUUID(),
+    });
+
+    expect(order.status).toBe("PENDING_PAYMENT");
   });
 });

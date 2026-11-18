@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, test } from "vitest";
-import type { QueueStore } from "./ports";
+import type { AdmitRequest, QueueStore } from "./ports";
 
 /** What the contract needs from an adapter's test file; test-only, not exported by the package. */
 export interface QueueStoreContractHarness {
@@ -95,6 +95,165 @@ export function describeQueueStoreContract(
         expect([...positions].sort((a, b) => a - b)).toEqual(
           Array.from({ length: 40 }, (_, index) => index + 1),
         );
+      } finally {
+        close();
+      }
+    });
+  });
+
+  describe(`QueueStore contract (admission and slots): ${adapter}`, () => {
+    const T0 = new Date("2027-05-01T10:00:00.000Z");
+    const at = (ms: number) => new Date(T0.getTime() + ms);
+    const TTL = 30 * 60_000;
+    const request = (
+      now: Date,
+      admitRate: number,
+      maxActive: number,
+      count = admitRate,
+    ): AdmitRequest => ({
+      now,
+      admitRate,
+      maxActive,
+      admissionTtlMs: TTL,
+      jtis: Array.from({ length: count }, () => randomUUID()),
+    });
+
+    async function queueOf(store: QueueStore, eventId: string, count: number) {
+      for (let index = 1; index <= count; index += 1) {
+        await store.join(eventId, `m${index}`, { kind: "SEQUENCE" });
+      }
+    }
+
+    test("admit moves the queue head into the active set, in queue order, with one jti each", async () => {
+      const store = storeWith("admit:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 3);
+
+      const admitted = await store.admit(eventId, request(T0, 2, 10));
+
+      expect(admitted.map((admission) => admission.sessionId)).toEqual(["m1", "m2"]);
+      expect(new Set(admitted.map((admission) => admission.jti)).size).toBe(2);
+      expect(await store.position(eventId, "m1")).toBeNull();
+      expect(await store.position(eventId, "m3")).toBe(1);
+      expect(await store.counts(eventId)).toEqual({ queued: 1, active: 2 });
+      for (const admission of admitted) {
+        expect(await store.isAdmitted(eventId, admission.jti, T0)).toBe(true);
+      }
+    });
+
+    test("the token bucket starts full at admitRate and refills at admitRate per second", async () => {
+      const store = storeWith("bucket:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 20);
+
+      expect(await store.admit(eventId, request(T0, 4, 100))).toHaveLength(4);
+      expect(await store.admit(eventId, request(T0, 4, 100))).toHaveLength(0);
+      expect(await store.admit(eventId, request(at(500), 4, 100))).toHaveLength(2);
+      // A long pause refills only up to the burst.
+      expect(await store.admit(eventId, request(at(60_000), 4, 100))).toHaveLength(4);
+    });
+
+    test("admit never fills more than maxActive slots", async () => {
+      const store = storeWith("cap:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 10);
+
+      expect(await store.admit(eventId, request(T0, 5, 3))).toHaveLength(3);
+      expect(await store.admit(eventId, request(at(5_000), 5, 3))).toHaveLength(0);
+      await store.releaseSlot(eventId, "m1");
+      expect(await store.admit(eventId, request(at(10_000), 5, 3))).toEqual([
+        expect.objectContaining({ sessionId: "m4" }),
+      ]);
+      expect(await store.counts(eventId)).toEqual({ queued: 6, active: 3 });
+    });
+
+    test("an empty queue spends no tokens", async () => {
+      const store = storeWith("empty:");
+      const eventId = randomUUID();
+
+      expect(await store.admit(eventId, request(T0, 3, 10))).toEqual([]);
+      await queueOf(store, eventId, 5);
+      expect(await store.admit(eventId, request(T0, 3, 10))).toHaveLength(3);
+    });
+
+    test("heartbeat refreshes only members that hold a slot", async () => {
+      const store = storeWith("heartbeat:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 2);
+      await store.admit(eventId, request(T0, 1, 10));
+
+      expect(await store.heartbeat(eventId, "m1", at(60_000))).toBe(true);
+      expect(await store.heartbeat(eventId, "m2", at(60_000))).toBe(false);
+      expect(await store.heartbeat(eventId, "nobody", at(60_000))).toBe(false);
+      expect(await store.counts(eventId)).toEqual({ queued: 1, active: 1 });
+      // The heartbeat at 60s keeps m1 out of a reap that frees anything idle since 30s.
+      expect(await store.reap(eventId, { now: at(120_000), idleBefore: at(30_000) })).toEqual([]);
+    });
+
+    test("releaseSlot frees the slot and revokes the admission jti", async () => {
+      const store = storeWith("release:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 1);
+      const [admission] = await store.admit(eventId, request(T0, 1, 10));
+
+      expect(await store.releaseSlot(eventId, "m1")).toBe(true);
+      expect(await store.releaseSlot(eventId, "m1")).toBe(false);
+      expect(await store.isAdmitted(eventId, admission?.jti ?? "", T0)).toBe(false);
+      expect(await store.heartbeat(eventId, "m1", T0)).toBe(false);
+      expect(await store.counts(eventId)).toEqual({ queued: 0, active: 0 });
+    });
+
+    test("reap frees idle slots and slots whose admission expired, revoking their jtis", async () => {
+      const store = storeWith("reap:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 3);
+      const first = await store.admit(eventId, request(T0, 1, 10));
+      const later = await store.admit(eventId, request(at(TTL - 10_000), 2, 10));
+      // m1 keeps heartbeating but its admission expires at TTL; m3 stays fresh; m2 goes idle.
+      await store.heartbeat(eventId, "m1", at(TTL));
+      await store.heartbeat(eventId, "m3", at(TTL));
+
+      const freed = await store.reap(eventId, { now: at(TTL), idleBefore: at(TTL - 5_000) });
+
+      expect([...freed].sort()).toEqual(["m1", "m2"]);
+      const jtiOf = (member: string) =>
+        [...first, ...later].find((admission) => admission.sessionId === member)?.jti ?? "";
+      expect(await store.isAdmitted(eventId, jtiOf("m1"), at(TTL - 1))).toBe(false);
+      expect(await store.isAdmitted(eventId, jtiOf("m2"), at(TTL))).toBe(false);
+      expect(await store.isAdmitted(eventId, jtiOf("m3"), at(TTL))).toBe(true);
+      expect(await store.counts(eventId)).toEqual({ queued: 0, active: 1 });
+    });
+
+    test("an admission is valid until its expiry", async () => {
+      const store = storeWith("expiry:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 1);
+      const [admission] = await store.admit(eventId, request(T0, 1, 10));
+      const jti = admission?.jti ?? "";
+
+      expect(await store.isAdmitted(eventId, jti, at(TTL - 1))).toBe(true);
+      expect(await store.isAdmitted(eventId, jti, at(TTL))).toBe(false);
+      expect(await store.isAdmitted(eventId, "unknown", T0)).toBe(false);
+    });
+
+    test("AT-38: concurrent admit ticks on separate connections never exceed the bucket or maxActive", async () => {
+      const eventId = randomUUID();
+      await queueOf(storeWith("admit-race:"), eventId, 50);
+      const { stores, close } = await harness.independentStores(`${filePrefix}admit-race:`, 8);
+      try {
+        const burst = await Promise.all(
+          stores.map((store) => store.admit(eventId, request(T0, 5, 7))),
+        );
+        const refill = await Promise.all(
+          stores.map((store) => store.admit(eventId, request(at(1_000), 5, 7))),
+        );
+
+        const first = burst.flat().map((admission) => admission.sessionId);
+        const second = refill.flat().map((admission) => admission.sessionId);
+        expect(first).toHaveLength(5);
+        expect(second).toHaveLength(2);
+        expect(new Set([...first, ...second]).size).toBe(7);
+        expect(await storeWith("admit-race:").counts(eventId)).toEqual({ queued: 43, active: 7 });
       } finally {
         close();
       }

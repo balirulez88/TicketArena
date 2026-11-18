@@ -16,10 +16,12 @@ import {
 } from "@ticketarena/booking";
 import type { Logger } from "@ticketarena/contracts";
 import type { PrismaClient } from "@ticketarena/db";
+import type { QueueService } from "@ticketarena/waiting-room";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { buyerKey, type Principal } from "../identity/identity";
-import { createTRPCRouter, publicProcedure } from "../trpc";
+import { createTRPCRouter, publicProcedure, type TRPCContext } from "../trpc";
+import { queueServiceFor } from "./queue";
 
 const holdSeatsInput = z.object({
   eventId: z.uuid(),
@@ -79,11 +81,33 @@ function bookingServiceFor(ctx: { db: PrismaClient; now: () => Date; logger: Log
   });
 }
 
+// Best-effort by design: a waiting-room slot is Redis bookkeeping and never decides seat or order
+// state (ADR 0005, ADR 0008), so a Redis failure must not fail a hold or an already committed
+// order. A slot left behind is freed by the reaper once it goes idle or its admission expires.
+async function onSlot(
+  ctx: TRPCContext,
+  action: string,
+  touch: (queue: QueueService) => Promise<unknown>,
+): Promise<void> {
+  try {
+    await touch(await queueServiceFor(ctx));
+  } catch (error) {
+    ctx.logger.warn(
+      { err: error instanceof Error ? error.message : String(error) },
+      `waiting-room ${action} failed; the reaper will free the slot`,
+    );
+  }
+}
+
 export const bookingRouter = createTRPCRouter({
   holdSeats: publicProcedure
     .input(holdSeatsInput)
     .output(holdOutput)
     .mutation(async ({ ctx, input }) => {
+      // holdSeats is the admitted call (ADR 0008): it counts as activity for the buyer's slot.
+      await onSlot(ctx, "heartbeat", (queue) =>
+        queue.heartbeat(input.eventId, ctx.principal.sessionId),
+      );
       const booking = bookingServiceFor(ctx);
       try {
         return await booking.holdSeats(toBuyer(ctx.principal), input.eventId, input.seatIds);
@@ -113,7 +137,7 @@ export const bookingRouter = createTRPCRouter({
       return hold;
     }),
 
-  // Owner-only and HELD-only; does not touch the buyer's waiting-room slot (ticket 30).
+  // Owner-only and HELD-only; does not touch the buyer's waiting-room slot.
   releaseHold: publicProcedure
     .input(releaseHoldInput)
     .output(holdOutput)
@@ -136,13 +160,23 @@ export const bookingRouter = createTRPCRouter({
     .output(orderOutput)
     .mutation(async ({ ctx, input }) => {
       const booking = bookingServiceFor(ctx);
+      const buyer = toBuyer(ctx.principal);
       try {
-        return await booking.placeOrder(
-          toBuyer(ctx.principal),
+        const order = await booking.placeOrder(
+          buyer,
           input.holdId,
           input.contact,
           input.idempotencyKey,
         );
+        // Only after the order has committed: the buyer is done shopping, so the slot goes to the
+        // next buyer in the queue. A replayed placeOrder frees an already free slot, a no-op.
+        await onSlot(ctx, "slot release", async (queue) => {
+          const hold = await booking.getHold(buyer, order.holdId);
+          if (hold !== null) {
+            await queue.releaseSlot(hold.eventId, ctx.principal.sessionId);
+          }
+        });
+        return order;
       } catch (error) {
         if (error instanceof HoldNotFoundError) {
           throw new TRPCError({ code: "NOT_FOUND", message: error.message, cause: error });

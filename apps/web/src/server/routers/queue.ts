@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   createQueueService,
   createScheduleAdmissionPolicy,
@@ -8,8 +9,8 @@ import { createTRPCRouter, publicProcedure, type TRPCContext } from "../trpc";
 import { eventNotFound } from "./event-not-found";
 
 /**
- * Admissions per second assumed for the ETA until the admission ticker (ticket 30) makes the
- * rate configurable per event.
+ * Admissions per second assumed for the ETA. The ticker's real rate is worker configuration
+ * (`ADMIT_RATE_PER_SECOND`, default 10); the web app does not read it yet.
  */
 export const DEFAULT_ADMIT_RATE_PER_SECOND = 10;
 
@@ -28,18 +29,22 @@ const joinOutput = z.discriminatedUnion("status", [
 
 const statusOutput = z.discriminatedUnion("status", [
   queuedOutput,
+  z.object({ status: z.literal("ADMITTED") }),
   z.object({ status: z.literal("NOT_QUEUED") }),
 ]);
 
 const leaveOutput = z.object({ left: z.boolean() });
 
 // Built per request so the clock and randomness always come from the request context.
-async function queueServiceFor(ctx: TRPCContext): Promise<QueueService> {
+export async function queueServiceFor(
+  ctx: Pick<TRPCContext, "now" | "queueStore" | "random">,
+): Promise<QueueService> {
   return createQueueService({
     store: await ctx.queueStore(),
     policy: createScheduleAdmissionPolicy(),
     clock: { now: ctx.now },
     random: ctx.random,
+    newId: randomUUID,
     admitRatePerSecond: DEFAULT_ADMIT_RATE_PER_SECOND,
   });
 }

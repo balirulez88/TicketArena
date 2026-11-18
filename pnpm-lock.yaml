@@ -303,9 +303,15 @@ importers:
       '@ticketarena/messaging':
         specifier: workspace:*
         version: link:../../packages/messaging
+      '@ticketarena/waiting-room':
+        specifier: workspace:*
+        version: link:../../packages/waiting-room
       pino:
         specifier: ^10.4.0
         version: 10.4.0
+      redis:
+        specifier: 6.3.0
+        version: 6.3.0
       zod:
         specifier: 4.6.7
         version: 4.6.7

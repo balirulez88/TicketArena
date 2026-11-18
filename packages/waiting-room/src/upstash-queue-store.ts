@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import type { QueueStore } from "./ports";
 import {
-  JOIN_SCRIPT,
-  joinScoreArgument,
-  LEAVE_SCRIPT,
+  createScriptedQueueStore,
+  QUEUE_SCRIPTS,
+  type QueueScriptName,
   queueKeys,
   toInteger,
 } from "./queue-scripts";
@@ -20,17 +20,17 @@ export interface UpstashQueueStoreOptions {
   readonly timeoutMs?: number;
 }
 
-interface Script {
-  readonly source: string;
-  readonly sha: string;
-}
+// SHA-1 of each script, computed once per process, so EVALSHA needs no round trip to learn it.
+const shas = new Map<QueueScriptName, string>();
 
-function script(source: string): Script {
-  return { source, sha: createHash("sha1").update(source).digest("hex") };
+function shaOf(name: QueueScriptName): string {
+  let sha = shas.get(name);
+  if (sha === undefined) {
+    sha = createHash("sha1").update(QUEUE_SCRIPTS[name]).digest("hex");
+    shas.set(name, sha);
+  }
+  return sha;
 }
-
-const JOIN = script(JOIN_SCRIPT);
-const LEAVE = script(LEAVE_SCRIPT);
 
 class UpstashCommandError extends Error {
   constructor(
@@ -74,40 +74,23 @@ export function createUpstashQueueStore(options: UpstashQueueStoreOptions): Queu
   }
 
   async function runScript(
-    script: Script,
+    name: QueueScriptName,
     keys: readonly string[],
     args: readonly string[],
   ): Promise<unknown> {
     const tail = [String(keys.length), ...keys, ...args];
     try {
-      return await command(["EVALSHA", script.sha, ...tail]);
+      return await command(["EVALSHA", shaOf(name), ...tail]);
     } catch (error) {
       if (error instanceof UpstashCommandError && error.reason.startsWith("NOSCRIPT")) {
-        return command(["EVAL", script.source, ...tail]);
+        return command(["EVAL", QUEUE_SCRIPTS[name], ...tail]);
       }
       throw error;
     }
   }
 
-  return {
-    async join(eventId, member, score) {
-      const keys = queueKeys(options.prefix, eventId);
-      const rank = await runScript(
-        JOIN,
-        [keys.queue, keys.sequence],
-        [member, joinScoreArgument(score)],
-      );
-      return toInteger(rank, "join") + 1;
-    },
-
-    async position(eventId, member) {
-      const rank = await command(["ZRANK", queueKeys(options.prefix, eventId).queue, member]);
-      return rank === null ? null : toInteger(rank, "position") + 1;
-    },
-
-    async leave(eventId, member) {
-      const removed = await runScript(LEAVE, [queueKeys(options.prefix, eventId).queue], [member]);
-      return toInteger(removed, "leave") === 1;
-    },
-  };
+  return createScriptedQueueStore(options.prefix, runScript, async (eventId, member) => {
+    const rank = await command(["ZRANK", queueKeys(options.prefix, eventId).queue, member]);
+    return rank === null ? null : toInteger(rank, "position") + 1;
+  });
 }

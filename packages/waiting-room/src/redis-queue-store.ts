@@ -1,11 +1,5 @@
 import type { QueueStore } from "./ports";
-import {
-  JOIN_SCRIPT,
-  joinScoreArgument,
-  LEAVE_SCRIPT,
-  queueKeys,
-  toInteger,
-} from "./queue-scripts";
+import { createScriptedQueueStore, QUEUE_SCRIPTS, queueKeys } from "./queue-scripts";
 
 /**
  * The node-redis commands the adapter needs. A connected `createClient()` from `redis` satisfies
@@ -26,27 +20,13 @@ export function createRedisQueueStore(
   client: RedisQueueClient,
   options: RedisQueueStoreOptions,
 ): QueueStore {
-  return {
-    async join(eventId, member, score) {
-      const keys = queueKeys(options.prefix, eventId);
-      const rank = await client.eval(JOIN_SCRIPT, {
-        keys: [keys.queue, keys.sequence],
-        arguments: [member, joinScoreArgument(score)],
-      });
-      return toInteger(rank, "join") + 1;
-    },
-
-    async position(eventId, member) {
+  return createScriptedQueueStore(
+    options.prefix,
+    (name, keys, args) =>
+      client.eval(QUEUE_SCRIPTS[name], { keys: [...keys], arguments: [...args] }),
+    async (eventId, member) => {
       const rank = await client.zRank(queueKeys(options.prefix, eventId).queue, member);
       return rank === null ? null : rank + 1;
     },
-
-    async leave(eventId, member) {
-      const removed = await client.eval(LEAVE_SCRIPT, {
-        keys: [queueKeys(options.prefix, eventId).queue],
-        arguments: [member],
-      });
-      return toInteger(removed, "leave") === 1;
-    },
-  };
+  );
 }

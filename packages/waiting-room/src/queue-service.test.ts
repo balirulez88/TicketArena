@@ -3,6 +3,7 @@ import { setupTestRedis } from "@ticketarena/test-infra";
 import { createClient } from "redis";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import {
+  ADMISSION_TTL_MS,
   createQueueService,
   createRedisQueueStore,
   createScheduleAdmissionPolicy,
@@ -54,6 +55,7 @@ function serviceAt(clock: { now: Date }, random: Random = scriptedRandom([]), ad
     policy: createScheduleAdmissionPolicy(),
     clock: { now: () => clock.now },
     random,
+    newId: randomUUID,
     admitRatePerSecond: admitRate,
   });
 }
@@ -157,6 +159,126 @@ describe("QueueService.leave", () => {
     expect(await service.status(event.id, "a")).toEqual({ status: "NOT_QUEUED" });
     expect(await service.status(event.id, "b")).toMatchObject({ position: 1 });
     expect(await service.leave(event.id, "a")).toEqual({ left: false });
+  });
+});
+
+describe("QueueService admission (ticker, slots, reaper)", () => {
+  const LIMITS = { admitRate: 3, maxActive: 5 };
+  const atOffset = (ms: number) => new Date(AFTER_ON_SALE.getTime() + ms);
+
+  async function queued(clock: { now: Date }, count: number) {
+    const event = schedule();
+    const service = serviceAt(clock);
+    const sessions = Array.from({ length: count }, (_, index) => `s${index + 1}`);
+    for (const sessionId of sessions) {
+      await service.join(event, sessionId);
+    }
+    return { event, service, sessions };
+  }
+
+  test("admitTick admits from the head into the active set; status then reports ADMITTED", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 4);
+
+    const admitted = await service.admitTick(event.id, LIMITS);
+
+    expect(admitted.map((admission) => admission.sessionId)).toEqual(["s1", "s2", "s3"]);
+    expect(await service.status(event.id, "s1")).toEqual({ status: "ADMITTED" });
+    expect(await service.status(event.id, "s4")).toMatchObject({ status: "QUEUED", position: 1 });
+    expect(await service.counts(event.id)).toEqual({ queued: 1, active: 3 });
+    for (const admission of admitted) {
+      expect(await service.isAdmitted(event.id, admission.jti)).toBe(true);
+    }
+  });
+
+  test("AT-38: one-second ticks never admit more than admitRate per tick or beyond maxActive", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 20);
+
+    const perTick: number[] = [];
+    for (let second = 0; second < 4; second += 1) {
+      clock.now = atOffset(second * 1000);
+      perTick.push((await service.admitTick(event.id, LIMITS)).length);
+      // Ticks in the same second find the bucket empty.
+      perTick.push((await service.admitTick(event.id, LIMITS)).length);
+    }
+
+    expect(perTick).toEqual([3, 0, 2, 0, 0, 0, 0, 0]);
+    expect(await service.counts(event.id)).toEqual({ queued: 15, active: 5 });
+  });
+
+  test("status polls heartbeat the slot, so a polling buyer is not reaped as idle", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 2);
+    await service.admitTick(event.id, { admitRate: 2, maxActive: 5 });
+
+    clock.now = atOffset(60_000);
+    await service.status(event.id, "s1");
+    expect(await service.heartbeat(event.id, "s2")).toBe(true);
+    expect(await service.heartbeat(event.id, "never-admitted")).toBe(false);
+    clock.now = atOffset(120_000);
+
+    expect(await service.reap(event.id)).toEqual([]);
+  });
+
+  test("AT-39: reaping frees a slot idle for over 90s and revokes its admission", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 2);
+    const [idle, polling] = await service.admitTick(event.id, { admitRate: 2, maxActive: 5 });
+    clock.now = atOffset(30_000);
+    await service.status(event.id, "s2");
+
+    clock.now = atOffset(90_000);
+    expect(await service.reap(event.id)).toEqual([]);
+    clock.now = atOffset(90_001);
+    expect(await service.reap(event.id)).toEqual(["s1"]);
+
+    expect(await service.isAdmitted(event.id, idle?.jti ?? "")).toBe(false);
+    expect(await service.isAdmitted(event.id, polling?.jti ?? "")).toBe(true);
+    expect(await service.status(event.id, "s1")).toEqual({ status: "NOT_QUEUED" });
+    expect(await service.counts(event.id)).toEqual({ queued: 0, active: 1 });
+  });
+
+  test("AT-39: reaping frees a slot whose 30-minute admission expired, even while it polls", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 1);
+    const [admission] = await service.admitTick(event.id, LIMITS);
+
+    clock.now = atOffset(ADMISSION_TTL_MS - 1);
+    await service.status(event.id, "s1");
+    expect(await service.reap(event.id)).toEqual([]);
+    clock.now = atOffset(ADMISSION_TTL_MS);
+    await service.status(event.id, "s1");
+
+    expect(await service.reap(event.id)).toEqual(["s1"]);
+    expect(await service.isAdmitted(event.id, admission?.jti ?? "")).toBe(false);
+  });
+
+  test("AT-39: leave frees the slot and revokes the admission, making room for the next buyer", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 3);
+    const [admission] = await service.admitTick(event.id, { admitRate: 5, maxActive: 2 });
+
+    expect(await service.leave(event.id, "s1")).toEqual({ left: true });
+
+    expect(await service.isAdmitted(event.id, admission?.jti ?? "")).toBe(false);
+    expect(await service.status(event.id, "s1")).toEqual({ status: "NOT_QUEUED" });
+    clock.now = atOffset(1000);
+    expect(await service.admitTick(event.id, { admitRate: 5, maxActive: 2 })).toEqual([
+      expect.objectContaining({ sessionId: "s3" }),
+    ]);
+  });
+
+  test("AT-39: releaseSlot (order placed) frees the slot and revokes the admission", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 1);
+    const [admission] = await service.admitTick(event.id, LIMITS);
+
+    expect(await service.releaseSlot(event.id, "s1")).toBe(true);
+    expect(await service.releaseSlot(event.id, "s1")).toBe(false);
+
+    expect(await service.isAdmitted(event.id, admission?.jti ?? "")).toBe(false);
+    expect(await service.counts(event.id)).toEqual({ queued: 0, active: 0 });
   });
 });
 

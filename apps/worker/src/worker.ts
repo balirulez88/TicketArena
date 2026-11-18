@@ -10,10 +10,18 @@ import {
   type MessageBus,
   type OutboxRelayOptions,
 } from "@ticketarena/messaging";
+import type { AdmissionLimits, QueueService } from "@ticketarena/waiting-room";
+import { createAdmissionLoops } from "./admission.js";
 import { createSweeperLoop } from "./sweeper.js";
 
 /** How often expired holds and overdue orders are swept (spec: Expiry); lazy expiry covers held seats in between. */
 export const SWEEP_INTERVAL_MS = 15_000;
+
+/** How often the admission ticker admits from each queue (spec: Waiting room). */
+export const ADMIT_INTERVAL_MS = 1000;
+
+/** How often idle slots and slots with an expired admission are reaped (spec: Waiting room). */
+export const REAP_INTERVAL_MS = 15_000;
 
 export interface WorkerOptions {
   readonly bus: MessageBus;
@@ -27,6 +35,13 @@ export interface WorkerOptions {
   readonly sweeper?: {
     readonly booking: Pick<BookingService, "sweepExpired">;
     readonly intervalMs?: number;
+  };
+  /** The admission ticker and slot reaper; the queue service carries the clock they decide with. */
+  readonly waitingRoom?: {
+    readonly queue: Pick<QueueService, "admitTick" | "reap">;
+    readonly limits: AdmissionLimits;
+    readonly admitIntervalMs?: number;
+    readonly reapIntervalMs?: number;
   };
 }
 
@@ -70,10 +85,24 @@ export async function startWorker(options: WorkerOptions): Promise<RunningWorker
           intervalMs: options.sweeper.intervalMs ?? SWEEP_INTERVAL_MS,
           logger: options.logger ?? silentLogger,
         });
+  const admission =
+    options.waitingRoom === undefined
+      ? []
+      : createAdmissionLoops({
+          queue: options.waitingRoom.queue,
+          limits: options.waitingRoom.limits,
+          prisma: options.prisma,
+          admitIntervalMs: options.waitingRoom.admitIntervalMs ?? ADMIT_INTERVAL_MS,
+          reapIntervalMs: options.waitingRoom.reapIntervalMs ?? REAP_INTERVAL_MS,
+          logger: options.logger ?? silentLogger,
+        });
   for (const runner of runners) {
     runner.start();
   }
   sweeper?.start();
+  for (const loop of admission) {
+    loop.start();
+  }
   for (const relay of relays) {
     relay.start();
   }
@@ -93,6 +122,7 @@ export async function startWorker(options: WorkerOptions): Promise<RunningWorker
     async stop() {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await sweeper?.stop();
+      await Promise.all(admission.map((loop) => loop.stop()));
       await Promise.all(relays.map((relay) => relay.stop()));
       await Promise.all(runners.map((runner) => runner.stop()));
     },

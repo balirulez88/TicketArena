@@ -185,7 +185,11 @@ describe("parseWorkerEnv", () => {
 
   it("defaults the health port", () => {
     expect(
-      parseWorkerEnv({ DATABASE_URL: "postgresql://u@h/db", NATS_URL: "nats://h:4222" }).PORT,
+      parseWorkerEnv({
+        DATABASE_URL: "postgresql://u@h/db",
+        NATS_URL: "nats://h:4222",
+        REDIS_URL: "redis://h:6379",
+      }).PORT,
     ).toBe(8080);
   });
 });

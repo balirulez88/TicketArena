@@ -79,8 +79,8 @@ Code: `apps/worker/src/`; decision: [ADR 0013](../adr/0013-deployment-topology.m
 the JetStream topology first, then starts the outbox **relay** (polls every 250 ms, batch of 100) and one
 **consumer runner** per registered consumer, and the **sweeper** (`sweeper.ts`: calls
 `BookingService.sweepExpired()`, which expires holds and then overdue orders, at start and then 15 s after each sweep ends, `SWEEP_INTERVAL_MS`; a
-failed sweep is logged and retried next time; `stop()` cancels the wait at once), and serves `GET /health`. Configuration is validated once in
-`parseWorkerEnv` (`DATABASE_URL`, `NATS_URL`, `PORT`) and injected. Details: [messaging](../messaging/index.md).
+failed sweep is logged and retried next time; `stop()` cancels the wait at once), the waiting-room **admission ticker** (every 1 s, `ADMIT_INTERVAL_MS`) and **slot reaper** (every 15 s, `REAP_INTERVAL_MS`) in `admission.ts` on the generic `periodic-loop.ts` (same run-then-wait, log-and-retry, prompt-stop behaviour), each a pass over every event (see [waiting room](waiting-room.md#admission-and-slots)), and serves `GET /health`. Configuration is validated once in
+`parseWorkerEnv` (`DATABASE_URL`, `NATS_URL`, `REDIS_URL`, `PORT`, `ADMIT_RATE_PER_SECOND` default 10, `MAX_ACTIVE` default 100) and injected. Details: [messaging](../messaging/index.md).
 
 ## Logging and ids
 

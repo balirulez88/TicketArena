@@ -114,3 +114,27 @@ AC2 needs CI to provide an Upstash-compatible HTTP endpoint, but .github/workflo
 Assumed: Add a serverless-redis-http (SRH) service in front of the existing Redis to docker-compose.yml (CI already starts services from it); the test harness reads TEST_UPSTASH_REDIS_REST_URL/TOKEN and falls back to the compose defaults, so ci.yml stays untouched
 
 Answer: (open)
+
+## 2026-11-18 13:39 ticket 30
+
+Where do admitRate and maxActive come from?
+
+Assumed: Worker config ADMIT_RATE_PER_SECOND (default 10) and MAX_ACTIVE (default 100) in parseWorkerEnv, applied to every event; no per-event columns or migration
+
+Answer: (open)
+
+## 2026-11-18 13:39 ticket 30
+
+What is the admission jti before ticket 31's token exists?
+
+Assumed: Ticker mints a UUID jti; Redis keeps session->jti (:admission hash) and jti->expiry (:admitted ZSET, admittedAt + 30 min); freeing removes both atomically; JWT minting left to ticket 31
+
+Answer: (open)
+
+## 2026-11-18 13:39 ticket 30
+
+Where is the slot freed on order placement?
+
+Assumed: In the web booking.placeOrder router after the order commits, best-effort (Redis failure logged, order unaffected); holdSeats sends a best-effort heartbeat
+
+Answer: (open)

@@ -63,10 +63,10 @@ export interface TRPCContext {
 let sharedDb: PrismaClient | undefined;
 
 function database(): PrismaClient {
-  sharedDb ??= createPrismaClient({
-    connectionString: parseDatabaseEnv(process.env).DATABASE_URL,
-    driver: process.env["DATABASE_DRIVER"] === "pg" ? "pg" : "neon",
-  });
+  if (sharedDb === undefined) {
+    const { DATABASE_URL, DATABASE_DRIVER } = parseDatabaseEnv(process.env);
+    sharedDb = createPrismaClient({ connectionString: DATABASE_URL, driver: DATABASE_DRIVER });
+  }
   return sharedDb;
 }
 

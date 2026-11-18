@@ -1,14 +1,31 @@
 import { z } from "zod";
 
+const LOCAL_HOSTNAMES: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * The Redis REST token travels in a header, so it must never cross a network in clear text;
+ * plain http is allowed only to a local endpoint (the compose `redis-http` service).
+ */
+function isHttpsOrLocalHttp(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    // Zod runs this refinement even after `z.url()` failed; that check already reports it.
+    return false;
+  }
+  return (
+    url.protocol === "https:" || (url.protocol === "http:" && LOCAL_HOSTNAMES.has(url.hostname))
+  );
+}
+
 const serverEnvSchema = z.object({
   DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
-  UPSTASH_REDIS_REST_URL: z.url().refine((value) => {
-    const url = new URL(value);
-    return (
-      url.protocol === "https:" ||
-      (url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname))
-    );
-  }, "HTTPS required except for localhost"),
+  /** `neon` (serverless driver, the default) for Neon; `pg` for a local or plain Postgres. */
+  DATABASE_DRIVER: z.enum(["neon", "pg"]).default("neon"),
+  UPSTASH_REDIS_REST_URL: z
+    .url()
+    .refine(isHttpsOrLocalHttp, "must be https, or http on localhost for local development"),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
   /** node-redis connection for the waiting-room queue (`redis://` locally, `rediss://` hosted). */
   REDIS_URL: z.url({ protocol: /^rediss?$/ }),
@@ -30,7 +47,7 @@ const metricsEnvSchema = serverEnvSchema.pick({
 
 const queueEnvSchema = serverEnvSchema.pick({ REDIS_URL: true });
 
-const databaseEnvSchema = serverEnvSchema.pick({ DATABASE_URL: true });
+const databaseEnvSchema = serverEnvSchema.pick({ DATABASE_URL: true, DATABASE_DRIVER: true });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
 
@@ -72,8 +89,10 @@ export function parseAdminEnv(
   return parseEnv(adminEnvSchema, source, "admin");
 }
 
-/** Validates only the database URL, for the tRPC context, which needs nothing else yet. */
-export function parseDatabaseEnv(source: EnvSource): Pick<ServerEnv, "DATABASE_URL"> {
+/** Validates only the database URL and driver, for the tRPC context, which needs nothing else. */
+export function parseDatabaseEnv(
+  source: EnvSource,
+): Pick<ServerEnv, "DATABASE_URL" | "DATABASE_DRIVER"> {
   return parseEnv(databaseEnvSchema, source, "database");
 }
 

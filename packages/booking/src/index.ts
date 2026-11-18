@@ -20,6 +20,7 @@ export {
   MixedCurrencyError,
   type OrderLineView,
   type OrderView,
+  requestHash,
   SeatUnavailableError,
   type SweepResult,
 } from "./booking-service";

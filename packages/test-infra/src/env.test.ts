@@ -8,12 +8,30 @@ const valid = {
 };
 
 describe("parseTestEnv", () => {
-  it("returns the three service URLs when all are set", () => {
+  it("returns the service URLs, defaulting the Upstash endpoint to the compose one", () => {
     expect(parseTestEnv(valid)).toEqual({
       databaseUrl: valid.TEST_DATABASE_URL,
       redisUrl: valid.TEST_REDIS_URL,
       natsUrl: valid.TEST_NATS_URL,
+      upstashRedisRestUrl: "http://localhost:8079",
+      upstashRedisRestToken: "ticketarena",
     });
+  });
+
+  it("uses the Upstash endpoint and token when they are set", () => {
+    const env = parseTestEnv({
+      ...valid,
+      TEST_UPSTASH_REDIS_REST_URL: "https://example.upstash.io",
+      TEST_UPSTASH_REDIS_REST_TOKEN: "secret",
+    });
+    expect(env.upstashRedisRestUrl).toBe("https://example.upstash.io");
+    expect(env.upstashRedisRestToken).toBe("secret");
+  });
+
+  it("rejects a non-HTTP Upstash URL and names the variable", () => {
+    expect(() =>
+      parseTestEnv({ ...valid, TEST_UPSTASH_REDIS_REST_URL: "redis://localhost:6379" }),
+    ).toThrow(/TEST_UPSTASH_REDIS_REST_URL/);
   });
 
   it("fails loudly, naming every missing variable, instead of letting tests skip", () => {

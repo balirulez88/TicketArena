@@ -56,4 +56,18 @@ describe("createTRPCContext", () => {
 
     expect(() => ctx.metrics()).toThrow(/UPSTASH_REDIS_REST_URL/);
   });
+
+  test("does not read REDIS_URL while building the context", async () => {
+    vi.stubEnv("REDIS_URL", "");
+
+    await expect(createTRPCContext({ req: requestWith() })).resolves.toBeDefined();
+  });
+
+  test("resolving the queue store without REDIS_URL fails naming the variable", async () => {
+    vi.stubEnv("REDIS_URL", "");
+
+    const ctx = await createTRPCContext({ req: requestWith() });
+
+    await expect(ctx.queueStore()).rejects.toThrow(/REDIS_URL/);
+  });
 });

@@ -42,3 +42,99 @@ Ticket 13 lets an expired-but-unswept HELD hold be released; ticket 14 says a ho
 Assumed: No change in ticket 14: releaseHold stays as ticket 13 built it (the seats end AVAILABLE either way); revisit if the answer to ticket 13's question says otherwise
 
 Answer: Overridden (2026-11-18): yes, see the second question of ticket 13. Fix: ticket 60.
+
+## 2026-11-18 12:40 ticket 15
+
+Where does order expiry run, and as which consumer does Notification receive order.expired?
+
+Assumed: Inside BookingService.sweepExpired() after holds (batches of 100); Notification gets a second durable consumer notification-expired on ta.order.expired, template order-expiry
+
+Answer: Accepted (2026-11-18).
+
+## 2026-11-18 12:40 ticket 15
+
+What does the order.expired payload carry?
+
+Assumed: { orderId, contact } per the spec event catalogue; order's correlationId, causationId null; no seatIds
+
+Answer: Accepted (2026-11-18).
+
+## 2026-11-18 12:40 ticket 15
+
+Add an index on orders(status, paymentDeadline) for the sweep?
+
+Assumed: No migration in ticket 15; the sweep scans orders
+
+Answer: Accepted (2026-11-18) for the MVP; revisit with the k6 load test if the order sweep shows up.
+
+## 2026-11-18 12:46 ticket 16
+
+What is the canonical request for requestHash?
+
+Assumed: hold id, email, phone (null when absent) in fixed order; email not normalized (no lowercase/trim)
+
+Answer: Accepted (2026-11-18): stricter is the safe direction.
+
+## 2026-11-18 12:58 ticket 28
+
+How does the web app reach Redis for the queue?
+
+Assumed: node-redis via a new REDIS_URL (parseQueueEnv in parseServerEnv), lazy single connection; ticket 29 may replace it with the Upstash adapter
+
+Answer: Accepted (2026-11-18).
+
+## 2026-11-18 12:58 ticket 28
+
+What does join return before queueOpensAt?
+
+Assumed: ADMISSIBLE, following the spec's 'when inactive, join admits immediately'; the window is [queueOpensAt, queueClosesAt); change in AdmissionPolicy if wrong
+
+Answer: Overridden (2026-11-18): "inactive" in the spec means after the queue closes, not before it opens. Before queueOpensAt, join answers NOT_OPEN and issues no admission; otherwise a buyer joining just before the queue opens gets a 30-minute token that skips the randomized pre-queue (ADR 0008). holdSeats also refuses before onSaleAt. Fix: ticket 61.
+
+## 2026-11-18 12:58 ticket 28
+
+How is the ETA computed?
+
+Assumed: etaSeconds = ceil(position / admitRatePerSecond), 1-based position, constant 10/s until ticket 30
+
+Answer: Accepted (2026-11-18).
+
+## 2026-11-18 12:58 ticket 28
+
+Queue key names and member id?
+
+Assumed: <prefix>waiting-room:{eventId}:queue and :seq (hash tag for one cluster slot); member = principal.sessionId; later joins score 1 + INCR (first later join scores 2)
+
+Answer: Accepted (2026-11-18).
+
+## 2026-11-18 13:02 ticket 29
+
+AC2 needs CI to provide an Upstash-compatible HTTP endpoint, but .github/workflows/ci.yml (where CI sets TEST_* vars) is protected. How is it provided?
+
+Assumed: Add a serverless-redis-http (SRH) service in front of the existing Redis to docker-compose.yml (CI already starts services from it); the test harness reads TEST_UPSTASH_REDIS_REST_URL/TOKEN and falls back to the compose defaults, so ci.yml stays untouched
+
+Answer: Accepted (2026-11-18): the compose service keeps CI and local infrastructure in one definition.
+
+## 2026-11-18 13:39 ticket 30
+
+Where do admitRate and maxActive come from?
+
+Assumed: Worker config ADMIT_RATE_PER_SECOND (default 10) and MAX_ACTIVE (default 100) in parseWorkerEnv, applied to every event; no per-event columns or migration
+
+Answer: Accepted (2026-11-18): per-event rates are not needed for the MVP.
+
+## 2026-11-18 13:39 ticket 30
+
+What is the admission jti before ticket 31's token exists?
+
+Assumed: Ticker mints a UUID jti; Redis keeps session->jti (:admission hash) and jti->expiry (:admitted ZSET, admittedAt + 30 min); freeing removes both atomically; JWT minting left to ticket 31
+
+Answer: Accepted (2026-11-18): ticket 31 mints the JWT around this jti.
+
+## 2026-11-18 13:39 ticket 30
+
+Where is the slot freed on order placement?
+
+Assumed: In the web booking.placeOrder router after the order commits, best-effort (Redis failure logged, order unaffected); holdSeats sends a best-effort heartbeat
+
+Answer: Accepted (2026-11-18): a lost free is bounded by the 30-minute admission expiry.

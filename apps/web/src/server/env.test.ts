@@ -1,10 +1,11 @@
 import { describe, expect, test } from "vitest";
-import { parseMetricsEnv, parseServerEnv, parseSessionEnv } from "./env";
+import { parseMetricsEnv, parseQueueEnv, parseServerEnv, parseSessionEnv } from "./env";
 
 const validEnv = {
   DATABASE_URL: "postgresql://user:pass@db.example.com/ticketarena?sslmode=require",
   UPSTASH_REDIS_REST_URL: "https://example.upstash.io",
   UPSTASH_REDIS_REST_TOKEN: "token",
+  REDIS_URL: "rediss://default:secret@example.upstash.io:6379",
   SESSION_SECRET: "s".repeat(32),
 };
 
@@ -74,5 +75,21 @@ describe("parseMetricsEnv", () => {
     expect(() => parseMetricsEnv({ ...valid, UPSTASH_REDIS_REST_TOKEN: "" })).toThrow(
       /UPSTASH_REDIS_REST_TOKEN/,
     );
+  });
+});
+
+describe("parseQueueEnv", () => {
+  test("accepts a redis or rediss URL and ignores unrelated variables", () => {
+    expect(parseQueueEnv({ REDIS_URL: "redis://localhost:6379", SESSION_SECRET: "x" })).toEqual({
+      REDIS_URL: "redis://localhost:6379",
+    });
+    expect(parseQueueEnv({ REDIS_URL: "rediss://example.upstash.io:6379" }).REDIS_URL).toBe(
+      "rediss://example.upstash.io:6379",
+    );
+  });
+
+  test("names REDIS_URL when it is missing or not a Redis URL", () => {
+    expect(() => parseQueueEnv({})).toThrow(/REDIS_URL/);
+    expect(() => parseQueueEnv({ REDIS_URL: "https://example.upstash.io" })).toThrow(/REDIS_URL/);
   });
 });

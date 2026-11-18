@@ -1,0 +1,21 @@
+{
+  "name": "@ticketarena/waiting-room",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Waiting room: QueueService, QueueStore port with a node-redis adapter, AdmissionPolicy.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@ticketarena/test-infra": "workspace:*",
+    "@types/node": "26.6.5",
+    "redis": "6.3.0",
+    "typescript": "6.0.3",
+    "vitest": "5.0.5"
+  }
+}

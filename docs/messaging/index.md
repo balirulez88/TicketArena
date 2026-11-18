@@ -54,14 +54,15 @@ Each slice that emits an event adds a row here. Every event travels in the envel
 `packages/contracts` (`id`, `type`, `version`, `occurredAt`, `correlationId`, `causationId`,
 optional `holdId`/`orderId`, `payload`); the full envelope is stored as the outbox row payload.
 
-| Event type          | Producer                                         | Consumers      | Payload version |
-| ------------------- | ------------------------------------------------ | -------------- | --------------- |
-| `seat.held`         | `BookingService.holdSeats` (same TX)             | none yet       | 1               |
-| `hold.released`     | `BookingService.releaseHold` (same TX)           | none yet       | 1               |
-| `hold.expired`      | `BookingService.sweepExpired` (same TX)          | none yet       | 1               |
-| `order.placed`      | `BookingService.placeOrder` (same TX)            | `payment`      | 1               |
-| `payment.succeeded` | mock Payment handler (same TX, `payment` outbox) | `booking-saga` | 1               |
-| `order.confirmed`   | booking saga handler (same TX)                   | `notification` | 1               |
+| Event type          | Producer                                         | Consumers              | Payload version |
+| ------------------- | ------------------------------------------------ | ---------------------- | --------------- |
+| `seat.held`         | `BookingService.holdSeats` (same TX)             | none yet               | 1               |
+| `hold.released`     | `BookingService.releaseHold` (same TX)           | none yet               | 1               |
+| `hold.expired`      | `BookingService.sweepExpired` (same TX)          | none yet               | 1               |
+| `order.placed`      | `BookingService.placeOrder` (same TX)            | `payment`              | 1               |
+| `payment.succeeded` | mock Payment handler (same TX, `payment` outbox) | `booking-saga`         | 1               |
+| `order.confirmed`   | booking saga handler (same TX)                   | `notification`         | 1               |
+| `order.expired`     | `BookingService.sweepExpired` (same TX)          | `notification-expired` | 1               |
 
 `seat.held` payload: `holdId`, `eventId`, `seatIds`, `holdExpiresAt`. Its `correlationId` is
 minted here and reused by every later event of the booking.
@@ -75,13 +76,19 @@ seat was taken over lazily). It carries the hold's `correlationId` and `causatio
 `order.placed` payload: `orderId`, `holdId`, `amountMinor`, `currency`, `paymentDeadline`, `contact`
 (`email`, optional `phone`). It carries the hold's `correlationId`.
 
+`order.expired` payload: `orderId`, `contact` (`email`, optional `phone`). Written when the sweeper
+expires an unpaid order at `paymentDeadline + 60 s`; it carries the order's `correlationId`, `holdId`,
+`orderId` and `causationId: null`.
+
 `payment.succeeded` payload: `paymentId`, `orderId`, `attemptNo`, `amount` (minor units), `currency`,
 `capturedAt` (provider time). `order.confirmed` payload: `orderId`, `seatIds`, `totalMinor`, `currency`,
 `contact`.
 
 ## Notification
 
-`notification` (`service: "notification"`, `apps/worker/src/notification/`) consumes `order.confirmed`. Per
+`notification` (`service: "notification"`, `apps/worker/src/notification/`) consumes `order.confirmed`
+(template `order-confirmation`); the durable consumer `notification-expired` runs the same handler on
+`order.expired` (template `order-expiry`), because a durable consumer takes one filter subject. Per
 channel (EMAIL; SMS when a phone was given) it first commits a `PENDING` `notification.notifications`
 row in its own transaction (via the injected `prisma`), calls the provider with
 `idempotencyKey = notification id`, then marks it `SENT` in the handler's transaction. A failed send

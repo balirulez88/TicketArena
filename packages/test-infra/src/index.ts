@@ -5,6 +5,7 @@ import { deleteStreams } from "./nats";
 import { createDatabaseFromTemplate, dropDatabase } from "./postgres";
 import type {} from "./provided-context";
 import { deleteRedisKeys } from "./redis";
+import { deleteUpstashKeys, upstashCommand } from "./upstash";
 
 export type { TestEnv } from "./env";
 export { loadTestEnv, parseTestEnv } from "./env";
@@ -49,6 +50,28 @@ export function setupTestRedis(): TestRedis {
   const prefix = `test:${randomBytes(4).toString("hex")}:`;
   afterAll(() => deleteRedisKeys(env.redisUrl, prefix));
   return { url: env.redisUrl, prefix };
+}
+
+export interface TestUpstash {
+  /** Upstash-compatible REST endpoint (Upstash itself, or the compose `redis-http` proxy). */
+  readonly url: string;
+  readonly token: string;
+  /** Every key this file writes must start with this prefix. */
+  readonly prefix: string;
+  /** Runs one raw command, e.g. to inspect keys an adapter wrote; rejects on an error reply. */
+  command(args: readonly (string | number)[]): Promise<unknown>;
+}
+
+export function setupTestUpstash(): TestUpstash {
+  const env = loadTestEnv();
+  const endpoint = { url: env.upstashRedisRestUrl, token: env.upstashRedisRestToken };
+  const prefix = `test:${randomBytes(4).toString("hex")}:`;
+  afterAll(() => deleteUpstashKeys(endpoint, prefix));
+  return {
+    ...endpoint,
+    prefix,
+    command: (args) => upstashCommand(endpoint, args),
+  };
 }
 
 export interface TestNats {

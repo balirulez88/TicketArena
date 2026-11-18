@@ -327,8 +327,9 @@ describe("AT-09: placeOrder and the sweeper on the same hold", () => {
   test("placeOrder first: an order, the hold is not expired and the sweeper never matches it", async () => {
     const { seatIds, hold } = await aliceHolds();
     const lock = await lockRowElsewhere("seats", seatIds[0] ?? "");
-    // placeOrder's instance reads a time before expiry; the sweeper's reads one after.
-    const placing = at(new Date(NOW.getTime() + ONE_MINUTE)).placeOrder(
+    // placeOrder's instance reads a time just before expiry; the sweeper's reads one after. The
+    // order's paymentDeadline + grace then lies past the sweeper's T, so the order stays pending.
+    const placing = at(new Date(hold.holdExpiresAt.getTime() - ONE_MINUTE)).placeOrder(
       alice,
       hold.id,
       contact,

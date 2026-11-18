@@ -96,7 +96,7 @@ describe("worker hold sweeper", () => {
           if (failFirst && calls === 1) {
             throw new Error("database unavailable");
           }
-          return { expiredHoldIds: [] };
+          return { expiredHoldIds: [], expiredOrderIds: [] };
         },
       },
     };
@@ -185,7 +185,11 @@ describe("parseWorkerEnv", () => {
 
   it("defaults the health port", () => {
     expect(
-      parseWorkerEnv({ DATABASE_URL: "postgresql://u@h/db", NATS_URL: "nats://h:4222" }).PORT,
+      parseWorkerEnv({
+        DATABASE_URL: "postgresql://u@h/db",
+        NATS_URL: "nats://h:4222",
+        REDIS_URL: "redis://h:6379",
+      }).PORT,
     ).toBe(8080);
   });
 });

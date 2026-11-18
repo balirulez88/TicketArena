@@ -30,8 +30,9 @@ export function createSweeperLoop({
     try {
       await booking.sweepExpired();
     } catch (error) {
-      // A database outage only delays expiry: lazy expiry in holdSeats still frees the seats.
-      logger.warn({ err: error }, "hold sweep failed; will retry");
+      // A database outage only delays expiry: lazy expiry in holdSeats still frees held seats,
+      // and an overdue order is expired by the next sweep that gets through.
+      logger.warn({ err: error }, "sweep failed; will retry");
     }
   }
 

@@ -50,7 +50,8 @@ below shows what is built.
 
 ## What exists today
 
-- Turborepo + pnpm monorepo: `apps/web`, `packages/db`, `packages/contracts`, `packages/booking`.
+- Turborepo + pnpm monorepo: `apps/web`, `apps/worker`, `packages/db`, `packages/contracts`,
+  `packages/booking`, `packages/messaging`, `packages/waiting-room`.
 - `apps/web`: Next.js App Router with an end-to-end tRPC tracer (`health.check`), validated
   server env (`parseServerEnv`), shadcn/ui tokens on Tailwind v4.
 - Guest identity: `proxy.ts` issues a signed `ta_session` cookie; `IdentityService` resolves a
@@ -59,14 +60,21 @@ below shows what is built.
 - `packages/db`: Prisma 7 on the Neon serverless adapter; the `outbox_events` table and the seeded catalog (venues, sections, rows, events,
   per-event seats). `events.list`, `events.get` and `seats.map` serve it. The `holds` table backs
   `booking.holdSeats` / `booking.getHold` / `booking.releaseHold` (`packages/booking`), which write
-  `seat.held` and `hold.released` outbox events; the worker's hold sweeper expires abandoned holds every 15 s and writes `hold.expired`; `orders` and `order_lines` back `booking.placeOrder` / `booking.getOrder`, which write
+  `seat.held` and `hold.released` outbox events; the worker's sweeper expires abandoned holds every 15 s and writes `hold.expired`, and expires unpaid orders at `paymentDeadline + 60 s` (`order.expired`, seats freed); `orders` and `order_lines` back `booking.placeOrder` / `booking.getOrder`, which write
   `order.placed`; envelope schemas live in `packages/contracts`.
-- `packages/messaging` and `apps/worker`: the `MessageBus` port with its JetStream adapter, the outbox relay (250 ms, batch of 100), the consumer runner, the hold sweeper and the worker app with `/health`.
+- `packages/messaging` and `apps/worker`: the `MessageBus` port with its JetStream adapter, the outbox relay (250 ms, batch of 100), the consumer runner, the sweeper, the waiting-room admission ticker and reaper, and the worker app with `/health`.
+- `packages/waiting-room`: `QueueService` with the `QueueStore` port, its node-redis and Upstash
+  REST adapters (the same atomic Lua scripts and key layout, configurable key prefix, one shared
+  contract suite run against both) and the schedule `AdmissionPolicy`; served as
+  `queue.join` / `queue.status` / `queue.leave` over `REDIS_URL` (node-redis; choosing Upstash in
+  production belongs to deployment). The worker's admission ticker (1 s) and slot reaper (15 s)
+  run on the same store. See
+  [architecture/waiting-room](architecture/waiting-room.md).
 - Structured logging: each app injects a `pino` logger; booking, the relay and the consumer runner log with a child logger bound to `correlationId`/`causationId` (plus `holdId`, `orderId`, `paymentId`). See [architecture/](architecture/index.md#logging-and-ids).
 - Quality gate: Biome (warnings fail), strict `tsc`, Vitest, enforced by `ralph-loop.sh`.
 - Execution drivers: `ralph-loop.sh` (default) and the opt-in lead driver (`RALPH_DRIVER=lead`, [ADR 0017](adr/0017-opt-in-lead-driver.md)); the host judges both the same way. A candidate rejected only for a ticket defect can be replayed on the amended base by `scripts/ralph-replay.mjs` ([ADR 0018](adr/0018-host-side-replay-of-a-rejected-candidate.md)).
 
-A buyer can hold up to 6 seats per event in one all-or-nothing action (the limit counts held, in-checkout and sold seats, enforced under a per-buyer advisory lock) release a hold to free its seats at once (an abandoned hold frees them after 10 minutes: an expired hold's seats count as free for anyone, and the sweeper expires it), and place an order for the hold; the mock Payment service captures it and the booking saga confirms the order (`CONFIRMED`, seats `SOLD`, ledger `APPLIED`) and the mock Notification service records one confirmation per channel. Concurrent holds on one seat yield exactly one winner; visibly taken seats are refused by a lock-free snapshot, and per-event `hold_ok`/`seat_unavailable`/`race_lost` counters go to Redis best-effort. Failures, late payments and refunds are still to come; no queue yet. Remaining features arrive as tickets split from the
+A buyer can hold up to 6 seats per event in one all-or-nothing action (the limit counts held, in-checkout and sold seats, enforced under a per-buyer advisory lock) release a hold to free its seats at once (an abandoned hold frees them after 10 minutes: an expired hold's seats count as free for anyone, and the sweeper expires it), and place an order for the hold (idempotent per checkout key: a retried, concurrent or later replayed checkout yields the same single order, and a key reused for a different request is `IDEMPOTENCY_KEY_REUSED`); the mock Payment service captures it and the booking saga confirms the order (`CONFIRMED`, seats `SOLD`, ledger `APPLIED`) and the mock Notification service records one confirmation per channel. An order never paid expires at its payment deadline plus a 60 s settlement grace: its in-checkout seats are freed in that same transaction (never earlier, not even when the hold's own expiry passes) and the buyer gets an expiry email. Concurrent holds on one seat yield exactly one winner; visibly taken seats are refused by a lock-free snapshot, and per-event `hold_ok`/`seat_unavailable`/`race_lost` counters go to Redis best-effort. A buyer can join an event's waiting room, see their position and estimated wait, keep their position on a refresh or re-join, and leave; buyers who join before the on-sale get random positions ahead of everyone who joins later, who queue in arrival order, and outside the queue window `join` reports immediate admission eligibility. The worker admits buyers from the queue head every second, at most `admitRate` per second (burst `admitRate`) and never beyond `maxActive` active shoppers per event (worker configuration, defaults 10 and 100); an admitted buyer's `queue.status` reports `ADMITTED` and keeps its slot alive, and the slot frees, revoking the admission, when the buyer leaves, places an order, or is reaped (idle over 90 s or admission older than 30 min). The signed admission token and gating `holdSeats` with it are not built yet, so nothing is gated by the queue. Payment failures, late payments and refunds are still to come. Remaining features arrive as tickets split from the
 [MVP spec](specs/ticketarena-mvp.md) by `/to-tickets`.
 
 ## Decisions

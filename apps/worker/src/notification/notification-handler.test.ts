@@ -54,8 +54,23 @@ function orderConfirmed(contact: { email: string; phone?: string }) {
   };
 }
 
+function orderExpired(contact: { email: string; phone?: string }) {
+  const orderId = randomUUID();
+  return {
+    id: randomUUID(),
+    type: "order.expired",
+    version: 1,
+    occurredAt: "2027-03-01T12:06:00.000Z",
+    correlationId: randomUUID(),
+    causationId: null,
+    holdId: randomUUID(),
+    orderId,
+    payload: { orderId, contact },
+  };
+}
+
 async function deliver(
-  envelope: ReturnType<typeof orderConfirmed>,
+  envelope: ReturnType<typeof orderConfirmed> | ReturnType<typeof orderExpired>,
   provider: MockNotificationProvider = createMockNotificationProvider(),
   times = 1,
 ) {
@@ -144,5 +159,35 @@ describe("Notification handler", () => {
     const rows = await prisma.notification.findMany({ where: { sourceEventId: envelope.id } });
     expect(rows).toMatchObject([{ id: pending[0]?.id, status: "SENT", sentAt: NOW }]);
     expect(provider.deliveries()).toMatchObject([{ idempotencyKey: pending[0]?.id }]);
+  });
+
+  it("records an expiry email for order.expired", async () => {
+    const envelope = orderExpired({ email: "buyer@example.com" });
+
+    const provider = await deliver(envelope);
+
+    const rows = await prisma.notification.findMany({ where: { sourceEventId: envelope.id } });
+    expect(rows).toMatchObject([
+      {
+        channel: "EMAIL",
+        recipient: "buyer@example.com",
+        template: "order-expiry",
+        status: "SENT",
+        sentAt: NOW,
+      },
+    ]);
+    expect(provider.deliveries()).toMatchObject([
+      { idempotencyKey: rows[0]?.id, channel: "EMAIL", template: "order-expiry" },
+    ]);
+  });
+
+  it("records the confirmation with the order-confirmation template", async () => {
+    const envelope = orderConfirmed({ email: "buyer@example.com" });
+
+    await deliver(envelope);
+
+    expect(
+      await prisma.notification.findMany({ where: { sourceEventId: envelope.id } }),
+    ).toMatchObject([{ template: "order-confirmation" }]);
   });
 });

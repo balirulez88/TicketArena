@@ -20,6 +20,8 @@ function caller() {
     db: db(),
     logger: silentLogger,
     metrics: () => ({ increment: async () => undefined }),
+    queueStore: () => Promise.reject(new Error("the queue is not used here")),
+    random: { next: () => 0 },
   });
 }
 

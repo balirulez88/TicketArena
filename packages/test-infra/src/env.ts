@@ -6,7 +6,15 @@ export interface TestEnv {
   readonly databaseUrl: string;
   readonly redisUrl: string;
   readonly natsUrl: string;
+  /** Upstash-compatible REST endpoint; defaults to the `redis-http` service in docker-compose.yml. */
+  readonly upstashRedisRestUrl: string;
+  readonly upstashRedisRestToken: string;
 }
+
+// Defaults match docker-compose.yml, so CI (which starts the compose services) needs no extra
+// variables for the Upstash contract suites.
+const DEFAULT_UPSTASH_REDIS_REST_URL = "http://localhost:8079";
+const DEFAULT_UPSTASH_REDIS_REST_TOKEN = "ticketarena";
 
 const REQUIRED = ["TEST_DATABASE_URL", "TEST_REDIS_URL", "TEST_NATS_URL"] as const;
 
@@ -14,6 +22,8 @@ const testEnvSchema = z.object({
   TEST_DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
   TEST_REDIS_URL: z.url({ protocol: /^rediss?$/ }),
   TEST_NATS_URL: z.url({ protocol: /^(nats|tls)$/ }),
+  TEST_UPSTASH_REDIS_REST_URL: z.url({ protocol: /^https?$/ }).optional(),
+  TEST_UPSTASH_REDIS_REST_TOKEN: z.string().min(1).optional(),
 });
 
 const HINT =
@@ -42,6 +52,9 @@ export function parseTestEnv(env: Readonly<Record<string, string | undefined>>):
     databaseUrl: result.data.TEST_DATABASE_URL,
     redisUrl: result.data.TEST_REDIS_URL,
     natsUrl: result.data.TEST_NATS_URL,
+    upstashRedisRestUrl: result.data.TEST_UPSTASH_REDIS_REST_URL ?? DEFAULT_UPSTASH_REDIS_REST_URL,
+    upstashRedisRestToken:
+      result.data.TEST_UPSTASH_REDIS_REST_TOKEN ?? DEFAULT_UPSTASH_REDIS_REST_TOKEN,
   };
 }
 

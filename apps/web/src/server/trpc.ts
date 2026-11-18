@@ -1,11 +1,13 @@
 import type { BookingMetrics } from "@ticketarena/booking";
 import type { Logger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
+import type { QueueStore, Random } from "@ticketarena/waiting-room";
 import { initTRPC } from "@trpc/server";
 import superjson from "superjson";
 import { parseDatabaseEnv, parseSessionEnv } from "./env";
 import { type CookieReader, createIdentityService, type Principal } from "./identity/identity";
 import { createWebLogger } from "./logger";
+import { createLazyQueueStore } from "./queue-store";
 import { createLazyMetrics } from "./upstash-metrics";
 
 /**
@@ -25,6 +27,13 @@ export interface TRPCContext {
    * procedures that record metrics; throws when that configuration is invalid.
    */
   readonly metrics: () => BookingMetrics;
+  /**
+   * The waiting-room queue store, connected on first call and shared per process, so `REDIS_URL`
+   * is read only by the queue procedures; rejects when that configuration is invalid.
+   */
+  readonly queueStore: () => Promise<QueueStore>;
+  /** Randomness for pre-queue positions; injected so tests can script it. */
+  readonly random: Random;
 }
 
 // One client per server process: the Neon driver pools internally, and a fresh client per
@@ -43,12 +52,24 @@ const logger = createWebLogger();
 
 const metrics = createLazyMetrics({ readEnv: () => process.env, logger });
 
+const queueStore = createLazyQueueStore({ readEnv: () => process.env, logger, prefix: "" });
+
+const random: Random = { next: () => Math.random() };
+
 export async function createTRPCContext({ req }: { req: Request }): Promise<TRPCContext> {
   const identity = createIdentityService({
     sessionSecret: parseSessionEnv(process.env).SESSION_SECRET,
   });
   const principal = await identity.resolve(cookieReader(req.headers.get("cookie")));
-  return { now: () => new Date(), principal, db: database(), logger, metrics };
+  return {
+    now: () => new Date(),
+    principal,
+    db: database(),
+    logger,
+    metrics,
+    queueStore,
+    random,
+  };
 }
 
 // Parsed by hand: the tRPC fetch adapter hands us a plain Request, not Next's cookie store, and

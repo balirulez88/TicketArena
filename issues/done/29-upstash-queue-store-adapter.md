@@ -4,7 +4,9 @@
 
 **Blocked by:** 28
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-18 on devflow/run-202611181233 (run 202611181233)
 
 **Status reason:** back in scope 2026-11-18: deployment (38) runs the waiting room on Upstash
 

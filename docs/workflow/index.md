@@ -75,7 +75,9 @@ warnings:
 
 ## Integration test infrastructure
 
-Integration tests run against real **Postgres 17, Redis 7 and NATS JetStream**, never mocks.
+Integration tests run against real **Postgres 17, Redis 7 and NATS JetStream**, never mocks, plus
+an Upstash-compatible REST endpoint (serverless-redis-http in front of the same Redis) for the
+Upstash adapters.
 
 | Where         | Services come from                                        | `TEST_*` variables come from   |
 | ------------- | --------------------------------------------------------- | ------------------------------ |
@@ -84,6 +86,9 @@ Integration tests run against real **Postgres 17, Redis 7 and NATS JetStream**, 
 | Ralph sandbox | native processes started by `scripts/sandbox-services.sh` | the entrypoint                 |
 - `TEST_DATABASE_URL`, `TEST_REDIS_URL`, `TEST_NATS_URL` are required. A missing one **fails**
   the run with a message naming it; integration tests are never skipped.
+- `TEST_UPSTASH_REDIS_REST_URL` / `TEST_UPSTASH_REDIS_REST_TOKEN` are optional and default to the
+  compose `redis-http` service (`http://localhost:8079`, token `ticketarena`), so CI needs no
+  extra variables. The frozen Ralph sandbox does not run this service.
 - `@ticketarena/test-infra` (test-only package, the one place test code reads the environment)
   provides the isolation helpers; packages with integration tests register its global setup.
 - **Isolation per test file**, so files run in parallel:
@@ -92,11 +97,13 @@ Integration tests run against real **Postgres 17, Redis 7 and NATS JetStream**, 
     committed migration SQL; clones and template builds are serialized by a Postgres advisory
     lock. The clone is dropped after the file.
   - `setupTestRedis()`: a unique key prefix, deleted after the file.
+  - `setupTestUpstash()`: the REST endpoint, its token, a unique key prefix (deleted through the
+    endpoint after the file) and `command(args)` for raw commands.
   - `setupTestNats()`: a unique stream-name prefix and root subject token; streams deleted after.
 - Versions are pinned identically in `docker-compose.yml` and the sandbox `Dockerfile`; NATS
   uses one shared config (`infra/nats/nats.conf`, JetStream with `sync_interval: always`).
 - Compose publishes Postgres on host port **55432**, not 5432, so a natively installed Postgres
-  cannot shadow it. Redis and NATS keep their default ports.
+  cannot shadow it. Redis and NATS keep their default ports; the REST proxy is on **8079**.
 - Stale template databases from old migration sets accumulate harmlessly; `pnpm infra:reset`
   wipes all local service data.
 

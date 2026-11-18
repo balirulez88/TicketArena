@@ -180,7 +180,7 @@ describe("QueueService admission (ticker, slots, reaper)", () => {
     const clock = { now: AFTER_ON_SALE };
     const { event, service } = await queued(clock, 4);
 
-    const admitted = await service.admitTick(event.id, LIMITS);
+    const admitted = await service.admitTick(event, LIMITS);
 
     expect(admitted.map((admission) => admission.sessionId)).toEqual(["s1", "s2", "s3"]);
     expect(await service.status(event.id, "s1")).toEqual({ status: "ADMITTED" });
@@ -191,6 +191,27 @@ describe("QueueService admission (ticker, slots, reaper)", () => {
     }
   });
 
+  test("admits no one before onSaleAt, then admits the pre-queue in its random order", async () => {
+    // Admitting during the pre-queue would serve early arrivals first and make the random
+    // pre-queue order (ADR 0008) meaningless.
+    const event = schedule();
+    const clock = { now: BEFORE_ON_SALE };
+    const service = serviceAt(clock, scriptedRandom([0.9, 0.1, 0.5]));
+    for (const sessionId of ["p1", "p2", "p3"]) {
+      await service.join(event, sessionId);
+    }
+
+    expect(await service.admitTick(event, LIMITS)).toEqual([]);
+    clock.now = new Date(ON_SALE.getTime() - 1);
+    expect(await service.admitTick(event, LIMITS)).toEqual([]);
+    expect(await service.counts(event.id)).toEqual({ queued: 3, active: 0 });
+
+    clock.now = ON_SALE;
+    const admitted = await service.admitTick(event, LIMITS);
+
+    expect(admitted.map((admission) => admission.sessionId)).toEqual(["p2", "p3", "p1"]);
+  });
+
   test("AT-38: one-second ticks never admit more than admitRate per tick or beyond maxActive", async () => {
     const clock = { now: AFTER_ON_SALE };
     const { event, service } = await queued(clock, 20);
@@ -198,9 +219,9 @@ describe("QueueService admission (ticker, slots, reaper)", () => {
     const perTick: number[] = [];
     for (let second = 0; second < 4; second += 1) {
       clock.now = atOffset(second * 1000);
-      perTick.push((await service.admitTick(event.id, LIMITS)).length);
+      perTick.push((await service.admitTick(event, LIMITS)).length);
       // Ticks in the same second find the bucket empty.
-      perTick.push((await service.admitTick(event.id, LIMITS)).length);
+      perTick.push((await service.admitTick(event, LIMITS)).length);
     }
 
     expect(perTick).toEqual([3, 0, 2, 0, 0, 0, 0, 0]);
@@ -210,7 +231,7 @@ describe("QueueService admission (ticker, slots, reaper)", () => {
   test("status polls heartbeat the slot, so a polling buyer is not reaped as idle", async () => {
     const clock = { now: AFTER_ON_SALE };
     const { event, service } = await queued(clock, 2);
-    await service.admitTick(event.id, { admitRate: 2, maxActive: 5 });
+    await service.admitTick(event, { admitRate: 2, maxActive: 5 });
 
     clock.now = atOffset(60_000);
     await service.status(event.id, "s1");
@@ -224,7 +245,7 @@ describe("QueueService admission (ticker, slots, reaper)", () => {
   test("AT-39: reaping frees a slot idle for over 90s and revokes its admission", async () => {
     const clock = { now: AFTER_ON_SALE };
     const { event, service } = await queued(clock, 2);
-    const [idle, polling] = await service.admitTick(event.id, { admitRate: 2, maxActive: 5 });
+    const [idle, polling] = await service.admitTick(event, { admitRate: 2, maxActive: 5 });
     clock.now = atOffset(30_000);
     await service.status(event.id, "s2");
 
@@ -242,7 +263,7 @@ describe("QueueService admission (ticker, slots, reaper)", () => {
   test("AT-39: reaping frees a slot whose 30-minute admission expired, even while it polls", async () => {
     const clock = { now: AFTER_ON_SALE };
     const { event, service } = await queued(clock, 1);
-    const [admission] = await service.admitTick(event.id, LIMITS);
+    const [admission] = await service.admitTick(event, LIMITS);
 
     clock.now = atOffset(ADMISSION_TTL_MS - 1);
     await service.status(event.id, "s1");
@@ -257,14 +278,14 @@ describe("QueueService admission (ticker, slots, reaper)", () => {
   test("AT-39: leave frees the slot and revokes the admission, making room for the next buyer", async () => {
     const clock = { now: AFTER_ON_SALE };
     const { event, service } = await queued(clock, 3);
-    const [admission] = await service.admitTick(event.id, { admitRate: 5, maxActive: 2 });
+    const [admission] = await service.admitTick(event, { admitRate: 5, maxActive: 2 });
 
     expect(await service.leave(event.id, "s1")).toEqual({ left: true });
 
     expect(await service.isAdmitted(event.id, admission?.jti ?? "")).toBe(false);
     expect(await service.status(event.id, "s1")).toEqual({ status: "NOT_QUEUED" });
     clock.now = atOffset(1000);
-    expect(await service.admitTick(event.id, { admitRate: 5, maxActive: 2 })).toEqual([
+    expect(await service.admitTick(event, { admitRate: 5, maxActive: 2 })).toEqual([
       expect.objectContaining({ sessionId: "s3" }),
     ]);
   });
@@ -272,7 +293,7 @@ describe("QueueService admission (ticker, slots, reaper)", () => {
   test("AT-39: releaseSlot (order placed) frees the slot and revokes the admission", async () => {
     const clock = { now: AFTER_ON_SALE };
     const { event, service } = await queued(clock, 1);
-    const [admission] = await service.admitTick(event.id, LIMITS);
+    const [admission] = await service.admitTick(event, LIMITS);
 
     expect(await service.releaseSlot(event.id, "s1")).toBe(true);
     expect(await service.releaseSlot(event.id, "s1")).toBe(false);

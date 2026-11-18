@@ -203,6 +203,48 @@ export function describeQueueStoreContract(
       expect(await store.counts(eventId)).toEqual({ queued: 0, active: 0 });
     });
 
+    test("leave also frees the member's slot and revokes its jti", async () => {
+      const store = storeWith("leave-slot:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 2);
+      const [admission] = await store.admit(eventId, request(T0, 1, 10));
+
+      expect(await store.leave(eventId, "m1")).toBe(true);
+      expect(await store.leave(eventId, "m1")).toBe(false);
+      expect(await store.isAdmitted(eventId, admission?.jti ?? "", T0)).toBe(false);
+      expect(await store.heartbeat(eventId, "m1", T0)).toBe(false);
+      expect(await store.counts(eventId)).toEqual({ queued: 1, active: 0 });
+      expect(await store.leave(eventId, "m2")).toBe(true);
+    });
+
+    test("a leave racing a ticker on another connection never leaves the member admitted", async () => {
+      // Leaving is one script: whichever runs first, the member ends with no queue entry, no
+      // slot and no valid jti. Two separate commands would let the ticker admit in between.
+      const { stores, close } = await harness.independentStores(`${filePrefix}leave-race:`, 2);
+      const [leaver, ticker] = stores;
+      if (leaver === undefined || ticker === undefined) {
+        throw new Error("independentStores returned fewer than two stores");
+      }
+      try {
+        for (let round = 0; round < 25; round += 1) {
+          const eventId = randomUUID();
+          await leaver.join(eventId, "m", { kind: "SEQUENCE" });
+
+          const [, admitted] = await Promise.all([
+            leaver.leave(eventId, "m"),
+            ticker.admit(eventId, request(T0, 1, 10)),
+          ]);
+
+          expect(await leaver.counts(eventId)).toEqual({ queued: 0, active: 0 });
+          for (const admission of admitted) {
+            expect(await leaver.isAdmitted(eventId, admission.jti, T0)).toBe(false);
+          }
+        }
+      } finally {
+        close();
+      }
+    });
+
     test("reap frees idle slots and slots whose admission expired, revoking their jtis", async () => {
       const store = storeWith("reap:");
       const eventId = randomUUID();

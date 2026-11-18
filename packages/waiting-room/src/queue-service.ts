@@ -41,8 +41,11 @@ export interface QueueService {
   leave(eventId: string, sessionId: string): Promise<{ readonly left: boolean }>;
   /** Refreshes the slot's `lastSeenAt`; `true` when the session holds a slot. */
   heartbeat(eventId: string, sessionId: string): Promise<boolean>;
-  /** One admission tick (the worker runs it every second): admits while the limits allow. */
-  admitTick(eventId: string, limits: AdmissionLimits): Promise<readonly Admission[]>;
+  /**
+   * One admission tick (the worker runs it every second): admits while the limits allow, and no
+   * one before the event's `onSaleAt`.
+   */
+  admitTick(event: EventSchedule, limits: AdmissionLimits): Promise<readonly Admission[]>;
   /** Frees slots idle for over 90 s or with an expired admission; returns the freed sessions. */
   reap(eventId: string): Promise<readonly string[]>;
   /** Frees the session's slot and revokes its admission (order placed); `true` when it held one. */
@@ -95,21 +98,23 @@ export function createQueueService(deps: QueueServiceDeps): QueueService {
     },
 
     async leave(eventId, sessionId) {
-      const [wasQueued, heldSlot] = await Promise.all([
-        deps.store.leave(eventId, sessionId),
-        deps.store.releaseSlot(eventId, sessionId),
-      ]);
-      return { left: wasQueued || heldSlot };
+      return { left: await deps.store.leave(eventId, sessionId) };
     },
 
     heartbeat(eventId, sessionId) {
       return deps.store.heartbeat(eventId, sessionId, deps.clock.now());
     },
 
-    admitTick(eventId, limits) {
+    async admitTick(event, limits) {
+      const now = deps.clock.now();
+      // The pre-queue is ordered at random so arriving early gains nothing (ADR 0008); admitting
+      // before onSaleAt would serve it first come, first served, so nobody is admitted until then.
+      if (now.getTime() < event.onSaleAt.getTime()) {
+        return [];
+      }
       // A tick admits at most the burst, so one fresh id per possible admission is enough.
-      return deps.store.admit(eventId, {
-        now: deps.clock.now(),
+      return deps.store.admit(event.id, {
+        now,
         admitRate: limits.admitRate,
         maxActive: limits.maxActive,
         admissionTtlMs: ADMISSION_TTL_MS,

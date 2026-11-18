@@ -41,11 +41,11 @@ afterAll(async () => {
 
 /**
  * A queue on its own key namespace with `count` buyers queued for the demo event, at a clock the
- * test moves (it starts a minute after the on-sale, inside the queue window).
+ * test moves (by default it starts a minute after the on-sale, inside the queue window).
  */
-async function demoQueue(count: number) {
+async function demoQueue(count: number, sinceOnSaleMs = 60_000) {
   const event = await prisma.event.findFirstOrThrow({ where: { demo: true } });
-  const clock = { now: new Date(event.onSaleAt.getTime() + 60_000) };
+  const clock = { now: new Date(event.onSaleAt.getTime() + sinceOnSaleMs) };
   const queue = createQueueService({
     store: createRedisQueueStore(redisClient, { prefix: `${redis.prefix}${randomUUID()}:` }),
     policy: createScheduleAdmissionPolicy(),
@@ -57,7 +57,7 @@ async function demoQueue(count: number) {
   for (let index = 1; index <= count; index += 1) {
     await queue.join(event, `buyer-${index}`);
   }
-  return { eventId: event.id, clock, queue };
+  return { event, eventId: event.id, clock, queue };
 }
 
 function later(clock: { now: Date }, ms: number) {
@@ -115,6 +115,21 @@ describe("worker admission ticker", () => {
     });
   });
 
+  it("admits no one from a pre-queue before the event's onSaleAt", async () => {
+    const { eventId, clock, queue } = await demoQueue(3, -60_000);
+
+    await withWorker(queue, { admitRate: 5, maxActive: 5 }, async () => {
+      // Several ticks run while the clock stands a minute before the on-sale.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(await queue.counts(eventId)).toEqual({ queued: 3, active: 0 });
+
+      later(clock, 60_000);
+      await expect
+        .poll(() => queue.counts(eventId), { timeout: 10_000 })
+        .toEqual({ queued: 0, active: 3 });
+    });
+  });
+
   it("keeps ticking after a failed tick", async () => {
     let ticks = 0;
     const failingOnce: Pick<QueueService, "admitTick" | "reap"> = {
@@ -165,8 +180,8 @@ describe("worker admission ticker", () => {
 
 describe("worker reaper", () => {
   it("AT-39: frees a slot idle for over 90 s and revokes its admission", async () => {
-    const { eventId, clock, queue } = await demoQueue(2);
-    const admitted = await queue.admitTick(eventId, { admitRate: 2, maxActive: 2 });
+    const { event, eventId, clock, queue } = await demoQueue(2);
+    const admitted = await queue.admitTick(event, { admitRate: 2, maxActive: 2 });
     later(clock, 60_000);
     await queue.heartbeat(eventId, "buyer-2");
     later(clock, 31_000);

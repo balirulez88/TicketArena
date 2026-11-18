@@ -40,8 +40,24 @@ end
 return redis.call('ZRANK', KEYS[1], ARGV[1])
 `;
 
-// KEYS: queue. ARGV: member. Returns 1 when the member was queued.
-export const LEAVE_SCRIPT = "return redis.call('ZREM', KEYS[1], ARGV[1])";
+// Leaving the queue, freeing the slot and revoking the jti are one step. As separate commands
+// (over Upstash REST, separate HTTP requests in no fixed order) the ticker could pop the member
+// between them and leave it admitted after it left.
+// KEYS: queue, active, admission, admitted. ARGV: member.
+// Returns 1 when the member was queued or held a slot.
+export const LEAVE_SCRIPT = `
+local queued = redis.call('ZREM', KEYS[1], ARGV[1])
+local held = redis.call('ZREM', KEYS[2], ARGV[1])
+local jti = redis.call('HGET', KEYS[3], ARGV[1])
+if jti then
+  redis.call('HDEL', KEYS[3], ARGV[1])
+  redis.call('ZREM', KEYS[4], jti)
+end
+if queued + held > 0 then
+  return 1
+end
+return 0
+`;
 
 // Refill, the maxActive check, the pop from the head and the slot writes are one script, so
 // concurrent tickers (several workers, or a slow tick overlapping the next) share one bucket and
@@ -196,7 +212,9 @@ export function createScriptedQueueStore(
     position,
 
     async leave(eventId, member) {
-      return toInteger(await run("leave", [keysOf(eventId).queue], [member]), "leave") === 1;
+      const keys = keysOf(eventId);
+      const reply = await run("leave", [keys.queue, ...slotKeys(eventId)], [member]);
+      return toInteger(reply, "leave") === 1;
     },
 
     async admit(eventId, request) {

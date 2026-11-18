@@ -33,7 +33,10 @@ export interface QueueStore {
   join(eventId: string, member: string, score: JoinScore): Promise<number>;
   /** The member's position, or `null` when it is not queued. */
   position(eventId: string, member: string): Promise<number | null>;
-  /** Removes the member; `true` when it was queued. */
+  /**
+   * Removes the member from the queue, frees its slot and revokes its admission `jti`, in one
+   * atomic step; `true` when it was queued or held a slot.
+   */
   leave(eventId: string, member: string): Promise<boolean>;
   /**
    * Moves members from the queue head into the active set while the event's token bucket and

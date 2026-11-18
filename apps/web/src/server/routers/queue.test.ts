@@ -172,7 +172,8 @@ describe("admission slots", () => {
   async function admitted(eventId: string, now: Date, principal: Principal) {
     await caller(principal, now).queue.join({ eventId });
     const ticker = queueServiceAt(now);
-    const [admission] = await ticker.admitTick(eventId, { admitRate: 1, maxActive: 10 });
+    const event = await db().event.findUniqueOrThrow({ where: { id: eventId } });
+    const [admission] = await ticker.admitTick(event, { admitRate: 1, maxActive: 10 });
     return { ticker, jti: admission?.jti ?? "" };
   }
 

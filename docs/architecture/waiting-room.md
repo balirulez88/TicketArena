@@ -16,7 +16,7 @@ gating `holdSeats` with it arrive with ticket 31; until then nothing is gated by
 
 | Export                                     | Role                                                                                                                                                |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QueueService`                             | `join`, `status`, `leave`, `heartbeat`, `admitTick(eventId, limits)`, `reap`, `releaseSlot`, `isAdmitted(eventId, jti)`, `counts`                   |
+| `QueueService`                             | `join`, `status`, `leave`, `heartbeat`, `admitTick(event, limits)`, `reap`, `releaseSlot`, `isAdmitted(eventId, jti)`, `counts`                     |
 | `QueueStore` (port)                        | `join`, `position` (1-based), `leave`, `admit`, `heartbeat`, `releaseSlot`, `reap`, `isAdmitted`, `counts`                                          |
 | `AdmissionLimits`                          | `{ admitRate, maxActive }` per tick; the worker supplies them from its configuration                                                                |
 | `SLOT_IDLE_TIMEOUT_MS`, `ADMISSION_TTL_MS` | 90 s idle before reaping; 30 min admission validity from admission (fixed)                                                                          |
@@ -29,8 +29,8 @@ gating `holdSeats` with it arrive with ticket 31; until then nothing is gated by
 `join` results: outside the queue window `{ status: "ADMISSIBLE" }` (immediate admission
 eligibility; nothing is queued), else `{ status: "QUEUED", position, etaSeconds }`. `status`
 heartbeats the session's slot and returns `ADMITTED` when it holds one, else `QUEUED` with position
-and ETA, or `NOT_QUEUED`. `leave` leaves the queue and frees the slot; `{ left }` is true if
-either happened. ETA = `ceil(position / admitRatePerSecond)`; the web app assumes 10 admissions
+and ETA, or `NOT_QUEUED`. `leave` leaves the queue and frees the slot in one atomic step; `{ left }` is true if
+either happened. `admitTick` admits no one before the event's `onSaleAt`. ETA = `ceil(position / admitRatePerSecond)`; the web app assumes 10 admissions
 per second (the worker's default `ADMIT_RATE_PER_SECOND`) and does not read the worker's setting.
 `counts(eventId)` returns `{ queued, active }` (queue length and active shoppers) for the
 dashboard.
@@ -60,7 +60,9 @@ data. Times come from the injected clock (epoch ms), never Redis `TIME`.
 
 - **join**: if the member has no score, its score is the given pre-queue value, or
   `1 + INCR seq` for a later join; then `ZADD NX`; returns the member's rank.
-- **leave**: `ZREM`; returns whether the member was queued.
+- **leave**: `ZREM` from the queue, then frees the slot and revokes its `jti` like
+  **releaseSlot**, in one script, so the ticker cannot admit the member between the two; returns
+  whether the member was queued or held a slot.
 - **admit**: refills the bucket by `elapsed × admitRate / 1000` up to the burst `admitRate` (a
   bucket seen for the first time is full; a clock that steps back refills nothing), then admits
   `min(floor(tokens), maxActive − active, jtis supplied)` members with `ZPOPMIN`: each enters
@@ -106,6 +108,8 @@ CI start. Adapter-specific tests cover the stored key layout and scores, and for
 - **Admission is bounded (AT-38):** admissions never exceed `admitRate` per second (burst
   `admitRate`) nor `maxActive` active slots, even with several tickers (workers) at once: the
   refill, the cap check and the pop are one script against one bucket.
+- **No admission before the on-sale:** the ticker admits no one before the event's `onSaleAt`, so
+  the randomized pre-queue is admitted in its random order, not in order of arrival.
 - **A freed slot revokes its admission (AT-39):** leave, order placed and reaping remove the slot
   and its `jti` in the same script, so no valid `jti` outlives its slot.
 - **Redis decides only order:** losing the queue degrades fairness, never seat correctness

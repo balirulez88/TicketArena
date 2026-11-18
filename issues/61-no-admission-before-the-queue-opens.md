@@ -10,4 +10,5 @@
 - [ ] `join` at exactly `queueOpensAt` queues the buyer in the pre-queue; `join` at or after `queueClosesAt` still answers `ADMISSIBLE`.
 - [ ] `queue.join` returns the `NOT_OPEN` result to the client (not an error), so the page can show when the queue opens.
 - [ ] `holdSeats` before the event's `onSaleAt` fails with a named domain error and changes nothing; one millisecond after `onSaleAt` it succeeds as before. The tRPC mapping is documented with the other hold errors.
+- [ ] The admission ticker admits no one before `onSaleAt` (already fixed in PR #9 with a regression test in `queue-service.test.ts` and `apps/worker/src/admission.test.ts`); keep both tests green and state the invariant in the spec.
 - [ ] The spec's Waiting room section says the queue admits immediately only after it closes, and before it opens `join` answers `NOT_OPEN`.

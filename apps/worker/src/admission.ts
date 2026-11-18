@@ -1,6 +1,6 @@
 import type { Logger } from "@ticketarena/contracts";
 import type { PrismaClient } from "@ticketarena/db";
-import type { AdmissionLimits, QueueService } from "@ticketarena/waiting-room";
+import type { AdmissionLimits, EventSchedule, QueueService } from "@ticketarena/waiting-room";
 import { createPeriodicLoop, type PeriodicLoop } from "./periodic-loop.js";
 
 export interface AdmissionLoopsOptions {
@@ -19,21 +19,24 @@ export interface AdmissionLoopsOptions {
  */
 export function createAdmissionLoops(options: AdmissionLoopsOptions): readonly PeriodicLoop[] {
   // Events are few and the catalog is seeded, so each pass simply reads all of them; an event
-  // with an empty queue costs one script call and spends no tokens.
-  const eachEvent = (action: (eventId: string) => Promise<unknown>) => async () => {
-    const events = await options.prisma.event.findMany({ select: { id: true } });
-    await Promise.all(events.map((event) => action(event.id)));
+  // with an empty queue costs one script call and spends no tokens. The schedule comes along
+  // because the ticker admits no one before an event's onSaleAt.
+  const eachEvent = (action: (event: EventSchedule) => Promise<unknown>) => async () => {
+    const events = await options.prisma.event.findMany({
+      select: { id: true, onSaleAt: true, queueOpensAt: true, queueClosesAt: true },
+    });
+    await Promise.all(events.map((event) => action(event)));
   };
 
   return [
     createPeriodicLoop({
-      task: eachEvent((eventId) => options.queue.admitTick(eventId, options.limits)),
+      task: eachEvent((event) => options.queue.admitTick(event, options.limits)),
       intervalMs: options.admitIntervalMs,
       logger: options.logger,
       failureMessage: "admission tick failed; will retry",
     }),
     createPeriodicLoop({
-      task: eachEvent((eventId) => options.queue.reap(eventId)),
+      task: eachEvent((event) => options.queue.reap(event.id)),
       intervalMs: options.reapIntervalMs,
       logger: options.logger,
       failureMessage: "slot reaping failed; will retry",

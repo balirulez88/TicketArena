@@ -64,7 +64,7 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
     tx: TransactionClient,
     message: ReceivedMessage,
     { emit }: HandlerContext,
-  ): Promise<void> {
+  ): Promise<undefined> {
     const placed = orderPlacedEnvelope.parse(JSON.parse(message.data));
     const order = placed.payload;
     const capturedAt = deps.clock.now();

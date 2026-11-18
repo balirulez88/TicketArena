@@ -6,12 +6,12 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** deferred
+**Status:** ready-for-agent
 
-**Status reason:** hardening, after the MVP (scope cut 2026-11-18)
+**Status reason:** back in scope 2026-11-18: the saga chain (17) needs payment latency outside the transaction
 
 - [ ] TD-051: with a configured latency longer than the runner's interactive-transaction timeout (Prisma's default 5 s), an `order.placed` is captured exactly once and `payment.succeeded` is emitted once, on the first delivery (integration test against real Postgres and NATS with a real sleep, not the sleep stub).
 - [ ] TD-051: no database transaction is open while the provider latency elapses (a test observes that the handler's transaction starts only after the wait).
 - [ ] A redelivered `order.placed` whose payment was already captured is still a duplicate: the latency step never causes a second capture or a second `payment.succeeded`.
 - [ ] Where the latency now happens and why (outside the transaction, before dedupe-and-capture) is documented in `docs/messaging` and verified by the docs test.
-- [ ] The register entry TD-051 is `RESOLVED` with the verifying tests named in `Verification`.
+- [ ] The commit message names, for each of TD-051, the test that proves it fixed. The debt register is frozen: a human closes those entries after the merge.

@@ -4,7 +4,9 @@
 
 **Blocked by:** 06, 45 (worker loop error reporting)
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** retry, DLQ and recovery after the MVP (2026-11-18)
 
 - [ ] The runner maps a transient handler failure to `nak(delay)` with delays 1s, 5s, 30s, 2m by `deliveryCount`; no consumer `BackOff`.
 - [ ] `deliveryCount` is the only attempt counter.

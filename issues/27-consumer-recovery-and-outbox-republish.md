@@ -4,7 +4,9 @@
 
 **Blocked by:** 25, 44 (payment latency outside the runner transaction), 49 (Prisma schema drift), 59 (terminal outbox failures)
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** retry, DLQ and recovery after the MVP (2026-11-18)
 
 - [ ] The recreation script applies the rules in order:
   1. Ack floor available → `by_start_sequence` at `ack_floor + 1`.

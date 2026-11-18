@@ -4,9 +4,9 @@
 
 **Blocked by:** 28
 
-**Status:** deferred
+**Status:** ready-for-agent
 
-**Status reason:** after the MVP (scope cut 2026-11-18)
+**Status reason:** back in scope 2026-11-18: deployment (38) runs the waiting room on Upstash
 
 - [ ] An Upstash REST adapter implements `QueueStore`, including the Lua scripts.
 - [ ] One contract suite runs against both adapters; CI provides an Upstash-compatible HTTP endpoint in front of Redis.

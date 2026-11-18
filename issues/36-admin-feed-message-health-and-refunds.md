@@ -4,7 +4,9 @@
 
 **Blocked by:** 35, 25, 23, 26
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** admin message health and refunds after the MVP (2026-11-18)
 
 - [ ] `admin.feed(cursor)`: the union of all outbox tables ordered by `(createdAt, id)`, groupable by `correlationId`.
 - [ ] The worker health endpoint reports consumer lag, pending acks, redeliveries, DLQ size and oldest DLQ age; the dashboard shows them alongside outbox lag.

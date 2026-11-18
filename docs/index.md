@@ -63,9 +63,11 @@ below shows what is built.
   `seat.held` and `hold.released` outbox events; the worker's sweeper expires abandoned holds every 15 s and writes `hold.expired`, and expires unpaid orders at `paymentDeadline + 60 s` (`order.expired`, seats freed); `orders` and `order_lines` back `booking.placeOrder` / `booking.getOrder`, which write
   `order.placed`; envelope schemas live in `packages/contracts`.
 - `packages/messaging` and `apps/worker`: the `MessageBus` port with its JetStream adapter, the outbox relay (250 ms, batch of 100), the consumer runner, the sweeper and the worker app with `/health`.
-- `packages/waiting-room`: `QueueService` with the `QueueStore` port and its node-redis adapter
-  (atomic Lua scripts, configurable key prefix) and the schedule `AdmissionPolicy`; served as
-  `queue.join` / `queue.status` / `queue.leave` over `REDIS_URL`. See
+- `packages/waiting-room`: `QueueService` with the `QueueStore` port, its node-redis and Upstash
+  REST adapters (the same atomic Lua scripts and key layout, configurable key prefix, one shared
+  contract suite run against both) and the schedule `AdmissionPolicy`; served as
+  `queue.join` / `queue.status` / `queue.leave` over `REDIS_URL` (node-redis; choosing Upstash in
+  production belongs to deployment). See
   [architecture/waiting-room](architecture/waiting-room.md).
 - Structured logging: each app injects a `pino` logger; booking, the relay and the consumer runner log with a child logger bound to `correlationId`/`causationId` (plus `holdId`, `orderId`, `paymentId`). See [architecture/](architecture/index.md#logging-and-ids).
 - Quality gate: Biome (warnings fail), strict `tsc`, Vitest, enforced by `ralph-loop.sh`.

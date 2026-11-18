@@ -33,6 +33,35 @@ services:
       timeout: 3s
       retries: 30
 
+  # Upstash-compatible REST endpoint in front of `redis`, so the Upstash adapters run their
+  # contract suites locally and in CI (ADR 0010). Production uses Upstash itself.
+  redis-http:
+    image: hiett/serverless-redis-http:0.0.10
+    environment:
+      SRH_MODE: env
+      SRH_TOKEN: ticketarena
+      SRH_CONNECTION_STRING: redis://redis:6379
+    ports:
+      - "8079:80"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # An authenticated PING through to Redis, not just an open port.
+      test:
+        [
+          "CMD",
+          "wget",
+          "-qO-",
+          "--header=Authorization: Bearer ticketarena",
+          "--header=Content-Type: application/json",
+          '--post-data=["PING"]',
+          "http://127.0.0.1:80/",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   nats:
     image: nats:2.15.2-alpine
     command: ["--config", "/etc/nats/nats.conf", "--store_dir", "/data"]

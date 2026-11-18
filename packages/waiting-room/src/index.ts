@@ -20,3 +20,7 @@ export {
   type RedisQueueClient,
   type RedisQueueStoreOptions,
 } from "./redis-queue-store";
+export {
+  createUpstashQueueStore,
+  type UpstashQueueStoreOptions,
+} from "./upstash-queue-store";

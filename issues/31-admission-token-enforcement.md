@@ -2,7 +2,7 @@
 
 **What to build:** seats can only be held by buyers the waiting room admitted for that event in that session. Checkout of a valid hold keeps working even after the admission expires. Spec: Waiting room (admission token); ADR 0008.
 
-**Blocked by:** 30, 05
+**Blocked by:** 30, 05, 61
 
 **Status:** ready-for-agent
 

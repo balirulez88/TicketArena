@@ -18,12 +18,12 @@ Hibák: nem a tulajdonos hívja, vagy nincs ilyen hold: `NOT_FOUND` (nem szivár
 
 ## Alternatívák
 
-| Alternatíva | Előny | Hátrány | Miért nem itt |
-|---|---|---|---|
-| Várni a lejáratra (sweeper) | Nincs új kód | A seat-ek percekig foglaltak maradnak | A ticket célja az azonnali felszabadítás |
-| Seat-ek felszabadítása `eventId`/buyer alapján, nem `holdId` alapján | Egyszerűbb lekérdezés | Idegen hold seat-jét is felszabadíthatja | A `holdId` feltétel a helyesség lényege |
-| Hold törlése (`DELETE`) | Egyszerű | Elvész az audit, nincs `RELEASED` állapot és `correlationId` az eseményhez | A státusz-gép és az esemény kell |
-| Esemény publikálása commit után közvetlenül NATS-ra | Kevesebb mozgó rész | Összeomláskor az állapot és az esemény szétcsúszik (dual write) | Az outbox ugyanabban a tranzakcióban ír (ADR 0003) |
+| Alternatíva                                                          | Előny                 | Hátrány                                                                    | Miért nem itt                                      |
+| -------------------------------------------------------------------- | --------------------- | -------------------------------------------------------------------------- | -------------------------------------------------- |
+| Várni a lejáratra (sweeper)                                          | Nincs új kód          | A seat-ek percekig foglaltak maradnak                                      | A ticket célja az azonnali felszabadítás           |
+| Seat-ek felszabadítása `eventId`/buyer alapján, nem `holdId` alapján | Egyszerűbb lekérdezés | Idegen hold seat-jét is felszabadíthatja                                   | A `holdId` feltétel a helyesség lényege            |
+| Hold törlése (`DELETE`)                                              | Egyszerű              | Elvész az audit, nincs `RELEASED` állapot és `correlationId` az eseményhez | A státusz-gép és az esemény kell                   |
+| Esemény publikálása commit után közvetlenül NATS-ra                  | Kevesebb mozgó rész   | Összeomláskor az állapot és az esemény szétcsúszik (dual write)            | Az outbox ugyanabban a tranzakcióban ír (ADR 0003) |
 
 ## Fogalmak
 
@@ -35,14 +35,14 @@ Hibák: nem a tulajdonos hívja, vagy nincs ilyen hold: `NOT_FOUND` (nem szivár
 
 ## Mi mehet félre
 
-| Hiba | Teszt |
-|---|---|
+| Hiba                                                                          | Teszt                                                                                                     |
+| ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | Egyszerre több release ugyanarra a hold-ra: kétszer szabadít fel, két esemény | `release-hold.test.ts`: "concurrent releases of one hold release it exactly once" (1 siker, 1 outbox sor) |
-| Másik hold seat-jének felszabadítása | "frees only the seats that still carry this hold's id" |
-| Már rendelt (`IN_CHECKOUT`) vagy már release-elt hold újra release-elése | "refuses a hold that is no longer HELD" (a seat-ek `IN_CHECKOUT` maradnak, 1 esemény) |
-| Idegen buyer release-eli a hold-ot, vagy létezése kiderül | "hides the hold from anyone but its owner" és router: `NOT_FOUND` |
-| Felszabadított seat nem azonnal foglalható | "lets another buyer hold the released seats immediately" |
-| Hibás `holdId` | router teszt: `BAD_REQUEST`, az üzenet nevesíti a `holdId` mezőt |
+| Másik hold seat-jének felszabadítása                                          | "frees only the seats that still carry this hold's id"                                                    |
+| Már rendelt (`IN_CHECKOUT`) vagy már release-elt hold újra release-elése      | "refuses a hold that is no longer HELD" (a seat-ek `IN_CHECKOUT` maradnak, 1 esemény)                     |
+| Idegen buyer release-eli a hold-ot, vagy létezése kiderül                     | "hides the hold from anyone but its owner" és router: `NOT_FOUND`                                         |
+| Felszabadított seat nem azonnal foglalható                                    | "lets another buyer hold the released seats immediately"                                                  |
+| Hibás `holdId`                                                                | router teszt: `BAD_REQUEST`, az üzenet nevesíti a `holdId` mezőt                                          |
 
 Megjegyzés: a takeover teszt közvetlenül írja a `holdId`-t, nem valódi lejárt hold átvételét hajtja (a commit follow-up listáján szerepel).
 

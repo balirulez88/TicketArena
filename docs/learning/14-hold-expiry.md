@@ -12,7 +12,7 @@ Két egymást kiegészítő mechanizmus, egy közös szabállyal.
 
 1. **Lazy expiry** (`holdSeats`, `packages/booking/src/booking-service.ts`, `freeSeats`): egy `HELD` szék szabadnak számít, ha a hold-ja lejárt. Nem kell megvárni a sweepert, így a lejárat azonnal "hat".
 2. **Sweeper** (`sweepBatch` + `apps/worker/src/sweeper.ts`): a worker 15 másodpercenként lefuttatja. `FOR UPDATE SKIP LOCKED`-kal kiválasztja a lejárt `HELD` hold-okat, `EXPIRED`-re állítja őket, a székeket `AVAILABLE`-re, és ugyanabban a tranzakcióban `hold.expired` outbox eseményt ír.
-3. **Egyetlen szabály, egyetlen `T`**: a hold érvényes, ha `T < holdExpiresAt` (`isExpiredAt`). A `T`-t (`clock.now()`) a zárak megszerzése *után* olvassuk, mert addigra senki más nem módosíthatja a sorokat: ez a linearizációs pont (ADR 0005).
+3. **Egyetlen szabály, egyetlen `T`**: a hold érvényes, ha `T < holdExpiresAt` (`isExpiredAt`). A `T`-t (`clock.now()`) a zárak megszerzése _után_ olvassuk, mert addigra senki más nem módosíthatja a sorokat: ez a linearizációs pont (ADR 0005).
 
 A kulcs a zár-sorrend: buyer advisory lock, hold sor, majd székek `id` szerint. `placeOrder` és a sweeper ugyanazt a hold-sort zárolja, ezért sorba állnak. Ha a `placeOrder` nyert, a sweeper vagy kihagyja a sort (`SKIP LOCKED`), vagy már `ORDERED`-et lát. Ha a sweeper nyert, a `placeOrder` `EXPIRED` státuszt lát, és `HOLD_EXPIRED`-et dob. Soha nem lesz mindkettő.
 
@@ -20,12 +20,12 @@ Plusz védőháló: `placeOrder` ellenőrzi, hogy minden szék `holdId`-ja még 
 
 ## Alternatívák
 
-| Alternatíva | Előny | Hátrány | Miért nem itt |
-|---|---|---|---|
-| Csak sweeper, lazy nélkül | Egyszerű, egy hely ír | Akár 15 mp-ig blokkolt szék lejárat után; sweeper-kiesés esetén tovább | A spec szerint lejárat után azonnal foglalható kell legyen (AT-07) |
-| Redis TTL kulcs a lejárathoz | Gyors, magától lejár | Második igazságforrás; kulcsvesztés = inkonzisztens szék | A szék állapotát soha nem Redis dönti el (ADR 0005, CLAUDE.md) |
-| SQL `now()` / `clock_timestamp()` | Nem kell injektált óra | `now()` a tranzakció elejére van rögzítve; tesztből nem vezérelhető | A versenyeket determinisztikusan kell tesztelni (AT-08) |
-| Sweeper `NOWAIT`/várakozó zárral | Nem hagy ki sort | A sweeper blokkolná a checkoutot, vagy hibával állna le | `SKIP LOCKED`: a kihagyott sort a következő kör úgyis megtalálja |
+| Alternatíva                       | Előny                  | Hátrány                                                                | Miért nem itt                                                      |
+| --------------------------------- | ---------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Csak sweeper, lazy nélkül         | Egyszerű, egy hely ír  | Akár 15 mp-ig blokkolt szék lejárat után; sweeper-kiesés esetén tovább | A spec szerint lejárat után azonnal foglalható kell legyen (AT-07) |
+| Redis TTL kulcs a lejárathoz      | Gyors, magától lejár   | Második igazságforrás; kulcsvesztés = inkonzisztens szék               | A szék állapotát soha nem Redis dönti el (ADR 0005, CLAUDE.md)     |
+| SQL `now()` / `clock_timestamp()` | Nem kell injektált óra | `now()` a tranzakció elejére van rögzítve; tesztből nem vezérelhető    | A versenyeket determinisztikusan kell tesztelni (AT-08)            |
+| Sweeper `NOWAIT`/várakozó zárral  | Nem hagy ki sort       | A sweeper blokkolná a checkoutot, vagy hibával állna le                | `SKIP LOCKED`: a kihagyott sort a következő kör úgyis megtalálja   |
 
 ## Fogalmak
 
@@ -38,18 +38,18 @@ Plusz védőháló: `placeOrder` ellenőrzi, hogy minden szék `holdId`-ja még 
 
 ## Mi romolhat el
 
-| Hiba | Teszt |
-|---|---|
-| Lejárt hold széke blokkolja a másik vevőt | `hold-expiry.test.ts`: AT-07 |
-| `T` a zárra várás előtt olvasva, elavult döntés | `decides expiry with T read after the seat locks` |
-| Fizetés közben lejár a hold | AT-08 (fake clock a lock-várakozás alatt) |
-| Checkout és sweeper is nyer | AT-09, mindkét érkezési sorrendben |
-| A hold-ról lecsúszott szék kerül eladásra | AT-11 |
-| A sweeper nem engedi el a másik hold által átvett széket | `does not free a seat another hold took over lazily` |
-| A sweeper vár egy zárolt hold-ra | `skips a hold locked by another transaction without waiting` |
-| Határeset: `T = holdExpiresAt` vs. 1 ms előtte | `at T = holdExpiresAt ...`, `one millisecond before` |
+| Hiba                                                     | Teszt                                                        |
+| -------------------------------------------------------- | ------------------------------------------------------------ |
+| Lejárt hold széke blokkolja a másik vevőt                | `hold-expiry.test.ts`: AT-07                                 |
+| `T` a zárra várás előtt olvasva, elavult döntés          | `decides expiry with T read after the seat locks`            |
+| Fizetés közben lejár a hold                              | AT-08 (fake clock a lock-várakozás alatt)                    |
+| Checkout és sweeper is nyer                              | AT-09, mindkét érkezési sorrendben                           |
+| A hold-ról lecsúszott szék kerül eladásra                | AT-11                                                        |
+| A sweeper nem engedi el a másik hold által átvett széket | `does not free a seat another hold took over lazily`         |
+| A sweeper vár egy zárolt hold-ra                         | `skips a hold locked by another transaction without waiting` |
+| Határeset: `T = holdExpiresAt` vs. 1 ms előtte           | `at T = holdExpiresAt ...`, `one millisecond before`         |
 
-Ismert nyitott pont (a commit follow-upjai közül): a `sweepBatch` a `T`-t a hold-zár *előtt* olvassa. Ez a kódkomment szerint belefér, mert a lejárat nem mozdul és `SKIP LOCKED` nem vár, de az ADR szigorú olvasatától eltér, és külön indoklást kér.
+Ismert nyitott pont (a commit follow-upjai közül): a `sweepBatch` a `T`-t a hold-zár _előtt_ olvassa. Ez a kódkomment szerint belefér, mert a lejárat nem mozdul és `SKIP LOCKED` nem vár, de az ADR szigorú olvasatától eltér, és külön indoklást kér.
 
 ## Interjúkérdések
 

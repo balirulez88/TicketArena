@@ -31,7 +31,19 @@ const identity = {
   GIT_COMMITTER_EMAIL: "t@t",
 };
 const UNTRUSTED = 3;
-const BRANCH = "rejected/01-demo-20261108-102624";
+const SUFFIX = "01-demo-20261108-102624";
+const BRANCH = `rejected/${SUFFIX}`;
+const NEW = `refs/ralph/rejected/${SUFFIX}`;
+const LEGACY = `refs/heads/rejected/${SUFFIX}`;
+// Where each layout keeps the candidate, and the name the host's record gives it:
+//   quarantine  the importer since TD-059 WS1
+//   legacy      the importer before it: an ordinary branch, recorded by its short name
+//   migrated    a legacy candidate the maintainer moved to the new namespace (D1)
+const LAYOUTS = {
+  quarantine: { ref: NEW, recorded: NEW },
+  legacy: { ref: LEGACY, recorded: BRANCH },
+  migrated: { ref: NEW, recorded: BRANCH },
+};
 
 const VERIFY = `
 import { appendFileSync } from "node:fs";
@@ -103,7 +115,14 @@ const write = (dir, path, text) => {
 };
 
 /** A host with the importer, the replay tool, a candidate on a quarantine branch and an amended ticket. */
-function scenario({ candidate: change, staged, amend = true, recorded = true } = {}) {
+function scenario({
+  candidate: change,
+  staged,
+  amend = true,
+  recorded = true,
+  layout = "quarantine",
+} = {}) {
+  const { ref, recorded: recordedAs } = LAYOUTS[layout];
   const host = mkdtempSync(join(tmpdir(), "ralph-replay-"));
   git(host, "init", "--quiet", "--initial-branch=main");
   git(host, "config", "core.autocrlf", "false");
@@ -113,6 +132,8 @@ function scenario({ candidate: change, staged, amend = true, recorded = true } =
     "ralph-debt.mjs",
     "ralph-host-review.mjs",
     "ralph-provider.mjs",
+    "ralph-push-inspect.mjs",
+    "ralph-quarantine.mjs",
     "ralph-replay.mjs",
     "ralph-review-prompt.mjs",
     "ralph-review.mjs",
@@ -150,7 +171,7 @@ function scenario({ candidate: change, staged, amend = true, recorded = true } =
   const origin = git(host, "rev-parse", "main");
 
   // The candidate, as the importer's review rejection keeps it: one slice commit on the base.
-  git(host, "switch", "--quiet", "-c", BRANCH);
+  git(host, "switch", "--quiet", "-c", "work");
   write(host, "packages/demo/feature.ts", "export const feature = 1;\n");
   write(host, "packages/demo/feature.test.ts", "test('feature', () => {});\n");
   change?.(host);
@@ -168,17 +189,12 @@ function scenario({ candidate: change, staged, amend = true, recorded = true } =
   git(host, "commit", "--quiet", "-m", "feat(slice-01): Demo ticket");
   const tip = git(host, "rev-parse", "HEAD");
   git(host, "switch", "--quiet", "main");
+  git(host, "branch", "--quiet", "-D", "work");
+  git(host, "update-ref", ref, tip);
 
   // The importer's record of the host review's rejection, the one commit only it can write.
   if (recorded) {
-    write(host, "issues/01-demo.md", DEMO.replace("ready-for-agent", "blocked"));
-    git(
-      host,
-      "commit",
-      "--quiet",
-      "-am",
-      `chore(issues): block issues/01-demo.md after the host review\n\nThe host's isolated review of slice/01-demo (${tip.slice(0, 12)}) was blocked. It is preserved on ${BRANCH}.`,
-    );
+    record(host, tip, recordedAs);
   }
 
   // A human then amended the ticket on main; it is ready again.
@@ -186,13 +202,43 @@ function scenario({ candidate: change, staged, amend = true, recorded = true } =
     write(host, "issues/01-demo.md", `${DEMO}- [ ] the amended criterion\n`);
     git(host, "commit", "--quiet", "-am", "chore(issues): amend ticket 01");
   }
-  return { host, origin, tip };
+  return { host, origin, tip, ref };
+}
+
+/** The host's record of a review rejection, worded exactly as ralph-accept.mjs writes it. */
+function record(host, tip, where) {
+  write(host, "issues/01-demo.md", DEMO.replace("ready-for-agent", "blocked"));
+  git(
+    host,
+    "commit",
+    "--quiet",
+    "-am",
+    "chore(issues): block issues/01-demo.md after the host review",
+    "-m",
+    `The host's isolated Standards and Spec review of slice/01-demo (${tip.slice(0, 12)}) was blocked, so the slice did not merge. It is preserved on ${where}. Report: .ralph/host-review/20261108-102624-1/01-demo/review.md`,
+  );
+}
+
+/** A commit on top of the candidate, and the candidate ref moved to it. */
+function tamper(host, ref) {
+  const tree = git(host, "rev-parse", "main^{tree}");
+  const moved = git(host, "commit-tree", tree, "-p", git(host, "rev-parse", ref), "-m", "wip");
+  git(host, "update-ref", ref, moved);
+  return moved;
 }
 
 function replay(
   host,
   tip,
-  { red = 0, verify = 0, accept = true, expect = tip, extra = [], review = "clean" } = {},
+  {
+    red = 0,
+    verify = 0,
+    accept = true,
+    expect = tip,
+    extra = [],
+    review = "clean",
+    candidate = NEW,
+  } = {},
 ) {
   const verifyLog = join(host, ".ralph", "verify.log");
   mkdirSync(dirname(verifyLog), { recursive: true });
@@ -201,7 +247,7 @@ function replay(
     [
       "scripts/ralph-replay.mjs",
       "--candidate",
-      BRANCH,
+      candidate,
       "--expect",
       expect,
       ...(accept ? ["--accept"] : []),
@@ -240,8 +286,16 @@ function replay(
   };
 }
 
-const heads = (host) =>
-  git(host, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/");
+// Every ref, quarantine and incoming included: a refusal must leave all of them as they were.
+const heads = (host) => git(host, "for-each-ref", "--format=%(refname) %(objectname)");
+// A refused import keeps the run's incoming refs for a human (ralph-accept.mjs): everything
+// else must be as it was.
+const incoming = (host) => git(host, "for-each-ref", "refs/ralph/incoming/");
+const settled = (host) =>
+  heads(host)
+    .split("\n")
+    .filter((line) => !line.startsWith("refs/ralph/incoming/"))
+    .join("\n");
 // Private refs the replay made for its one fetch must never outlive it.
 const leaked = (host) => git(host, "for-each-ref", "refs/ralph/replay/");
 const runs = (host) => {
@@ -283,7 +337,7 @@ describe("ralph-replay", () => {
     assert.equal(existsSync(join(host, "issues", "01-demo.md")), false);
 
     // The candidate is immutable, and the new history is on main only.
-    assert.equal(git(host, "rev-parse", BRANCH), tip);
+    assert.equal(git(host, "rev-parse", NEW), tip);
     assert.notEqual(before, heads(host));
     assert.equal(runs(host).length, 0);
     assert.equal(leaked(host), "");
@@ -302,10 +356,7 @@ describe("ralph-replay", () => {
 
   it("refuses a candidate that is no longer the pinned commit", () => {
     const { host, tip } = scenario();
-    git(host, "switch", "--quiet", BRANCH);
-    write(host, "packages/demo/feature.ts", "export const feature = 2; // tampered\n");
-    git(host, "commit", "--quiet", "-am", "wip: tamper");
-    git(host, "switch", "--quiet", "main");
+    tamper(host, NEW);
     const before = heads(host);
     const result = replay(host, tip);
     assert.equal(result.code, 1);
@@ -317,11 +368,7 @@ describe("ralph-replay", () => {
 
   it("refuses a tampered candidate even when its new tip is pinned", () => {
     const { host, tip } = scenario();
-    git(host, "switch", "--quiet", BRANCH);
-    write(host, "packages/demo/feature.ts", "export const feature = 2;\n");
-    git(host, "commit", "--quiet", "-am", "wip: more");
-    const moved = git(host, "rev-parse", "HEAD");
-    git(host, "switch", "--quiet", "main");
+    const moved = tamper(host, NEW);
     const result = replay(host, tip, { expect: moved });
     assert.equal(result.code, 1);
     assert.match(result.output, /no host-review rejection|own base .* is not part of main/);
@@ -370,22 +417,24 @@ describe("ralph-replay", () => {
     const { host, tip } = scenario({
       candidate: (dir) => write(dir, "scripts/evil.mjs", "process.exit(0);\n"),
     });
-    const before = heads(host);
+    const before = settled(host);
     const result = replay(host, tip);
     assert.equal(result.code, UNTRUSTED, result.output);
     assert.match(result.output, /REFUSED/);
-    assert.equal(heads(host), before);
+    assert.equal(settled(host), before);
+    assert.notEqual(incoming(host), "", "the importer keeps the refused run for a human");
     assert.equal(result.reviewed.length, 0);
-    assert.equal(git(host, "rev-parse", BRANCH), tip);
+    assert.equal(git(host, "rev-parse", NEW), tip);
   });
 
   it("does not accept a gate that fails on the replayed merge", () => {
     const { host, tip } = scenario();
-    const before = heads(host);
+    const before = settled(host);
     const result = replay(host, tip, { verify: 1 });
     assert.equal(result.code, UNTRUSTED, result.output);
     assert.equal(result.red.length, 1, "RED ran before the importer");
-    assert.equal(heads(host), before);
+    assert.equal(settled(host), before);
+    assert.notEqual(incoming(host), "", "the importer keeps the refused run for a human");
     assert.equal(result.reviewed.length, 0);
   });
 
@@ -401,14 +450,7 @@ describe("ralph-replay", () => {
 
   it("refuses a record that names another commit of the same branch", () => {
     const { host, tip } = scenario({ recorded: false });
-    write(host, "issues/01-demo.md", DEMO.replace("ready-for-agent", "blocked"));
-    git(
-      host,
-      "commit",
-      "--quiet",
-      "-am",
-      `chore(issues): block issues/01-demo.md after the host review\n\nPreserved on ${BRANCH} at ${"0".repeat(12)}.`,
-    );
+    record(host, "0".repeat(40), NEW);
     const result = replay(host, tip);
     assert.equal(result.code, 1);
     assert.match(result.output, /no host-review rejection/);
@@ -435,7 +477,7 @@ describe("ralph-replay", () => {
     assert.equal(result.code, 1, result.output);
     assert.equal(result.reviewed.length >= 1, true);
     assert.match(git(host, "show", "main:issues/01-demo.md"), /\*\*Status:\*\* blocked/);
-    assert.equal(git(host, "rev-parse", BRANCH), tip);
+    assert.equal(git(host, "rev-parse", NEW), tip);
     assert.equal(leaked(host), "");
   });
 
@@ -502,5 +544,174 @@ describe("ralph-replay", () => {
     const result = replay(host, tip, { accept: false });
     assert.equal(result.code, 1);
     assert.match(result.output, /working tree is not clean/);
+  });
+});
+
+// --- TD-059 WS2: where a candidate may come from ---------------------------------------------------
+
+describe("ralph-replay: quarantine namespaces (TD-059)", () => {
+  /** Replays successfully: the exact implementation merged, the candidate untouched. */
+  function assertReplayed(host, tip, ref, result) {
+    assert.equal(result.code, 0, result.output);
+    assert.equal(git(host, "log", "-1", "--format=%s", "main"), "Merge slice/01-demo: Demo ticket");
+    assert.equal(
+      git(host, "rev-parse", "main:packages/demo/feature.ts"),
+      git(host, "rev-parse", `${tip}:packages/demo/feature.ts`),
+    );
+    assert.equal(git(host, "rev-parse", ref), tip, "the candidate ref is never written");
+    assert.equal(leaked(host), "");
+  }
+
+  /** Refused before RED: nothing ran, no ref moved, no run directory. */
+  function assertRefusedEarly(host, before, result, pattern) {
+    assert.equal(result.code, 1, result.output);
+    assert.match(result.output, /REFUSED/);
+    assert.match(result.output, pattern);
+    assert.equal(heads(host), before);
+    assert.equal(result.red.length + result.verified.length + result.reviewed.length, 0);
+    assert.equal(runs(host).length, 0);
+  }
+
+  it("replays a candidate from refs/ralph/rejected/ by its full name", () => {
+    const { host, tip } = scenario();
+    assertReplayed(host, tip, NEW, replay(host, tip, { candidate: NEW }));
+  });
+
+  it("replays a legacy refs/heads/rejected/ branch with its legacy record", () => {
+    const { host, tip } = scenario({ layout: "legacy" });
+    assertReplayed(host, tip, LEGACY, replay(host, tip, { candidate: LEGACY }));
+  });
+
+  it("takes the alias rejected/<name> for the candidate in either namespace", () => {
+    const { host, tip } = scenario({ layout: "legacy" });
+    assertReplayed(host, tip, LEGACY, replay(host, tip, { candidate: BRANCH }));
+  });
+
+  it("replays a migrated candidate under its legacy record (D1), and says so", () => {
+    const { host, tip } = scenario({ layout: "migrated" });
+    const result = replay(host, tip, { candidate: NEW });
+    assertReplayed(host, tip, NEW, result);
+    assert.match(result.output, /covered by the legacy record rejected\/01-demo-20261108-102624/);
+  });
+
+  it("does not let a legacy record vouch for an unrelated migrated candidate (D1)", () => {
+    const { host, tip } = scenario({ layout: "migrated" });
+    // The same commit under another suffix: the record names 01-demo-20261108-102624 only.
+    const other = "refs/ralph/rejected/01-demo-20261109-090000";
+    git(host, "update-ref", other, tip);
+    git(host, "update-ref", "-d", NEW);
+    const before = heads(host);
+    assertRefusedEarly(host, before, replay(host, tip, { candidate: other }), /no host-review/);
+  });
+
+  it("does not let a current record vouch for a branch under refs/heads/", () => {
+    const { host, tip } = scenario();
+    git(host, "update-ref", "-d", NEW);
+    git(host, "update-ref", LEGACY, tip);
+    const before = heads(host);
+    assertRefusedEarly(host, before, replay(host, tip, { candidate: LEGACY }), /no host-review/);
+  });
+
+  it("refuses conflicting candidates in the two namespaces", () => {
+    const { host, tip } = scenario();
+    git(host, "update-ref", LEGACY, git(host, "rev-parse", "main~1"));
+    const before = heads(host);
+    for (const candidate of [NEW, LEGACY, BRANCH]) {
+      assertRefusedEarly(host, before, replay(host, tip, { candidate }), /conflicting/);
+    }
+  });
+
+  for (const [what, candidate, pattern] of [
+    ["an incoming ref", `refs/ralph/incoming/20261108-102624-1/rejected/${SUFFIX}`, /incoming/],
+    ["a published remote-tracking copy", `refs/remotes/origin/rejected/${SUFFIX}`, /published/],
+    ["a branch outside quarantine", "refs/heads/feature", /not in a quarantine namespace/],
+  ]) {
+    it(`refuses ${what}, even at the recorded commit`, () => {
+      const { host, tip } = scenario();
+      git(host, "update-ref", candidate, tip);
+      const before = heads(host);
+      assertRefusedEarly(host, before, replay(host, tip, { candidate }), pattern);
+    });
+  }
+
+  for (const [what, candidate, pattern] of [
+    ["a missing candidate", "refs/ralph/rejected/01-demo-20261231-235959", /no quarantine ref/],
+    ["a malformed name", "rejected/01-demo", /not a valid quarantine name/],
+    ["a name with a path trick", `rejected/../${SUFFIX}`, /not a valid quarantine name/],
+  ]) {
+    it(`refuses ${what}`, () => {
+      const { host, tip } = scenario();
+      const before = heads(host);
+      assertRefusedEarly(host, before, replay(host, tip, { candidate }), pattern);
+    });
+  }
+
+  it("refuses a symbolic candidate ref", () => {
+    const { host, tip } = scenario();
+    git(host, "update-ref", "-d", NEW);
+    git(host, "update-ref", "refs/heads/keep", tip);
+    git(host, "symbolic-ref", NEW, "refs/heads/keep");
+    const before = heads(host);
+    assertRefusedEarly(host, before, replay(host, tip), /symbolic/);
+  });
+
+  it("never guesses a short name: a tag of the alias's name is not the candidate", () => {
+    const { host, tip } = scenario();
+    git(host, "update-ref", "-d", NEW);
+    git(host, "update-ref", `refs/tags/${BRANCH}`, tip);
+    const before = heads(host);
+    assertRefusedEarly(host, before, replay(host, tip, { candidate: BRANCH }), /no quarantine/);
+  });
+
+  it("refuses a candidate pinned by an abbreviated commit", () => {
+    const { host, tip } = scenario();
+    const before = heads(host);
+    const result = replay(host, tip, { expect: tip.slice(0, 12) });
+    assertRefusedEarly(host, before, result, /full 40-character commit/);
+  });
+
+  it("refuses a migrated candidate whose legacy record names another commit", () => {
+    const { host, tip } = scenario({ layout: "migrated", recorded: false });
+    record(host, "0".repeat(40), BRANCH);
+    const before = heads(host);
+    assertRefusedEarly(host, before, replay(host, tip), /no host-review/);
+  });
+
+  it("does not import a migrated candidate when RED is not proven", () => {
+    const { host, tip } = scenario({ layout: "migrated" });
+    const before = heads(host);
+    const result = replay(host, tip, { red: 1 });
+    assert.equal(result.code, 1);
+    assert.match(result.output, /RED is NOT proven/);
+    assert.equal(heads(host), before);
+    assert.equal(result.verified.length + result.reviewed.length, 0);
+  });
+
+  it("leaves a migrated candidate's protected path to the importer, which refuses it", () => {
+    const { host, tip } = scenario({
+      layout: "migrated",
+      candidate: (dir) => write(dir, "scripts/evil.mjs", "process.exit(0);\n"),
+    });
+    const before = settled(host);
+    const result = replay(host, tip);
+    assert.equal(result.code, UNTRUSTED, result.output);
+    assert.equal(settled(host), before);
+    assert.notEqual(incoming(host), "", "the importer keeps the refused run for a human");
+    assert.equal(git(host, "rev-parse", NEW), tip);
+  });
+
+  it("removes only its own scratch refs, never another ref under refs/ralph/", () => {
+    const { host, tip } = scenario();
+    const main = git(host, "rev-parse", "main");
+    git(host, "update-ref", "refs/ralph/replay/someone-else/main", main);
+    git(host, "update-ref", `refs/ralph/incoming/20261108-102624-1/rejected/${SUFFIX}`, tip);
+    const result = replay(host, tip, { accept: false });
+    assert.equal(result.code, 0, result.output);
+    assert.equal(leaked(host), `${main} commit\trefs/ralph/replay/someone-else/main`);
+    assert.equal(
+      git(host, "rev-parse", `refs/ralph/incoming/20261108-102624-1/rejected/${SUFFIX}`),
+      tip,
+    );
+    assert.equal(git(host, "rev-parse", NEW), tip);
   });
 });

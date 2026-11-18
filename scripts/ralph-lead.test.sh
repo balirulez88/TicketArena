@@ -103,7 +103,7 @@ new_repo() {
   local dir="${WORK}/$1"
   mkdir -p "${dir}/scripts" "${dir}/skills/code-review" "${dir}/issues" "${dir}/docs"
   cp "${SOURCE_ROOT}/ralph-loop.sh" "${dir}/"
-  cp "${SOURCE_ROOT}"/scripts/{ralph-lead.sh,ralph-driver.sh,ralph-preflight.mjs,ralph-usage.mjs,ralph-review.mjs,ralph-review-prompt.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs,ralph-push-inspect.mjs} "${dir}/scripts/"
+  cp "${SOURCE_ROOT}"/scripts/{ralph-lead.sh,ralph-driver.sh,ralph-preflight.mjs,ralph-usage.mjs,ralph-review.mjs,ralph-review-prompt.mjs,ralph-artifacts.mjs,ralph-debt.mjs,ralph-red.mjs,ralph-provider.mjs,ralph-push-inspect.mjs,ralph-quarantine.mjs} "${dir}/scripts/"
   printf '# Technical Debt Register\n\n<!-- ralph-debt:begin -->\n<!-- ralph-debt:end -->\n' \
     >"${dir}/docs/technical-debt.md"
   node "${dir}/scripts/ralph-debt.mjs" format "${dir}/docs/technical-debt.md"

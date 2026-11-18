@@ -379,11 +379,26 @@ require_debt_clear() {
   esac
 }
 
+# A recovery hold (refs/ralph/recovery/<slug>, scripts/ralph-quarantine.mjs) records a rejection
+# whose work is kept but whose blocked status never reached the base branch, so the ticket still
+# looks ready (TD-059, D2). While any exists, nothing is selected on this repository; one that
+# cannot be listed holds too. A sandbox clone has no such refs: the host checks before it starts.
+require_no_recovery_hold() {
+  local holds
+  # A hold whose object is missing fails the listing; any warning Git prints lands in the output
+  # and counts as a hold too.
+  holds="$(git for-each-ref --format='%(refname)' refs/ralph/recovery/ 2>&1)" ||
+    die "the recovery holds (refs/ralph/recovery/) cannot be read; no ticket is selected"
+  [[ -z "${holds}" ]] ||
+    die "recovery hold(s) in place: ${holds//$'\n'/, }; reconcile them first (node scripts/ralph-quarantine.mjs holds)"
+}
+
 # Both drivers' run-level check: the gate must reach a verdict at all, or nothing is selected (a
 # broken register must not look like an empty queue). With a file, the verdicts the run selects by
-# are kept there, with its logs (ADR 0020: auditable decisions).
+# are kept there, with its logs (ADR 0020: auditable decisions). A recovery hold stops it first.
 # Usage: require_debt_verdicts [file]
 require_debt_verdicts() {
+  require_no_recovery_hold
   debt_gate >"${1:-/dev/null}" ||
     die "the debt gate could not reach a verdict (pnpm run check:debt); no ticket is selected"
 }

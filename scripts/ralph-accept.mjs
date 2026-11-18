@@ -34,7 +34,9 @@
 //     snapshot of exactly the slice commit, approve it (scripts/ralph-host-review.mjs). Nothing the
 //     agent's container produced about its reviews is read. Not approved: the host blocks the
 //     ticket in its own commit and keeps the slice on refs/ralph/rejected/<slug>-<run>, never a
-//     branch (TD-059), as it does with a run's own rejected/<slug>-<run> (exit 1). A provider
+//     branch (TD-059), as it does with a run's own rejected/<slug>-<run> (exit 1). If that
+//     commit fails, it keeps every ref and records a recovery hold (refs/ralph/recovery/<slug>,
+//     scripts/ralph-quarantine.mjs, ADR 0023); while any hold exists it applies nothing. A provider
 //     cut-off leaves the host unchanged (exit 1). Approved: the host records the review's deferred
 //     findings in the register in its own commit.
 //   - A pause is adopted only if it is exactly what Ralph writes for the ticket's parked ref. It
@@ -82,6 +84,7 @@ import {
   validateRegister,
 } from "./ralph-debt.mjs";
 import { hostReview } from "./ralph-host-review.mjs";
+import { placeRecoveryHold, recoveryHoldState } from "./ralph-quarantine.mjs";
 import { isToolchain, TOOLCHAIN_IMPORTERS } from "./ralph-toolchain.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1455,30 +1458,94 @@ const stampOf = (label) =>
  * The host's review did not approve a slice: none of the run reaches the base branch. As
  * reject_slice does, the work is kept in quarantine and the ticket is blocked, here in the host's
  * own commit, so the batch stops on it as a rejection. The commit names where the work really is.
+ * If that commit cannot be made, the base still offers the ticket: see recoveryRequired.
  */
 function applyReviewRejection({ review }, { namespace }) {
   const { slug, slice, verdict } = review.rejected;
   const kept = quarantine(`${slug}-${stampOf(basename(namespace))}`, slice, namespace);
   const where = kept ?? `${namespace}/, as no quarantine ref could be created`;
   const file = `issues/${slug}.md`;
-  const text = readFileSync(join(root, file), "utf8");
-  writeFileSync(join(root, file), text.replace(/^(\*\*Status:\*\* ).*$/m, "$1blocked"));
-  gitOut("add", "--", file);
-  gitOut(
-    "commit",
-    "--quiet",
-    "-m",
-    `chore(issues): block ${file} after the host review`,
-    "-m",
-    `The host's isolated Standards and Spec review of slice/${slug} (${short(slice)}) was ` +
-      `${verdict}, so the slice did not merge. It is ${kept ? "preserved on" : "kept in"} ${where}. ` +
-      `Report: .ralph/host-review/${basename(namespace)}/${slug}/review.md`,
-  );
+  const subjectLine = `chore(issues): block ${file} after the host review`;
+  const before = gitOut("rev-parse", "HEAD");
+  try {
+    const text = readFileSync(join(root, file), "utf8");
+    writeFileSync(join(root, file), text.replace(/^(\*\*Status:\*\* ).*$/m, "$1blocked"));
+    gitOut("add", "--", file);
+    gitOut(
+      "commit",
+      "--quiet",
+      "-m",
+      subjectLine,
+      "-m",
+      `The host's isolated Standards and Spec review of slice/${slug} (${short(slice)}) was ` +
+        `${verdict}, so the slice did not merge. It is ${kept ? "preserved on" : "kept in"} ${where}. ` +
+        `Report: .ralph/host-review/${basename(namespace)}/${slug}/review.md`,
+    );
+  } catch (error) {
+    // A commit can fail after writing it (a ref lock released late): only a HEAD that did not
+    // move to exactly this record counts as not blocked.
+    const head = gitOut("rev-parse", "HEAD");
+    if (head === before || subject(head) !== subjectLine) {
+      return recoveryRequired({ slug, slice, kept, namespace, file, error });
+    }
+  }
   if (kept) {
     clearNamespace(namespace);
   }
   log(`ticket ${slug} blocked: the host review was ${verdict}; the work is in ${where}`);
+  return { exit: 1, outcome: "review-rejected" };
 }
+
+/**
+ * D2, fail closed: the slice is rejected and preserved, but its blocked status is not on the base,
+ * so the ticket still looks ready-for-agent. A durable recovery hold (refs/ralph/recovery/<slug>,
+ * scripts/ralph-quarantine.mjs) names every ref that keeps the work; while any hold exists the
+ * importer applies nothing, and the batch and ralph-loop.sh start no run, until a human commits
+ * the status and releases the hold. The incoming refs are kept too: nothing is cleaned up.
+ */
+function recoveryRequired({ slug, slice, kept, namespace, file, error }) {
+  const reason = error instanceof Error ? error.message : String(error);
+  // The staged status line is undone so the checkout is the base the host vouched for; if even
+  // that fails, the batch's clean-checkout check stops on it.
+  const restored = git(["checkout", "--quiet", "HEAD", "--", file]).status === 0;
+  // A lookup that fails here must not stop the hold: it is placed with whatever is known.
+  const incoming = git(["for-each-ref", "--format=%(refname)", `${namespace}/`])
+    .stdout.split("\n")
+    .filter(Boolean);
+  const preserved = [...(kept ? [kept] : []), ...incoming];
+  let hold = null;
+  try {
+    hold = placeRecoveryHold(root, {
+      slug,
+      commit: slice,
+      preserved,
+      reason: `the host review rejected the slice, but its blocked status could not be committed: ${reason.split("\n")[0]}`,
+      base: git(["rev-parse", "--verify", "--quiet", "HEAD"]).stdout.trim() || null,
+      run: basename(namespace),
+    });
+  } catch (holdError) {
+    log(`ERROR: ${holdError instanceof Error ? holdError.message : String(holdError)}`);
+  }
+  log(`RECOVERY REQUIRED: ticket ${slug} was rejected by the host review, but its blocked status`);
+  log(`  could not be committed (${reason.split("\n")[0]}); ${file} is still ready-for-agent.`);
+  log(`  The slice ${short(slice)} is preserved on: ${preserved.join(", ") || "nothing listed"}.`);
+  log(
+    hold
+      ? `  Held by ${hold.ref} (${hold.object}): no run starts and nothing is accepted until a human`
+      : "  The recovery hold could not be recorded either: do NOT start another run;",
+  );
+  log(`  commits the blocked status of ${file}, then runs`);
+  log(
+    `  node scripts/ralph-quarantine.mjs release --ticket ${slug} --expect ${hold?.object ?? "<hold>"}`,
+  );
+  if (!restored) {
+    log(`  ${file} could not be restored in the checkout; restore it by hand`);
+  }
+  return { exit: 1, outcome: "recovery-required", reason, hold: hold?.ref ?? null };
+}
+
+/** Any recovery hold stops acceptance; holds that cannot be read count as held. */
+const recoveryHoldProblem = () => recoveryHoldState(root).problem;
 
 function apply({ tip, outcomes, pause, quarantines, review }, { base, namespace }) {
   if (tip !== base) {
@@ -1547,6 +1614,11 @@ function apply({ tip, outcomes, pause, quarantines, review }, { base, namespace 
 }
 
 function decide(runDir, run) {
+  const held = recoveryHoldProblem();
+  if (held) {
+    log(`${held}; nothing is applied until a human reconciles it (ralph-quarantine.mjs holds)`);
+    return { exit: 1, outcome: "recovery-required", reason: held };
+  }
   const outDir = join(runDir, "out");
   if (!plain(join(outDir, "result.bundle"), "file")) {
     log("the run produced no result.bundle; nothing to accept");
@@ -1563,8 +1635,7 @@ function decide(runDir, run) {
       log(`the host review could not run: ${plan.review.rejected.reason}; nothing is applied`);
       return { exit: 1, outcome: "review-unavailable", reason: plan.review.rejected.reason };
     }
-    applyReviewRejection(plan, run);
-    return { exit: 1, outcome: "review-rejected" };
+    return applyReviewRejection(plan, run);
   }
   apply(plan, run);
   if (plan.pause) {

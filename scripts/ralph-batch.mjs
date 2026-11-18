@@ -26,6 +26,11 @@
 //   ambiguous-merge, runner-failed, push-failed, ci-unverified, base-not-verified,
 //   checkout-changed                         resumable: fix, rerun      exit 1
 //   rejected, ci-failed                      final; `--new` starts over exit 1
+//   recovery-required (a rejection whose blocked status is not on the base: a durable recovery
+//                     hold, refs/ralph/recovery/<slug>, D2; also any hold found at any step)
+//                                            final; every batch, `--new` included, stops on it
+//                                            until a human commits the status and releases the
+//                                            hold (scripts/ralph-quarantine.mjs)  exit 1
 //   untrusted-result (runner exit 3: the host refused the run's output)
 //                                            final; `--new` starts over exit 1
 //
@@ -45,6 +50,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { redactCredentials } from "./ralph-artifacts.mjs";
 import { checkRegisterText, debtGate, loadTickets, parseRegister } from "./ralph-debt.mjs";
+import { printable } from "./ralph-push-inspect.mjs";
+import { placeRecoveryHold, recoveryHoldState } from "./ralph-quarantine.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const env = process.env;
@@ -79,8 +86,10 @@ const EXIT = {
 };
 
 class Stop extends Error {
+  // A detail can quote ref names a container chose (incoming refs, a hold's record): it reaches
+  // the terminal and state.json as printable ASCII only.
   constructor(reason, detail) {
-    super(detail);
+    super(printable(detail));
     this.reason = reason;
   }
 }
@@ -232,19 +241,138 @@ function mergeState(slug) {
   return !done && merge === "" && archived.status !== 0 ? "absent" : "ambiguous";
 }
 
-// A rejection always leaves a new quarantine ref, even when the sandbox could not move the base
-// branch and its blocked status went to a ralph/blocked-* side branch instead. The host imports a
-// sandbox run's under refs/ralph/rejected/ (TD-059); a runner outside the sandbox still leaves a
-// rejected/* branch. Either one stops the batch: counting both can only stop it more often.
-function rejectedRefs(slug) {
-  return gitOut(
-    "for-each-ref",
-    "--format=%(refname)",
-    `refs/ralph/rejected/${slug}-*`,
-    `refs/heads/rejected/${slug}-*`,
-  )
-    .split("\n")
-    .filter(Boolean);
+// Every ref a rejection can leave, as "<ref> <sha>": quarantine (refs/ralph/rejected/, TD-059),
+// a runner outside the sandbox's rejected/* branch, the importer's incoming refs, and a
+// ralph/blocked-* side branch (local, imported, or a remote-tracking copy). Taken before and after
+// a run, so only what this run left counts as its evidence.
+const EVIDENCE = [
+  "refs/ralph/rejected/",
+  "refs/heads/rejected/",
+  "refs/ralph/incoming/",
+  "refs/heads/ralph/",
+  "refs/remotes/",
+];
+const evidenceRefs = () =>
+  new Set(
+    gitOut("for-each-ref", "--format=%(refname) %(objectname)", ...EVIDENCE)
+      .split("\n")
+      .filter(Boolean),
+  );
+
+/** What this run left for ticket `slug`, by kind. Nothing here is ever moved or deleted. */
+function newEvidence(before, slug) {
+  const fresh = [...evidenceRefs()]
+    .filter((line) => !before.has(line))
+    .map((line) => line.split(" ")[0] ?? "");
+  const incoming = fresh.filter((ref) => ref.startsWith("refs/ralph/incoming/"));
+  return {
+    quarantine: fresh.filter(
+      (ref) =>
+        ref.startsWith(`refs/ralph/rejected/${slug}-`) ||
+        ref.startsWith(`refs/heads/rejected/${slug}-`),
+    ),
+    incoming,
+    // The run's own rejected/* branch that the importer could not quarantine.
+    incomingRejected: incoming.filter((ref) => ref.includes(`/rejected/${slug}-`)),
+    // The run's slice in incoming refs: the commit a hold names. Alone it is no evidence of a
+    // rejection: an unavailable host review keeps it too, and that stop is resumable.
+    incomingSlice: incoming.filter((ref) => ref.endsWith(`/slice/${slug}`)),
+    side: fresh.filter((ref) =>
+      /^refs\/(?:heads\/|ralph\/incoming\/[^/]+\/|remotes\/[^/]+\/)ralph\/blocked-/.test(ref),
+    ),
+  };
+}
+
+// D2: an unreconciled rejection (its work kept, its blocked status not on the base) holds every
+// run, in this batch and in any later one, until a human releases it. Unreadable holds hold too.
+function assertNoRecoveryHold() {
+  const { problem } = recoveryHoldState(root);
+  if (problem) {
+    throw new Stop(
+      "recovery-required",
+      `${problem}; no ticket starts. ${reconcile("<NN-slug>", "<object>")}`,
+    );
+  }
+}
+
+const reconcile = (slug, object) =>
+  `To reconcile: commit the ticket's blocked status on ${BASE} and push it, then run node scripts/ralph-quarantine.mjs release --ticket ${slug} --expect ${object}, and start a new batch with --new`;
+
+// The hold the importer already placed for this ticket, if it can be read. An unreadable state
+// means "place one": placing is create-only, and the next iteration stops on it either way.
+const holdsFor = (slug) => recoveryHoldState(root).holds.filter((hold) => hold.slug === slug);
+
+// The first preserved ref that names a commit. Incoming refs come from the container's bundle and
+// may point at anything, and their names (so their order) are the container's choice.
+function preservedCommit(refs) {
+  for (const ref of refs) {
+    const resolved = run("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+    if (resolved.status === 0) {
+      return resolved.stdout.trim();
+    }
+  }
+  return null;
+}
+
+/** The ticket is blocked on the base: an ordinary, final rejection. Says where the work really is. */
+function rejected(entry, evidence) {
+  const where =
+    evidence.quarantine.length > 0
+      ? `its work is preserved on ${evidence.quarantine.join(", ")} (read-only: node scripts/ralph-quarantine.mjs inspect <ref>)`
+      : evidence.incoming.length > 0
+        ? `no quarantine ref could be created, so its work is preserved only in ${evidence.incoming.join(", ")}; keep them until it is copied (node scripts/ralph-quarantine.mjs list)`
+        : "this run left no new quarantine or incoming ref; the importer's log names where its work is";
+  return new Stop(
+    "rejected",
+    `ticket ${entry.number} was rejected and is blocked on ${BASE}; ${where}; logs in .ralph/logs`,
+  );
+}
+
+function recoveryReason(evidence) {
+  if (evidence.side.length > 0) {
+    return `was rejected, but its blocked status is only on ${evidence.side.join(", ")}, not on ${BASE} (merge that or commit it on ${BASE})`;
+  }
+  return `was rejected, but its blocked status could not be committed on ${BASE}`;
+}
+
+/**
+ * The run left rejection evidence, but the base still offers the ticket (its blocked status went
+ * to a side branch, or could not be committed). Fail closed: hold it durably, so neither this
+ * batch nor a fresh one, nor the importer, runs or accepts anything until a human reconciles it.
+ * The importer normally placed the hold already; this places one when it did not.
+ */
+function recoveryRequired(entry, evidence, existing) {
+  const preserved = [...evidence.quarantine, ...evidence.incoming];
+  const why = recoveryReason(evidence);
+  let hold = existing[0] ?? null;
+  let note = "";
+  if (hold === null) {
+    // Resolved before, and outside, the write: no lookup can stop the hold from being placed.
+    const commit = preservedCommit([
+      ...evidence.quarantine,
+      ...evidence.incomingSlice,
+      ...evidence.incomingRejected,
+    ]);
+    try {
+      const placed = placeRecoveryHold(root, {
+        slug: entry.slug,
+        commit,
+        preserved,
+        reason: `ticket ${entry.number} ${why}`,
+        base: run("git", ["rev-parse", "--verify", "--quiet", BASE]).stdout.trim() || null,
+      });
+      hold = { ref: placed.ref, object: placed.object };
+    } catch (error) {
+      note = `; the recovery hold could NOT be recorded (${error instanceof Error ? error.message : String(error)}): start no run for ticket ${entry.number} before reconciling it`;
+    }
+  }
+  const held = hold
+    ? `; held by ${hold.ref} (${hold.object}): no run starts until it is released. ${reconcile(entry.slug, hold.object)}`
+    : "";
+  return new Stop(
+    "recovery-required",
+    `ticket ${entry.number} ${why}, so it still looks ready-for-agent; its work is preserved on ${preserved.join(", ") || "no ref this batch can see (the importer's log names it)"}${held}${note}`,
+  );
 }
 
 function ticketStatus(slug) {
@@ -355,7 +483,7 @@ function runTicket(state, entry) {
   }
   assertDebtClears(entry.number);
   log(`ticket ${entry.number}: running ${entry.slug} in a fresh sandbox`);
-  const quarantined = new Set(rejectedRefs(entry.slug));
+  const before = evidenceRefs();
   const [command, ...args] = words(RUNNER);
   const result = spawnSync(command, [...args, "--ticket", entry.number], {
     cwd: root,
@@ -395,18 +523,23 @@ function runTicket(state, entry) {
       `the runner reported success, but ticket ${entry.number} is not merged on ${BASE}`,
     );
   }
-  const quarantine = rejectedRefs(entry.slug).find((ref) => !quarantined.has(ref));
-  if (ticketStatus(entry.slug) === "blocked" || quarantine !== undefined) {
+  // Four outcomes, each reported as what the repository shows, never as what might have happened:
+  // blocked on the base (work quarantined, or only in incoming refs), or not blocked although the
+  // run left a quarantine ref, a side branch or a hold (recovery required, D2).
+  const evidence = newEvidence(before, entry.slug);
+  if (ticketStatus(entry.slug) === "blocked") {
     entry.stage = "rejected";
-    const blocked =
-      ticketStatus(entry.slug) === "blocked"
-        ? "is blocked"
-        : `is blocked on a ralph/blocked-* side branch (merge it into ${BASE})`;
-    throw new Stop(
-      "rejected",
-      // No new quarantine ref: the importer kept the work in refs/ralph/incoming/ and logged why.
-      `ticket ${entry.number} was rejected and ${blocked}; see ${quarantine ?? "refs/ralph/rejected/ or refs/ralph/incoming/ (the importer's log names it)"} and .ralph/logs`,
-    );
+    throw rejected(entry, evidence);
+  }
+  const held = holdsFor(entry.slug);
+  if (
+    held.length > 0 ||
+    evidence.quarantine.length > 0 ||
+    evidence.side.length > 0 ||
+    evidence.incomingRejected.length > 0
+  ) {
+    entry.stage = "rejected";
+    throw recoveryRequired(entry, evidence, held);
   }
   throw new Stop(
     "runner-failed",
@@ -465,6 +598,7 @@ function advance(state, entry) {
 
 function runBatch(state) {
   for (;;) {
+    assertNoRecoveryHold();
     const inFlight = state.tickets.find((entry) => entry.stage !== "verified");
     if (inFlight) {
       advance(state, inFlight);

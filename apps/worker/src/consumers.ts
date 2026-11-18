@@ -24,11 +24,18 @@ export interface ServiceConsumerDeps {
   readonly logger?: Logger;
 }
 
-/** The durable consumers of the payment saga: mock Payment, the booking saga, then mock Notification (spec: Messaging). */
+/** The durable consumers of the payment saga: mock Payment, the booking saga, then mock Notification for confirmations and expiries (spec: Messaging). */
 export function createServiceConsumers(
   deps: ServiceConsumerDeps,
 ): Omit<ConsumerRunnerOptions, "bus" | "prisma" | "logger">[] {
   const loggerOption = deps.logger === undefined ? {} : { logger: deps.logger };
+  const notificationHandler = createNotificationHandler({
+    prisma: deps.prisma,
+    provider: deps.notificationProvider ?? createMockNotificationProvider(),
+    clock: deps.clock,
+    newId: deps.newId,
+    ...loggerOption,
+  });
   return [
     {
       service: "payment",
@@ -56,13 +63,14 @@ export function createServiceConsumers(
       service: "notification",
       consumer: "notification",
       filterSubject: "ta.order.confirmed",
-      handler: createNotificationHandler({
-        prisma: deps.prisma,
-        provider: deps.notificationProvider ?? createMockNotificationProvider(),
-        clock: deps.clock,
-        newId: deps.newId,
-        ...loggerOption,
-      }),
+      handler: notificationHandler,
+    },
+    // A durable consumer takes one filter subject; a second one keeps the first's config intact.
+    {
+      service: "notification",
+      consumer: "notification-expired",
+      filterSubject: "ta.order.expired",
+      handler: notificationHandler,
     },
   ];
 }

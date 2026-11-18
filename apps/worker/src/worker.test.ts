@@ -96,7 +96,7 @@ describe("worker hold sweeper", () => {
           if (failFirst && calls === 1) {
             throw new Error("database unavailable");
           }
-          return { expiredHoldIds: [] };
+          return { expiredHoldIds: [], expiredOrderIds: [] };
         },
       },
     };

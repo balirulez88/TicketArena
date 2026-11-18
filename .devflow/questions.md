@@ -42,3 +42,27 @@ Ticket 13 lets an expired-but-unswept HELD hold be released; ticket 14 says a ho
 Assumed: No change in ticket 14: releaseHold stays as ticket 13 built it (the seats end AVAILABLE either way); revisit if the answer to ticket 13's question says otherwise
 
 Answer: Overridden (2026-11-18): yes, see the second question of ticket 13. Fix: ticket 60.
+
+## 2026-11-18 12:40 ticket 15
+
+Where does order expiry run, and as which consumer does Notification receive order.expired?
+
+Assumed: Inside BookingService.sweepExpired() after holds (batches of 100); Notification gets a second durable consumer notification-expired on ta.order.expired, template order-expiry
+
+Answer: (open)
+
+## 2026-11-18 12:40 ticket 15
+
+What does the order.expired payload carry?
+
+Assumed: { orderId, contact } per the spec event catalogue; order's correlationId, causationId null; no seatIds
+
+Answer: (open)
+
+## 2026-11-18 12:40 ticket 15
+
+Add an index on orders(status, paymentDeadline) for the sweep?
+
+Assumed: No migration in ticket 15; the sweep scans orders
+
+Answer: (open)

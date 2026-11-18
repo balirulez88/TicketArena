@@ -137,7 +137,15 @@ with those `holdId`s `ORDER BY id FOR UPDATE`, sets the holds `EXPIRED` and thos
 (`holdId` and `claimBuyerKey` cleared; a seat taken over lazily is left alone), and writes one
 `hold.expired` outbox row per hold. A hold `placeOrder` has locked is skipped; one it has converted
 no longer matches `HELD`, so checkout and the sweeper never both win (the hold row lock serializes
-them). `apps/worker` runs it every 15 s.
+them). The same call then expires overdue orders: per transaction (batches of 100) it reads `T`,
+claims `PENDING_PAYMENT` orders with `paymentDeadline + 60 s` (settlement grace) `<= T`
+`FOR UPDATE SKIP LOCKED`, locks their `IN_CHECKOUT` seats (by the order's `holdId`)
+`ORDER BY id FOR UPDATE`, sets the orders `EXPIRED` and those seats `AVAILABLE` (`holdId` and
+`claimBuyerKey` cleared, so the buyer limit drops) and writes one `order.expired` outbox row per
+order with the contact. Invariant: `IN_CHECKOUT` seats are freed only in the transaction that ends
+the checkout; lazy expiry and the hold sweeper never free them, so checkout outlives the hold's own
+expiry (AT-10). An order the payment saga has locked is skipped and re-checked next sweep. The hold
+stays `ORDERED`. `apps/worker` runs it every 15 s.
 
 Catalog API (`apps/web`): `events.list`, `events.get`, `seats.map`. Inputs and outputs are zod
 validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.
@@ -157,11 +165,11 @@ The mock Payment service ([ADR 0009](../adr/0009-per-service-schemas.md)) owns t
 
 The mock Notification service owns its tables the same way (ADR 0009); no foreign keys to `public`.
 
-| Table                             | Purpose                                                                                                                                                                  |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `notification.outbox_events`      | Notification's own outbox, same shape as `public.outbox_events`; the relay drains it                                                                                     |
-| `notification.processed_messages` | Notification consumer dedupe                                                                                                                                             |
-| `notification.notifications`      | One row per (`sourceEventId` = `order.confirmed` event id, `channel` `EMAIL\|SMS`): `recipient`, `template`, `status` `PENDING\|SENT`; unique `(sourceEventId, channel)` |
+| Table                             | Purpose                                                                                                                                                                                                                            |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `notification.outbox_events`      | Notification's own outbox, same shape as `public.outbox_events`; the relay drains it                                                                                                                                               |
+| `notification.processed_messages` | Notification consumer dedupe                                                                                                                                                                                                       |
+| `notification.notifications`      | One row per (`sourceEventId` = `order.confirmed` or `order.expired` event id, `channel` `EMAIL\|SMS`): `recipient`, `template` (`order-confirmation`, `order-expiry`), `status` `PENDING\|SENT`; unique `(sourceEventId, channel)` |
 
 ### `outbox_events`
 

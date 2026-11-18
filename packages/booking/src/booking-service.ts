@@ -5,6 +5,7 @@ import {
   holdExpiredPayloadSchema,
   holdReleasedPayloadSchema,
   type Logger,
+  orderExpiredPayloadSchema,
   orderPlacedPayloadSchema,
   seatHeldPayloadSchema,
   silentLogger,
@@ -101,15 +102,18 @@ export interface BookingService {
   /** `null` for an unknown order and for someone else's: existence is not leaked. */
   getOrder(buyer: Buyer, orderId: string): Promise<OrderView | null>;
   /**
-   * The sweeper's step: every `HELD` hold with `holdExpiresAt <= T` becomes `EXPIRED`, frees the
-   * seats it still owns and writes `hold.expired`. Holds another transaction has locked are
-   * skipped, never waited for; the next sweep finds them if they are still `HELD`.
+   * The sweeper's step. Every `HELD` hold with `holdExpiresAt <= T` becomes `EXPIRED`, frees the
+   * seats it still owns and writes `hold.expired`. Every `PENDING_PAYMENT` order with
+   * `paymentDeadline + settlement grace <= T` becomes `EXPIRED`, frees its `IN_CHECKOUT` seats and
+   * writes `order.expired`. Rows another transaction has locked are skipped, never waited for; the
+   * next sweep finds them if they still match.
    */
   sweepExpired(): Promise<SweepResult>;
 }
 
 export interface SweepResult {
   readonly expiredHoldIds: readonly string[];
+  readonly expiredOrderIds: readonly string[];
 }
 
 export class HoldNotFoundError extends Error {
@@ -224,6 +228,10 @@ const HOLD_RELEASED_EVENT = "hold.released";
 const releasedEnvelope = envelopeSchema(holdReleasedPayloadSchema);
 const HOLD_EXPIRED_EVENT = "hold.expired";
 const expiredEnvelope = envelopeSchema(holdExpiredPayloadSchema);
+const ORDER_EXPIRED_EVENT = "order.expired";
+const orderExpiredEnvelope = envelopeSchema(orderExpiredPayloadSchema);
+// Absorbs late delivery of an on-time payment and NTP-level clock skew (ADR 0006); best-effort.
+const SETTLEMENT_GRACE_MS = 60_000;
 // Bounds one sweep transaction; a sweep repeats batches until a short one says nothing is left.
 const SWEEP_BATCH_SIZE = 100;
 
@@ -650,6 +658,111 @@ export function createBookingService({
     return swept;
   }
 
+  interface ExpiredOrder {
+    readonly id: string;
+    readonly holdId: string;
+    readonly correlationId: string;
+    readonly seatIds: string[];
+  }
+
+  /**
+   * One transaction, one `T`: expires up to a batch of overdue orders. This is the only path that
+   * frees `IN_CHECKOUT` seats of an unpaid order, and it does so in the transaction that ends the
+   * checkout, so a seat is never `AVAILABLE` while its order is still `PENDING_PAYMENT`.
+   */
+  async function sweepOrderBatch(): Promise<ExpiredOrder[]> {
+    const swept = await db.$transaction(async (tx) => {
+      // As for holds: SKIP LOCKED never waits, so T read before the claim is not stale. An order
+      // the saga holds locked is skipped; once the saga commits it no longer matches the status.
+      const sweptAt = clock.now();
+      const overdueBefore = new Date(sweptAt.getTime() - SETTLEMENT_GRACE_MS);
+      const orders = await tx.$queryRaw<
+        {
+          id: string;
+          holdId: string;
+          correlationId: string;
+          contactEmail: string;
+          contactPhone: string | null;
+        }[]
+      >`
+        SELECT id::text AS id, "holdId"::text AS "holdId",
+               "correlationId"::text AS "correlationId", "contactEmail", "contactPhone"
+        FROM orders
+        WHERE status::text = 'PENDING_PAYMENT' AND "paymentDeadline" <= ${overdueBefore}
+        ORDER BY id
+        LIMIT ${SWEEP_BATCH_SIZE}
+        FOR UPDATE SKIP LOCKED`;
+      if (orders.length === 0) {
+        return [];
+      }
+      const holdIds = orders.map((order) => order.holdId);
+      // Lock order: orders, then seats by id, as the payment saga does. A seat in checkout keeps
+      // its order's holdId, so the holdId names exactly the seats this checkout claims.
+      const seats = await tx.$queryRaw<{ id: string; holdId: string }[]>`
+        SELECT id::text AS id, "holdId"::text AS "holdId" FROM seats
+        WHERE "holdId" = ANY(${holdIds}::uuid[]) AND status::text = 'IN_CHECKOUT'
+        ORDER BY id FOR UPDATE`;
+
+      await tx.order.updateMany({
+        where: { id: { in: orders.map((order) => order.id) } },
+        data: { status: "EXPIRED" },
+      });
+      await tx.seat.updateMany({
+        where: { id: { in: seats.map((seat) => seat.id) }, status: "IN_CHECKOUT" },
+        data: { status: "AVAILABLE", holdId: null, claimBuyerKey: null },
+      });
+
+      // Same transaction as the state change: each event exists iff its expiry committed.
+      await tx.outboxEvent.createMany({
+        data: orders.map((order) => {
+          const envelope = orderExpiredEnvelope.parse({
+            id: newId(),
+            type: ORDER_EXPIRED_EVENT,
+            version: 1,
+            occurredAt: sweptAt.toISOString(),
+            correlationId: order.correlationId,
+            causationId: null,
+            holdId: order.holdId,
+            orderId: order.id,
+            payload: {
+              orderId: order.id,
+              contact: {
+                email: order.contactEmail,
+                ...(order.contactPhone === null ? {} : { phone: order.contactPhone }),
+              },
+            },
+          });
+          return {
+            id: envelope.id,
+            aggregateType: "order",
+            aggregateId: order.id,
+            eventType: ORDER_EXPIRED_EVENT,
+            payload: envelope,
+          };
+        }),
+      });
+      return orders.map(({ id, holdId, correlationId }) => ({
+        id,
+        holdId,
+        correlationId,
+        seatIds: seats.filter((seat) => seat.holdId === holdId).map((seat) => seat.id),
+      }));
+    });
+    for (const order of swept) {
+      logger
+        .child(
+          envelopeLogBindings({
+            correlationId: order.correlationId,
+            causationId: null,
+            holdId: order.holdId,
+            orderId: order.id,
+          }),
+        )
+        .info({ seatIds: order.seatIds }, "order expired");
+    }
+    return swept;
+  }
+
   async function holdOnce(buyer: Buyer, eventId: string, seatIds: readonly string[]) {
     if (seatIds.length === 0) {
       throw new InvalidSeatSelectionError("seatIds is empty");
@@ -998,7 +1111,15 @@ export function createBookingService({
         const batch = await sweepBatch();
         expiredHoldIds.push(...batch.map((hold) => hold.id));
         if (batch.length < SWEEP_BATCH_SIZE) {
-          return { expiredHoldIds };
+          break;
+        }
+      }
+      const expiredOrderIds: string[] = [];
+      for (;;) {
+        const batch = await sweepOrderBatch();
+        expiredOrderIds.push(...batch.map((order) => order.id));
+        if (batch.length < SWEEP_BATCH_SIZE) {
+          return { expiredHoldIds, expiredOrderIds };
         }
       }
     },

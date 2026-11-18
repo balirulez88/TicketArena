@@ -12,7 +12,7 @@ import {
 } from "@ticketarena/messaging";
 import { createSweeperLoop } from "./sweeper.js";
 
-/** How often expired holds are swept (spec: Expiry); lazy expiry covers the gap in between. */
+/** How often expired holds and overdue orders are swept (spec: Expiry); lazy expiry covers held seats in between. */
 export const SWEEP_INTERVAL_MS = 15_000;
 
 export interface WorkerOptions {
@@ -23,7 +23,7 @@ export interface WorkerOptions {
   readonly relay?: Pick<OutboxRelayOptions, "intervalMs" | "batchSize">;
   /** Durable consumers this worker hosts; services register theirs here. */
   readonly consumers?: readonly Omit<ConsumerRunnerOptions, "bus" | "prisma" | "logger">[];
-  /** The hold sweeper; the booking service carries the clock it decides expiry with. */
+  /** The sweeper of holds and orders; the booking service carries the clock it decides expiry with. */
   readonly sweeper?: {
     readonly booking: Pick<BookingService, "sweepExpired">;
     readonly intervalMs?: number;

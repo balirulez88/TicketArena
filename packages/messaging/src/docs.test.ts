@@ -25,3 +25,13 @@ describe("logging docs", () => {
     }
   });
 });
+
+describe("provider latency docs", () => {
+  it("docs/messaging places the payment provider latency in beforeTransaction, outside the transaction and before dedupe-and-capture (TD-051)", () => {
+    const doc = readFileSync(join(docsDir, "messaging", "index.md"), "utf8");
+    expect(doc).toContain("`beforeTransaction`");
+    expect(doc).toContain("outside the transaction");
+    expect(doc).toContain("before dedupe-and-capture");
+    expect(doc).toContain("interactive-transaction timeout");
+  });
+});

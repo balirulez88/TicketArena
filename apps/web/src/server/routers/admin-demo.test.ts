@@ -1,0 +1,215 @@
+import { randomUUID } from "node:crypto";
+import {
+  createRedisBookingMetrics,
+  createRedisBookingMetricsReader,
+  createRedisBookingMetricsReset,
+} from "@ticketarena/booking";
+import { silentLogger } from "@ticketarena/contracts";
+import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
+import { setupTestDatabase, setupTestRedis, setupTestUpstash } from "@ticketarena/test-infra";
+import { createRedisQueueStore } from "@ticketarena/waiting-room";
+import { createClient } from "redis";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import type { Principal } from "../identity/identity";
+import { createAdminRateLimiter } from "../rate-limiter";
+import type { TRPCContext } from "../trpc";
+import { createUpstashMetricsClient } from "../upstash-metrics";
+import { createCaller } from "./_app";
+
+const database = setupTestDatabase();
+const redis = setupTestRedis();
+const upstash = setupTestUpstash();
+const redisClient = createClient({ url: redis.url });
+const upstashClient = createUpstashMetricsClient({ url: upstash.url, token: upstash.token });
+let prisma: PrismaClient | undefined;
+
+function db(): PrismaClient {
+  prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
+  return prisma;
+}
+
+const NOW = new Date("2027-03-01T12:00:00.000Z");
+
+beforeAll(async () => {
+  await redisClient.connect();
+  await seedCatalog(db(), NOW);
+});
+
+afterAll(async () => {
+  redisClient.destroy();
+  await prisma?.$disconnect();
+});
+
+const queueStore = () => createRedisQueueStore(redisClient, { prefix: redis.prefix });
+// The race's 100 counter increments go to node-redis, not the shared Upstash HTTP proxy, so this
+// file's burst cannot starve other files' Upstash calls; the commands and key layout are the same.
+const metricsPrefix = `${redis.prefix}metrics:`;
+
+// A fresh limiter namespace per test: each test starts with both actions allowed once.
+let limiterPrefix = "";
+function freshLimiter(): void {
+  limiterPrefix = `${upstash.prefix}${randomUUID()}:`;
+}
+beforeEach(freshLimiter);
+
+function caller(overrides: Partial<TRPCContext> = {}) {
+  return createCaller({
+    now: () => NOW,
+    principal: guest(),
+    isAdmin: true,
+    db: db(),
+    logger: silentLogger,
+    metrics: () => createRedisBookingMetrics(redisClient, metricsPrefix),
+    metricsReader: () => createRedisBookingMetricsReader(redisClient, metricsPrefix),
+    metricsReset: () => createRedisBookingMetricsReset(redisClient, metricsPrefix),
+    rateLimiter: () => createAdminRateLimiter(upstashClient, limiterPrefix),
+    queueStore: async () => queueStore(),
+    random: { next: () => 0 },
+    ...overrides,
+  });
+}
+
+const guest = (): Principal => ({ kind: "guest", sessionId: randomUUID().replaceAll("-", "") });
+
+async function events() {
+  const demo = await db().event.findFirstOrThrow({ where: { demo: true } });
+  const others = await db().event.findMany({ where: { demo: false } });
+  return { demo, others };
+}
+
+/** Every seat, hold and order of the non-demo events, to prove the demo actions left them alone. */
+async function otherEventsState(otherIds: readonly string[]) {
+  const [seats, holds, orders] = await Promise.all([
+    db().seat.findMany({ where: { eventId: { in: [...otherIds] } }, orderBy: { id: "asc" } }),
+    db().hold.findMany({ where: { eventId: { in: [...otherIds] } }, orderBy: { id: "asc" } }),
+    db().order.findMany({
+      where: { hold: { eventId: { in: [...otherIds] } } },
+      orderBy: { id: "asc" },
+    }),
+  ]);
+  return { seats, holds, orders };
+}
+
+describe("admin.runRace", () => {
+  test("AT-45: 100 synthetic buyers race for one demo seat and exactly one wins", async () => {
+    const { demo } = await events();
+    let tick = 0;
+    // Each clock read is 1 ms later, so the duration is measured on the injected clock.
+    const now = () => new Date(NOW.getTime() + tick++);
+
+    const race = await caller({ now }).admin.runRace();
+
+    expect(race.eventId).toBe(demo.id);
+    expect(race.buyers).toBe(100);
+    expect(race.successes).toBe(1);
+    expect(race.seatUnavailable + race.bookingBusy).toBe(99);
+    expect(race.otherErrors).toBe(0);
+    expect(race.durationMs).toBeGreaterThan(0);
+    const seat = await db().seat.findUniqueOrThrow({ where: { id: race.seatId } });
+    expect(seat).toMatchObject({ eventId: demo.id, status: "HELD", holdId: race.winner?.holdId });
+    // The winner's seat.held event is the race's entry in the outbox, which the live feed reads.
+    const held = await db().outboxEvent.findMany({
+      where: { eventType: "seat.held", aggregateId: race.winner?.holdId ?? "" },
+    });
+    expect(held).toHaveLength(1);
+    expect(held[0]?.payload).toMatchObject({ correlationId: race.winner?.correlationId });
+    expect(await db().hold.count({ where: { seats: { some: { id: race.seatId } } } })).toBe(1);
+  });
+});
+
+describe("admin.resetDemo", () => {
+  test("clears the demo event's bookings and Redis keys and frees its seats", async () => {
+    const { demo, others } = await events();
+    const other = others[0];
+    if (other === undefined) {
+      throw new Error("the seed has no non-demo event");
+    }
+    await caller().admin.runRace();
+    const counters = createRedisBookingMetrics(redisClient, metricsPrefix);
+    await counters.increment("hold_ok", demo.id);
+    await counters.increment("hold_ok", other.id);
+    await queueStore().join(demo.id, "q1", { kind: "SEQUENCE" });
+    await queueStore().join(other.id, "q1", { kind: "SEQUENCE" });
+
+    const reset = await caller().admin.resetDemo();
+
+    expect(reset).toMatchObject({ eventId: demo.id, ordersDeleted: 0, ledgerRowsDeleted: 0 });
+    expect(reset.holdsDeleted).toBeGreaterThan(0);
+    expect(await db().hold.count({ where: { eventId: demo.id } })).toBe(0);
+    expect(
+      await db().seat.count({ where: { eventId: demo.id, status: { not: "AVAILABLE" } } }),
+    ).toBe(0);
+    const reader = createRedisBookingMetricsReader(redisClient, metricsPrefix);
+    expect((await reader.read(demo.id)).hold_ok).toBe(0);
+    expect((await reader.read(other.id)).hold_ok).toBe(1);
+    expect(await queueStore().counts(demo.id)).toEqual({ queued: 0, active: 0 });
+    expect(await queueStore().counts(other.id)).toEqual({ queued: 1, active: 0 });
+  });
+
+  test("a demo order awaiting payment refuses the reset with PRECONDITION_FAILED", async () => {
+    const { demo } = await events();
+    const buyer = guest();
+    const [seat] = await db().seat.findMany({
+      where: { eventId: demo.id, status: "AVAILABLE" },
+      take: 1,
+    });
+    const hold = await caller({ principal: buyer }).booking.holdSeats({
+      eventId: demo.id,
+      seatIds: [seat?.id ?? ""],
+    });
+    const order = await caller({ principal: buyer }).booking.placeOrder({
+      holdId: hold.id,
+      contact: { email: "buyer@example.com" },
+      idempotencyKey: randomUUID(),
+    });
+
+    await expect(caller().admin.resetDemo()).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+      message: expect.stringContaining("PENDING_PAYMENT"),
+    });
+    expect(await db().order.count({ where: { id: order.id } })).toBe(1);
+
+    await db().order.update({ where: { id: order.id }, data: { status: "EXPIRED" } });
+    freshLimiter();
+    await caller().admin.resetDemo();
+  });
+});
+
+describe("AT-44: race and reset only touch the demo event and are rate-limited", () => {
+  test("neither action touches a non-demo event's seats, holds or orders", async () => {
+    const { others } = await events();
+    const otherIds = others.map((event) => event.id);
+    const other = others[0];
+    const [seat] = await db().seat.findMany({ where: { eventId: other?.id ?? "" }, take: 1 });
+    await caller().booking.holdSeats({ eventId: other?.id ?? "", seatIds: [seat?.id ?? ""] });
+    const before = await otherEventsState(otherIds);
+
+    await caller().admin.runRace();
+    await caller().admin.resetDemo();
+
+    expect(await otherEventsState(otherIds)).toEqual(before);
+  });
+
+  test("a second race or reset within 10 s is TOO_MANY_REQUESTS and does nothing", async () => {
+    const { demo } = await events();
+    await caller().admin.runRace();
+    await caller().admin.resetDemo();
+    const holdsBefore = await db().hold.count({ where: { eventId: demo.id } });
+
+    await expect(caller().admin.runRace()).rejects.toMatchObject({
+      code: "TOO_MANY_REQUESTS",
+      message: expect.stringMatching(/1 per 10 s.*retry in \d+ s/),
+    });
+    expect(await db().hold.count({ where: { eventId: demo.id } })).toBe(holdsBefore);
+    await expect(caller().admin.resetDemo()).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS" });
+  });
+
+  test("without the admin cookie both actions are UNAUTHORIZED", async () => {
+    await expect(caller({ isAdmin: false }).admin.runRace()).rejects.toMatchObject({
+      code: "UNAUTHORIZED",
+    });
+    await expect(caller({ isAdmin: false }).admin.resetDemo()).rejects.toMatchObject({
+      code: "UNAUTHORIZED",
+    });
+  });
+});

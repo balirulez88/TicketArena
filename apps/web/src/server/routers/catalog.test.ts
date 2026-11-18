@@ -17,9 +17,19 @@ function caller() {
   return createCaller({
     now: () => new Date("2027-03-01T12:00:00.000Z"),
     principal: { kind: "guest", sessionId: "0123456789abcdef0123456789abcdef" },
+    isAdmin: false,
     db: db(),
     logger: silentLogger,
     metrics: () => ({ increment: async () => undefined }),
+    metricsReader: () => {
+      throw new Error("metrics are not read here");
+    },
+    metricsReset: () => {
+      throw new Error("metrics are not reset here");
+    },
+    rateLimiter: () => {
+      throw new Error("nothing is rate-limited here");
+    },
     queueStore: () => Promise.reject(new Error("the queue is not used here")),
     random: { next: () => 0 },
   });

@@ -153,6 +153,30 @@ the checkout; lazy expiry and the hold sweeper never free them, so checkout outl
 expiry (AT-10). An order the payment saga has locked is skipped and re-checked next sweep. The hold
 stays `ORDERED`. `apps/worker` runs it every 15 s.
 
+### Demo reset
+
+`BookingService.resetEvent(eventId)` returns the demo event to its seeded state so the race can run
+again. One transaction: it refuses any event whose `demo` flag is not set (`NOT_DEMO_EVENT`), then
+locks the event's `holds`, their `orders` and its `seats` (each `ORDER BY id FOR UPDATE`, in that
+order, which no booking path inverts: `placeOrder` locks a hold before seats, the saga and sweeper
+an order before seats). It is `RESET_BLOCKED` while an order is `PENDING_PAYMENT` or a refund
+obligation is open (an `order_payments` row `REFUND_REQUESTED` or `MANUAL_REVIEW`), and also when a
+seat carries a hold it did not lock (a booking committed mid-reset); blocked means nothing
+changed. Otherwise it sets every seat not plain `AVAILABLE` back to `AVAILABLE` (`holdId`,
+`claimBuyerKey` cleared) and deletes the event's `order_payments`, `order_lines`, `orders` and
+`holds`; it returns the counts. Kept on purpose: `public.outbox_events` (history the relay may
+still be publishing; a new hold has a new id, so `placeOrder`'s `seat.held` lookup is unaffected),
+`processed_messages`, and everything in the `payment` and `notification` schemas (ADR 0009: no
+cross-schema deletes). Only `admin.resetDemo` calls it. `reset-event.test.ts` races the reset
+against `holdSeats`, `placeOrder`, the payment saga and both sweepers on real Postgres to pin these
+guarantees.
+
+Known limitation: the reset deletes `EXPIRED` and `CANCELLED` demo orders even while a late
+capture for one may still be in flight, so the later `payment.succeeded` meets an unknown order
+(`decide` returns `poison` for an unknown `orderId`, as the spec requires; until the DLQ exists the
+message is redelivered on the retry schedule). Whether such a capture should be refunded instead is
+an open question for the late-payment ticket.
+
 Catalog API (`apps/web`): `events.list`, `events.get`, `seats.map`. Inputs and outputs are zod
 validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.
 

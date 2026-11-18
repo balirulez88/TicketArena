@@ -59,35 +59,59 @@ function orderPlaced(email: string) {
   };
 }
 
-/** Delivers one `order.placed` to a payment consumer built from the given deps. */
-async function deliver(
-  email: string,
-  deps: { sleeps?: number[]; random?: number; latencyMs?: { min: number; max: number } } = {},
-) {
+interface DeliveryDeps {
+  sleeps?: number[];
+  random?: number;
+  latencyMs?: { min: number; max: number };
+  /** Replaces the recording sleep stub, e.g. with a real timer. */
+  sleep?: (ms: number) => Promise<void>;
+  /** The runner's database client; defaults to the shared one. */
+  runnerPrisma?: PrismaClient;
+  runnerBus?: MessageBus;
+  ackWaitMs?: number;
+}
+
+/** Builds a payment consumer from the given deps on a fresh durable name and subject. */
+async function paymentRunner(deps: DeliveryDeps = {}) {
   sequence += 1;
   const subject = `ta.order.payment-case${sequence}`;
-  const placed = orderPlaced(email);
   const runner = await createConsumerRunner({
-    bus,
-    prisma,
+    bus: deps.runnerBus ?? bus,
+    prisma: deps.runnerPrisma ?? prisma,
     service: "payment",
     consumer: `payment-case${sequence}`,
     filterSubject: subject,
-    handler: createPaymentHandler({
+    ...(deps.ackWaitMs === undefined ? {} : { ackWaitMs: deps.ackWaitMs }),
+    ...createPaymentHandler({
       clock: {
         now: () => CAPTURE_TIME,
-        sleep: async (ms) => {
-          deps.sleeps?.push(ms);
-        },
+        sleep:
+          deps.sleep ??
+          (async (ms) => {
+            deps.sleeps?.push(ms);
+          }),
       },
       random: { next: () => deps.random ?? 0 },
       newId: randomUUID,
       ...(deps.latencyMs === undefined ? {} : { latencyMs: deps.latencyMs }),
     }),
   });
+  return { runner, subject };
+}
+
+/** Delivers one `order.placed` to a payment consumer built from the given deps. */
+async function deliver(email: string, deps: DeliveryDeps = {}) {
+  const { runner, subject } = await paymentRunner(deps);
+  const placed = orderPlaced(email);
   await bus.publish({ subject, data: JSON.stringify(placed.envelope), msgId: placed.envelope.id });
   await runner.pollOnce();
-  return placed;
+  return { ...placed, runner };
+}
+
+function succeededEventsFor(orderId: string) {
+  return prisma.paymentOutboxEvent.count({
+    where: { eventType: "payment.succeeded", payload: { path: ["orderId"], equals: orderId } },
+  });
 }
 
 describe("mock Payment handler", () => {
@@ -153,5 +177,107 @@ describe("mock Payment handler", () => {
     await deliver("slow@example.com", { sleeps, random: 0.5, latencyMs: { min: 100, max: 300 } });
 
     expect(sleeps).toEqual([200]);
+  });
+
+  it("TD-051: captures once and emits payment.succeeded once on the first delivery when the latency outlasts the transaction timeout", async () => {
+    // The runner's interactive-transaction timeout is injected config of its Prisma client;
+    // lowering it from Prisma's 5 s default keeps a real sleep that exceeds it short.
+    const runnerPrisma = createPrismaClient({
+      connectionString: database.url,
+      driver: "pg",
+      transaction: { maxWaitMs: 2_000, timeoutMs: 500 },
+    });
+    try {
+      const placed = await deliver("patient@example.com", {
+        runnerPrisma,
+        latencyMs: { min: 900, max: 900 },
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      });
+
+      // Committed by the first delivery: no timeout, no nak, no redelivery needed.
+      expect(await prisma.paymentAttempt.count({ where: { orderId: placed.orderId } })).toBe(1);
+      expect(await succeededEventsFor(placed.orderId)).toBe(1);
+      expect(
+        await prisma.paymentProcessedMessage.count({ where: { messageId: placed.envelope.id } }),
+      ).toBe(1);
+      expect(await placed.runner.pollOnce()).toBe(0);
+    } finally {
+      await runnerPrisma.$disconnect();
+    }
+  });
+
+  it("TD-051: holds no database transaction open while the provider latency elapses", async () => {
+    // A distinct application_name lets pg_stat_activity single out the runner's connections.
+    const applicationName = `payment_latency_probe_${sequence}`;
+    const url = new URL(database.url);
+    url.searchParams.set("application_name", applicationName);
+    const runnerPrisma = createPrismaClient({ connectionString: url.toString(), driver: "pg" });
+    const openTransactionsDuringWait: number[] = [];
+    try {
+      const placed = await deliver("observed@example.com", {
+        runnerPrisma,
+        latencyMs: { min: 50, max: 50 },
+        sleep: async () => {
+          const rows = await prisma.$queryRaw<{ open: bigint }[]>`
+            SELECT count(*) AS open FROM pg_stat_activity
+            WHERE application_name = ${applicationName} AND xact_start IS NOT NULL`;
+          openTransactionsDuringWait.push(Number(rows[0]?.open ?? -1));
+        },
+      });
+
+      expect(openTransactionsDuringWait).toEqual([0]);
+      // ...and the transaction did run afterwards: the capture committed.
+      expect(await prisma.paymentAttempt.count({ where: { orderId: placed.orderId } })).toBe(1);
+    } finally {
+      await runnerPrisma.$disconnect();
+    }
+  });
+
+  it("treats a redelivered order.placed whose payment was captured as a duplicate, latency step included", async () => {
+    const sleeps: number[] = [];
+    let acksToDrop = 1;
+    const deliveryCounts: number[] = [];
+    // A crash between commit and ack, simulated at the broker boundary: the ack never arrives.
+    const crashingBus: MessageBus = {
+      ...bus,
+      ensureTopology: () => bus.ensureTopology(),
+      publish: (input) => bus.publish(input),
+      close: () => bus.close(),
+      subscribe: async (spec) => {
+        const subscription = await bus.subscribe(spec);
+        return {
+          fetch: async (options) =>
+            (await subscription.fetch(options)).map((message) => {
+              deliveryCounts.push(message.deliveryCount);
+              return {
+                ...message,
+                ack: () => {
+                  if (acksToDrop > 0) {
+                    acksToDrop -= 1;
+                    return;
+                  }
+                  message.ack();
+                },
+                nak: (delayMs) => message.nak(delayMs),
+              };
+            }),
+        };
+      },
+    };
+    const placed = await deliver("redelivered@example.com", {
+      sleeps,
+      latencyMs: { min: 10, max: 10 },
+      runnerBus: crashingBus,
+      ackWaitMs: 500,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    await placed.runner.pollOnce();
+
+    expect(deliveryCounts).toEqual([1, 2]);
+    // The latency step ran again before dedupe, yet the redelivery captured nothing new.
+    expect(sleeps).toEqual([10, 10]);
+    expect(await prisma.paymentAttempt.count({ where: { orderId: placed.orderId } })).toBe(1);
+    expect(await succeededEventsFor(placed.orderId)).toBe(1);
   });
 });

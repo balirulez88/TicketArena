@@ -36,11 +36,18 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Buyer limit**        | At most 6 seats per BuyerKey and event, counting held (unexpired), in-checkout and sold seats.         |
 | **Race lost**          | A hold refused because another buyer locked the seat first: a prevented double booking.                |
 | **Snapshot fast path** | Lock-free read in `holdSeats` that refuses visibly taken seats before any lock; advisory only.         |
+| **Demo event**         | The one Event flagged `demo`; the only target of the admin race and reset.                             |
+| **Race (demo)**        | `admin.runRace`: 100 synthetic sessions hold one demo seat at once; exactly one may win.               |
+| **Demo reset**         | `admin.resetDemo`: deletes the demo event's holds, orders and ledger rows and frees its seats.         |
 | **Oversell**           | Selling the same seat twice. Must be impossible, not merely unlikely.                                  |
 | **Integration event**  | A fact published to other services via the outbox (e.g. `order.confirmed`).                            |
 | **Outbox**             | The `outbox_events` table; integration events committed atomically with business data.                 |
 | **Relay**              | The process that publishes PENDING outbox rows to the broker.                                          |
 | **Consumer runner**    | Worker component running a durable pull consumer; dedupes via `processed_messages` in the handler TX.  |
+| **Admin cookie**       | `ta_admin`: proof an operator logged in with `ADMIN_PASSWORD`; signed, expires after 8 h.              |
+| **Admin snapshot**     | `admin.snapshot`: live seat, order, payment, queue and counter figures; `/admin` polls it each 1s.     |
+| **Seat map**           | The event page's grid of seat buttons by section; shows each seat's price and status.                  |
+| **Seat selection**     | Up to 6 available seats a visitor picked on the seat map before a hold; client-only state.             |
 | **Slice**              | One tracer-bullet ticket: a thin, complete path through every layer, green on its own.                 |
 | **Seam**               | A public interface where tests observe behaviour without reaching inside.                              |
 | **Debt gate**          | The host check that holds a ticket on unresolved or untriaged technical debt it relies on (ADR 0016).  |

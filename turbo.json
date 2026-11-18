@@ -12,11 +12,14 @@
       "env": ["DATABASE_URL", "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"],
       "outputs": [".next/**", "!.next/cache/**", "dist/**"]
     },
+    "transit": {
+      "dependsOn": ["^transit"]
+    },
     "typecheck": {
-      "dependsOn": ["^db:generate", "db:generate"]
+      "dependsOn": ["^transit", "^db:generate", "db:generate"]
     },
     "test": {
-      "dependsOn": ["^db:generate", "db:generate"],
+      "dependsOn": ["^transit", "^db:generate", "db:generate"],
       "outputs": [],
       "env": ["TEST_DATABASE_URL", "TEST_REDIS_URL", "TEST_NATS_URL"],
       "inputs": [

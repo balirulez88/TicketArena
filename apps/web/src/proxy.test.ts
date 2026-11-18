@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { proxy } from "./proxy";
+import { issueAdminCookieValue } from "./server/identity/admin-session";
 import { issueSessionCookieValue } from "./server/identity/identity";
 import { createTRPCContext } from "./server/trpc";
 
@@ -98,6 +99,60 @@ describe("proxy and tRPC context agree on the first-visit session", () => {
     expect(issued).toBeTruthy();
     expect(principal.sessionId).toBe(issued?.split(".")[0]);
     expect(principal.sessionId).not.toBe(forged.split(".")[0]);
+  });
+});
+
+describe("proxy guards /admin", () => {
+  const adminRequest = (path: string, cookie?: string) =>
+    new NextRequest(`https://ticketarena.example${path}`, {
+      headers: cookie ? { cookie: `ta_admin=${cookie}` } : {},
+    });
+  const redirectTarget = (response: Response) => response.headers.get("location");
+
+  test.each(["/admin", "/admin/anything"])(
+    "%s without an admin cookie redirects to the login page",
+    async (path) => {
+      const response = await proxy(adminRequest(path));
+
+      expect(response.status).toBe(307);
+      expect(redirectTarget(response)).toBe("https://ticketarena.example/admin/login");
+    },
+  );
+
+  test("an admin cookie signed with another secret redirects to the login page", async () => {
+    const forged = await issueAdminCookieValue("x".repeat(32), new Date());
+
+    const response = await proxy(adminRequest("/admin", forged));
+
+    expect(redirectTarget(response)).toBe("https://ticketarena.example/admin/login");
+  });
+
+  test("an expired admin cookie redirects to the login page", async () => {
+    const expired = await issueAdminCookieValue("s".repeat(32), new Date("2020-01-01T00:00:00Z"));
+
+    const response = await proxy(adminRequest("/admin", expired));
+
+    expect(redirectTarget(response)).toBe("https://ticketarena.example/admin/login");
+  });
+
+  test("a valid admin cookie reaches /admin", async () => {
+    const valid = await issueAdminCookieValue("s".repeat(32), new Date());
+
+    const response = await proxy(adminRequest("/admin", valid));
+
+    expect(redirectTarget(response)).toBeNull();
+  });
+
+  test("the login page is reachable without an admin cookie", async () => {
+    const response = await proxy(adminRequest("/admin/login"));
+
+    expect(redirectTarget(response)).toBeNull();
+  });
+
+  test("a path that only starts with the letters admin is not guarded", async () => {
+    const response = await proxy(adminRequest("/administrators"));
+
+    expect(redirectTarget(response)).toBeNull();
   });
 });
 

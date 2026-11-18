@@ -44,7 +44,13 @@ publishing the same row twice in one pass.
   `processed_messages(consumer, messageId, streamSeq)` and then calls the handler. A unique violation of
   that insert is a duplicate and is acked; any handler error, including its own unique violation, rolls back
   and `nak`s with the ADR 0011 delay (1 s, 5 s, 30 s, 2 min). A message without `Nats-Msg-Id` is `term`ed and
-  never processed. The DLQ gate and recovery from ADR 0011 are not built yet.
+  never processed. An optional `beforeTransaction(message)` step runs first, outside the transaction, on every
+  delivery (duplicates included); it is for slow work that needs no database, must be safe to repeat, and a throw
+  `nak`s like a handler failure. A handler may instead resolve to a `HandlerOutcome`
+  (`{ outcome: "retry" | "poison", reason }`): the transaction rolls back (no `processed_messages` row, no
+  outbox writes) and the message is `nak`ed with the same delay; `poison` is logged as an error. Until the DLQ
+  exists, poison is redelivered rather than `term`ed, because ADR 0011 forbids `term` without a DLQ copy.
+  The DLQ gate and recovery from ADR 0011 are not built yet.
 - **Port:** `MessageBus` hides the broker; `jetstream-message-bus.ts` is the only module importing
   `@nats-io/*` (a test enforces it). `message-bus.contract.ts` is the contract suite run against real NATS.
 
@@ -103,11 +109,29 @@ the provider's key dedupe absorbs that.
 `apps/worker/src/consumers.ts` registers the durable consumers `payment` and `booking-saga`. `payment` (`service: "payment"`)
 handles `order.placed` in `apps/worker/src/payment/`: one CAPTURED `payment.payment_attempts` row and a
 `payment.succeeded` event, with latency and outcome drawn from the injected `Random`/`Clock`. A
-`+dup@` email emits the result twice under distinct event ids. `booking-saga` handles
-`payment.succeeded` (`createPaymentSagaHandler`, `packages/booking`): lock the order, ignore a known
-`paymentId`, else in one transaction set the order `CONFIRMED`, insert the `APPLIED` ledger row, set
-the seats `SOLD` and write `order.confirmed`. Late, mismatched or non-pending cases throw (retried)
-until the later tickets build the rest of the decision matrix.
+`+dup@` email emits the result twice under distinct event ids.
+
+**Provider latency runs outside the transaction**, in the runner's `beforeTransaction` step, i.e.
+before dedupe-and-capture (TD-051). Awaited inside the runner's transaction it would hold a pooled
+connection idle for the whole wait, and a wait longer than the interactive-transaction timeout
+(Prisma's default 5 s, set per client via `createPrismaClient({ transaction })`) would roll the
+capture back and redeliver the message forever. A redelivered `order.placed` waits again and is
+then acked as a duplicate by the `processed_messages` insert, so the wait never causes a second
+capture or a second `payment.succeeded`. `booking-saga` handles
+`payment.succeeded` (`createPaymentSagaHandler`, `packages/booking`). In the runner's transaction
+(whose `processed_messages` insert is the dedupe check): lock the order `FOR UPDATE`, read its
+ledger, lock its seats if it is `PENDING_PAYMENT` (the only state whose seats change), only then
+take `T = clock.now()` once (ADR 0005: decision time after all locks), call the pure `decide(orderState, ledger, event, T)`
+(`saga-decision.ts`, the spec's matrix), then apply. `decide` returns `transition | noop | refund |
+retry | poison`, every non-transition with a reason code (`noop` reasons such as
+`duplicate_payment` are logged). Applied so far: `transition` `payment_on_time` (order `CONFIRMED`
+by a conditional update, `APPLIED` ledger row, seats `SOLD`, `order.confirmed` stamped with `T`; a
+zero-row update throws, never counts as success); `noop` (ack); `retry` and `poison` (unknown
+`orderId`) are returned to the runner as a `HandlerOutcome`. Decisions whose side effects later
+tickets build (late capture → `EXPIRED` + refund, amount mismatch and payments on settled orders →
+refund) throw `... is not handled yet` and are retried, so captured money is never dropped
+silently. `decide` already covers `payment.failed` and `payment.refunded`; the consumer subscribes
+to them once their contracts exist.
 
 Relay and runner take a `service` (`booking` default, `payment` or `notification`) that selects the outbox and
 `processed_messages` of that schema (ADR 0009); the worker runs one relay per outbox.

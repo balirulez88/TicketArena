@@ -17,6 +17,19 @@ export interface HandlerContext {
   readonly emit: EmitCausedEvent;
 }
 
+/**
+ * What a handler returns when the message must not count as processed: the runner rolls the
+ * transaction back (no `processed_messages` row, no outbox writes) and redelivers later.
+ * `retry`: the state the message needs is not reached yet. `poison`: the message can never be
+ * applied; ADR 0011 routes it to the DLQ, which does not exist yet, so until then it is logged as
+ * an error and redelivered on the same delayed schedule, never terminated without a DLQ copy.
+ */
+export interface HandlerOutcome {
+  readonly outcome: "retry" | "poison";
+  /** A reason code, logged with the message. */
+  readonly reason: string;
+}
+
 export interface ConsumerRunnerOptions {
   readonly bus: MessageBus;
   readonly prisma: PrismaClient;
@@ -25,12 +38,23 @@ export interface ConsumerRunnerOptions {
   /** Durable name; also the `consumer` half of the `processed_messages` key. */
   readonly consumer: string;
   readonly filterSubject: string;
-  /** Receives the transaction that also holds the dedupe row, so state and checkpoint commit together. */
+  /**
+   * Runs before the transaction opens, on every delivery including duplicates, for slow work
+   * that needs no database (e.g. a provider's latency): awaited inside the transaction it would
+   * hold a pooled connection idle and could outlast the interactive-transaction timeout, turning
+   * one slow message into endless redelivery. It must be safe to repeat; it never decides
+   * whether the message is a duplicate. A throw naks the message like a handler failure.
+   */
+  readonly beforeTransaction?: (message: ReceivedMessage) => Promise<void>;
+  /**
+   * Receives the transaction that also holds the dedupe row, so state and checkpoint commit
+   * together. Resolving to a `HandlerOutcome` rolls that transaction back (see there).
+   */
   readonly handler: (
     tx: TransactionClient,
     message: ReceivedMessage,
     context: HandlerContext,
-  ) => Promise<void>;
+  ) => Promise<HandlerOutcome | undefined>;
   readonly logger?: Logger;
   readonly ackWaitMs?: number;
   readonly retryDelayMs?: (deliveryCount: number) => number;
@@ -45,6 +69,13 @@ export interface ConsumerRunner {
 
 /** Thrown inside the transaction to roll it back when the dedupe row already exists. */
 class AlreadyProcessed extends Error {}
+
+/** Thrown inside the transaction to roll it back when the handler returned an outcome. */
+class Deferred extends Error {
+  constructor(readonly result: HandlerOutcome) {
+    super(`${result.outcome}: ${result.reason}`);
+  }
+}
 
 export async function createConsumerRunner(
   options: ConsumerRunnerOptions,
@@ -70,6 +101,7 @@ export async function createConsumerRunner(
       return;
     }
     try {
+      await options.beforeTransaction?.(message);
       await options.prisma.$transaction(async (tx) => {
         try {
           await store.insertProcessed(tx, {
@@ -82,22 +114,40 @@ export async function createConsumerRunner(
           // real failure and must be retried, not acked.
           throw isUniqueViolation(error) ? new AlreadyProcessed() : error;
         }
-        await options.handler(tx, message, {
+        const result = await options.handler(tx, message, {
           emit: createEmitCausedEvent(tx, parseJson(message.data), store),
         });
+        if (result !== undefined) {
+          throw new Deferred(result);
+        }
       });
     } catch (error) {
-      if (error instanceof AlreadyProcessed) {
-        log.info({}, "duplicate message skipped");
-        message.ack();
-      } else {
-        log.error({ err: error, deliveryCount: message.deliveryCount }, "handler failed; retrying");
-        message.nak(retryDelayMs(message.deliveryCount));
-      }
+      settleFailure(message, error, log);
       return;
     }
     log.info({ subject: message.subject }, "message handled");
     message.ack();
+  }
+
+  /** Every path that does not commit ends in an ack (duplicate) or a delayed nak, never `term`. */
+  function settleFailure(message: ReceivedMessage, error: unknown, log: Logger): void {
+    const deliveryCount = message.deliveryCount;
+    if (error instanceof AlreadyProcessed) {
+      log.info({}, "duplicate message skipped");
+      message.ack();
+      return;
+    }
+    if (error instanceof Deferred) {
+      const { outcome, reason } = error.result;
+      if (outcome === "poison") {
+        log.error({ reason, deliveryCount }, "poison message; no DLQ yet, retrying");
+      } else {
+        log.info({ reason, deliveryCount }, "message not applicable yet; retrying");
+      }
+    } else {
+      log.error({ err: error, deliveryCount }, "handler failed; retrying");
+    }
+    message.nak(retryDelayMs(deliveryCount));
   }
 
   async function pollOnce(): Promise<number> {

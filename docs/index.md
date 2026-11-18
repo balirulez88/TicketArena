@@ -54,6 +54,17 @@ below shows what is built.
   `packages/booking`, `packages/messaging`, `packages/waiting-room`.
 - `apps/web`: Next.js App Router with an end-to-end tRPC tracer (`health.check`), validated
   server env (`parseServerEnv`), shadcn/ui tokens on Tailwind v4.
+- Web UI: `/events` and `/events/[eventId]` (venue, on-sale status, prices per section, seat map
+  of native buttons with accessible names; up to 6 seats selectable in a Zustand store, server
+  data via TanStack Query). See [architecture/](architecture/index.md#web-ui).
+- Admin: `/admin/login` checks `ADMIN_PASSWORD` and sets a signed `ta_admin` cookie (8 h);
+  `proxy.ts` guards `/admin` and `adminProcedure` guards admin procedures (`UNAUTHORIZED`).
+  `/admin` polls `admin.snapshot` every second: seats by status per event, orders by status,
+  pending payments, queue length, active shoppers and the booking counters. `admin.runRace` races
+  100 synthetic buyers for one demo seat (exactly one wins) and `admin.resetDemo` restores the demo
+  event (refused while a demo order awaits payment or a refund obligation is open); both touch only
+  the `demo` event and are limited to 1 per 10 s globally. See
+  [architecture/](architecture/index.md#admin-api).
 - Guest identity: `proxy.ts` issues a signed `ta_session` cookie; `IdentityService` resolves a
   `Principal` onto the tRPC context (`session.whoami`). See
   [architecture/](architecture/index.md#identity).

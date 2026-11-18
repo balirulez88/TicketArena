@@ -180,4 +180,127 @@ describe("payment saga: payment.succeeded", () => {
       "PENDING_PAYMENT",
     );
   });
+  test("returns poison for an unknown orderId and writes nothing", async () => {
+    const { order } = await pendingOrder({ sessionId: "e".repeat(32), buyerKey: "e".repeat(32) });
+    const { paymentId, message } = paymentSucceeded({ ...order, id: randomUUID() });
+    const { emit, emitted } = recordingEmit();
+
+    const outcome = await db().$transaction((tx) => saga(tx, message, { emit }));
+
+    expect(outcome).toEqual({ outcome: "poison", reason: "unknown_order" });
+    expect(await db().orderPayment.count({ where: { paymentId } })).toBe(0);
+    expect(emitted).toEqual([]);
+  });
+
+  test("refuses a payment whose amount differs from the order total rather than confirming it", async () => {
+    const { order } = await pendingOrder({ sessionId: "f".repeat(32), buyerKey: "f".repeat(32) });
+    const { message } = paymentSucceeded(order, { amount: order.totalMinor + 1 });
+
+    await expect(
+      db().$transaction((tx) => saga(tx, message, { emit: async () => undefined })),
+    ).rejects.toThrow(/amount_mismatch/);
+    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      "PENDING_PAYMENT",
+    );
+    expect(await db().orderPayment.count({ where: { orderId: order.id } })).toBe(0);
+  });
+
+  test("refuses a new payment for an already confirmed order rather than applying it twice", async () => {
+    const { order } = await pendingOrder({ sessionId: "g".repeat(32), buyerKey: "g".repeat(32) });
+    await db().$transaction((tx) => saga(tx, paymentSucceeded(order).message, recordingEmit()));
+    const second = paymentSucceeded(order);
+
+    await expect(
+      db().$transaction((tx) => saga(tx, second.message, { emit: async () => undefined })),
+    ).rejects.toThrow(/order_confirmed/);
+    expect(await db().orderPayment.count({ where: { orderId: order.id } })).toBe(1);
+  });
+
+  test("never treats a zero-row seat update as success: a seat no longer IN_CHECKOUT rolls the confirmation back", async () => {
+    const { order, seatId } = await pendingOrder({
+      sessionId: "h".repeat(32),
+      buyerKey: "h".repeat(32),
+    });
+    await db().seat.update({ where: { id: seatId }, data: { status: "AVAILABLE" } });
+    const { message } = paymentSucceeded(order);
+
+    await expect(
+      db().$transaction((tx) => saga(tx, message, { emit: async () => undefined })),
+    ).rejects.toThrow(/not IN_CHECKOUT/);
+    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      "PENDING_PAYMENT",
+    );
+    expect(await db().orderPayment.count({ where: { orderId: order.id } })).toBe(0);
+  });
+
+  test("reads the clock once per transaction and stamps order.confirmed with that T", async () => {
+    const { order } = await pendingOrder({ sessionId: "i".repeat(32), buyerKey: "i".repeat(32) });
+    let reads = 0;
+    const tickingSaga = createPaymentSagaHandler({
+      clock: { now: () => new Date(ON_TIME.getTime() + 1_000 * reads++) },
+      newId: randomUUID,
+    });
+    const { emit, emitted } = recordingEmit();
+
+    await db().$transaction((tx) => tickingSaga(tx, paymentSucceeded(order).message, { emit }));
+
+    expect(reads).toBe(1);
+    expect(emitted).toMatchObject([{ occurredAt: ON_TIME.toISOString() }]);
+  });
+  test("reads T only after the order's seat locks are held (ADR 0005)", async () => {
+    const { order, seatId } = await pendingOrder({
+      sessionId: "j".repeat(32),
+      buyerKey: "j".repeat(32),
+    });
+    let reads = 0;
+    const lockedSaga = createPaymentSagaHandler({
+      clock: {
+        now: () => {
+          reads += 1;
+          return ON_TIME;
+        },
+      },
+      newId: randomUUID,
+    });
+    let release: () => void = () => undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let seatLocked: () => void = () => undefined;
+    const locked = new Promise<void>((resolve) => {
+      seatLocked = resolve;
+    });
+    // Another transaction holds the seat row lock, so the saga must block on it.
+    const holder = db().$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "seats" WHERE "id" = ${seatId}::uuid FOR UPDATE`;
+        seatLocked();
+        await released;
+      },
+      { timeout: 30_000 },
+    );
+    await locked;
+
+    const confirming = db().$transaction(
+      (tx) => lockedSaga(tx, paymentSucceeded(order).message, recordingEmit()),
+      { timeout: 30_000 },
+    );
+    // Wait (by condition, not by time) until the saga is blocked on the seat lock.
+    for (;;) {
+      const [waiting] = await db().$queryRaw<{ count: bigint }[]>`
+        SELECT count(*) AS "count" FROM pg_stat_activity
+        WHERE "datname" = current_database() AND "wait_event_type" = 'Lock' AND "query" ILIKE '%FROM "seats"%FOR UPDATE%'`;
+      if ((waiting?.count ?? 0n) > 0n) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const readsWhileBlocked = reads;
+    release();
+    await holder;
+    await confirming;
+
+    expect(readsWhileBlocked).toBe(0);
+    expect(reads).toBe(1);
+  });
 });

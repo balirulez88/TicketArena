@@ -6,6 +6,7 @@ export {
   type ConsumerRunnerOptions,
   createConsumerRunner,
   type HandlerContext,
+  type HandlerOutcome,
 } from "./consumer-runner.js";
 export {
   connectJetStreamMessageBus,

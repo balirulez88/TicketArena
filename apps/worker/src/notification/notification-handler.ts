@@ -79,7 +79,7 @@ export function createNotificationHandler(deps: NotificationHandlerDeps) {
   return async function handleNotifiedEvent(
     tx: TransactionClient,
     message: ReceivedMessage,
-  ): Promise<void> {
+  ): Promise<undefined> {
     const notified = notifiedEnvelope.parse(JSON.parse(message.data));
     const sourceEventId = notified.id;
     const template = TEMPLATES[notified.type];

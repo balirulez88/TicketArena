@@ -18,8 +18,11 @@ export {
   LimitExceededError,
   MAX_SEATS_PER_BUYER,
   MixedCurrencyError,
+  NotDemoEventError,
   type OrderLineView,
   type OrderView,
+  ResetBlockedError,
+  type ResetResult,
   requestHash,
   SeatUnavailableError,
   type SweepResult,
@@ -29,5 +32,30 @@ export {
   type PaymentSagaDeps,
   type SagaContext,
   type SagaMessage,
+  type SagaOutcome,
 } from "./payment-saga";
-export { createRedisBookingMetrics, type RedisMetricsClient } from "./redis-metrics";
+export {
+  type BookingMetricCounts,
+  type BookingMetricsReader,
+  type BookingMetricsReset,
+  createRedisBookingMetrics,
+  createRedisBookingMetricsReader,
+  createRedisBookingMetricsReset,
+  type RedisMetricsClient,
+  type RedisMetricsDeleteClient,
+  type RedisMetricsReadClient,
+} from "./redis-metrics";
+export {
+  decide,
+  type LedgerDisposition,
+  type LedgerEntry,
+  type NoopReason,
+  type PoisonReason,
+  type RefundReason,
+  type RetryReason,
+  type SagaDecision,
+  type SagaEvent,
+  type SagaOrderState,
+  type SagaOrderStatus,
+  type TransitionReason,
+} from "./saga-decision";

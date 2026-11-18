@@ -9,9 +9,13 @@ const serverEnvSchema = z.object({
   SESSION_SECRET: z
     .string()
     .refine((secret) => new TextEncoder().encode(secret).length >= 32, "must be at least 32 bytes"),
+  /** The operator password for `/admin` (ADR 0012); only the login route reads it. */
+  ADMIN_PASSWORD: z.string().min(12, "must be at least 12 characters"),
 });
 
 const sessionEnvSchema = serverEnvSchema.pick({ SESSION_SECRET: true });
+
+const adminEnvSchema = serverEnvSchema.pick({ ADMIN_PASSWORD: true, SESSION_SECRET: true });
 
 const metricsEnvSchema = serverEnvSchema.pick({
   UPSTASH_REDIS_REST_URL: true,
@@ -50,6 +54,16 @@ export function parseServerEnv(source: EnvSource): ServerEnv {
  */
 export function parseSessionEnv(source: EnvSource): Pick<ServerEnv, "SESSION_SECRET"> {
   return parseEnv(sessionEnvSchema, source, "session");
+}
+
+/**
+ * Validates the admin login configuration: the password to check and the secret that signs the
+ * admin cookie. Only the login route calls it, so a missing password never breaks buyer requests.
+ */
+export function parseAdminEnv(
+  source: EnvSource,
+): Pick<ServerEnv, "ADMIN_PASSWORD" | "SESSION_SECRET"> {
+  return parseEnv(adminEnvSchema, source, "admin");
 }
 
 /** Validates only the database URL, for the tRPC context, which needs nothing else yet. */

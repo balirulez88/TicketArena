@@ -56,6 +56,11 @@ export interface QueueStore {
   isAdmitted(eventId: string, jti: string, now: Date): Promise<boolean>;
   /** Queue length and active-slot count, read in one atomic step. */
   counts(eventId: string): Promise<QueueCounts>;
+  /**
+   * Deletes every key of the event in one atomic step, as if no one had ever joined: the demo
+   * reset uses it. Every admission of the event is revoked with it.
+   */
+  clearEvent(eventId: string): Promise<void>;
 }
 
 /**

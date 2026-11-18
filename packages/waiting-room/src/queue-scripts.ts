@@ -162,6 +162,11 @@ export const COUNTS_SCRIPT = `
 return { redis.call('ZCARD', KEYS[1]), redis.call('ZCARD', KEYS[2]) }
 `;
 
+// KEYS: every key of one event. One script so no admission tick sees a half-cleared event.
+export const CLEAR_EVENT_SCRIPT = `
+return redis.call('DEL', unpack(KEYS))
+`;
+
 /** Every script by name, so an adapter can cache per-script data (the Upstash SHA-1s). */
 export const QUEUE_SCRIPTS = {
   join: JOIN_SCRIPT,
@@ -172,6 +177,7 @@ export const QUEUE_SCRIPTS = {
   reap: REAP_SCRIPT,
   isAdmitted: IS_ADMITTED_SCRIPT,
   counts: COUNTS_SCRIPT,
+  clearEvent: CLEAR_EVENT_SCRIPT,
 } as const;
 
 export type QueueScriptName = keyof typeof QUEUE_SCRIPTS;
@@ -260,6 +266,10 @@ export function createScriptedQueueStore(
     async counts(eventId) {
       const keys = keysOf(eventId);
       return toCounts(await run("counts", [keys.queue, keys.active], []));
+    },
+
+    async clearEvent(eventId) {
+      toInteger(await run("clearEvent", Object.values(keysOf(eventId)), []), "clearEvent");
     },
   };
 }

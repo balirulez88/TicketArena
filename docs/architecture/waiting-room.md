@@ -17,7 +17,7 @@ gating `holdSeats` with it arrive with ticket 31; until then nothing is gated by
 | Export                                     | Role                                                                                                                                                |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `QueueService`                             | `join`, `status`, `leave`, `heartbeat`, `admitTick(event, limits)`, `reap`, `releaseSlot`, `isAdmitted(eventId, jti)`, `counts`                     |
-| `QueueStore` (port)                        | `join`, `position` (1-based), `leave`, `admit`, `heartbeat`, `releaseSlot`, `reap`, `isAdmitted`, `counts`                                          |
+| `QueueStore` (port)                        | `join`, `position` (1-based), `leave`, `admit`, `heartbeat`, `releaseSlot`, `reap`, `isAdmitted`, `counts`, `clearEvent`                            |
 | `AdmissionLimits`                          | `{ admitRate, maxActive }` per tick; the worker supplies them from its configuration                                                                |
 | `SLOT_IDLE_TIMEOUT_MS`, `ADMISSION_TTL_MS` | 90 s idle before reaping; 30 min admission validity from admission (fixed)                                                                          |
 | `createRedisQueueStore`                    | node-redis adapter over the narrow `RedisQueueClient` (`eval`, `zRank`); options: `prefix`                                                          |
@@ -32,8 +32,8 @@ heartbeats the session's slot and returns `ADMITTED` when it holds one, else `QU
 and ETA, or `NOT_QUEUED`. `leave` leaves the queue and frees the slot in one atomic step; `{ left }` is true if
 either happened. `admitTick` admits no one before the event's `onSaleAt`. ETA = `ceil(position / admitRatePerSecond)`; the web app assumes 10 admissions
 per second (the worker's default `ADMIT_RATE_PER_SECOND`) and does not read the worker's setting.
-`counts(eventId)` returns `{ queued, active }` (queue length and active shoppers) for the
-dashboard.
+`counts(eventId)` returns `{ queued, active }` (queue length and active shoppers); `admin.snapshot`
+reads it for every event.
 
 ## Redis keys
 
@@ -75,6 +75,8 @@ data. Times come from the injected clock (epoch ms), never Redis `TIME`.
 - **reap**: frees every slot last seen before the idle cutoff or whose `jti` is missing or expired
   (the same three removals as releaseSlot), then drops expired `jti`s; it walks `active`, which
   `maxActive` bounds.
+- **clearEvent**: `DEL` of all six keys of the event in one script, as if no one had joined (the
+  bucket starts full again); `admin.resetDemo` uses it for the demo event.
 - **isAdmitted** / **counts**: the `jti`'s `ZSCORE` against `now`; `ZCARD` of `queue` and
   `active` in one snapshot.
 

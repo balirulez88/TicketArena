@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   parseAdminEnv,
+  parseDatabaseEnv,
   parseMetricsEnv,
   parseQueueEnv,
   parseServerEnv,
@@ -107,6 +108,23 @@ describe("parseMetricsEnv", () => {
     ).toThrow(/UPSTASH_REDIS_REST_URL/);
   });
 
+  test("accepts plain http only for a local endpoint", () => {
+    for (const url of ["http://localhost:8079", "http://127.0.0.1:8079", "http://[::1]:8079"]) {
+      expect(
+        parseMetricsEnv({ ...valid, UPSTASH_REDIS_REST_URL: url }).UPSTASH_REDIS_REST_URL,
+      ).toBe(url);
+    }
+    expect(() =>
+      parseMetricsEnv({ ...valid, UPSTASH_REDIS_REST_URL: "http://redis-http:80" }),
+    ).toThrow(/UPSTASH_REDIS_REST_URL/);
+  });
+
+  test("names UPSTASH_REDIS_REST_URL when it is not a URL at all", () => {
+    expect(() => parseMetricsEnv({ ...valid, UPSTASH_REDIS_REST_URL: "not a url" })).toThrow(
+      /UPSTASH_REDIS_REST_URL/,
+    );
+  });
+
   test("names UPSTASH_REDIS_REST_TOKEN when it is empty", () => {
     expect(() => parseMetricsEnv({ ...valid, UPSTASH_REDIS_REST_TOKEN: "" })).toThrow(
       /UPSTASH_REDIS_REST_TOKEN/,
@@ -127,5 +145,28 @@ describe("parseQueueEnv", () => {
   test("names REDIS_URL when it is missing or not a Redis URL", () => {
     expect(() => parseQueueEnv({})).toThrow(/REDIS_URL/);
     expect(() => parseQueueEnv({ REDIS_URL: "https://example.upstash.io" })).toThrow(/REDIS_URL/);
+  });
+});
+
+describe("parseDatabaseEnv", () => {
+  const url = "postgresql://user:pass@localhost:5432/ticketarena";
+
+  test("defaults DATABASE_DRIVER to neon", () => {
+    expect(parseDatabaseEnv({ DATABASE_URL: url })).toEqual({
+      DATABASE_URL: url,
+      DATABASE_DRIVER: "neon",
+    });
+  });
+
+  test("accepts pg for a local Postgres", () => {
+    expect(parseDatabaseEnv({ DATABASE_URL: url, DATABASE_DRIVER: "pg" }).DATABASE_DRIVER).toBe(
+      "pg",
+    );
+  });
+
+  test("names DATABASE_DRIVER when it is neither neon nor pg", () => {
+    expect(() => parseDatabaseEnv({ DATABASE_URL: url, DATABASE_DRIVER: "PG" })).toThrow(
+      /DATABASE_DRIVER/,
+    );
   });
 });

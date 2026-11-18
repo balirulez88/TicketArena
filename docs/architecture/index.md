@@ -53,7 +53,8 @@ Decision: [ADR 0012](../adr/0012-identity-service-seam.md). Code: `apps/web/src/
 - **Config:** `SESSION_SECRET` (at least 32 bytes) is validated in `parseServerEnv`; the error
   names the field. The proxy and `createTRPCContext` use `parseSessionEnv`, which validates only
   that variable, so an unrelated missing setting (e.g. the Redis token) cannot break page requests.
-- **Metrics config:** `UPSTASH_REDIS_REST_URL` (https) and `UPSTASH_REDIS_REST_TOKEN` are read only
+- **Metrics config:** `UPSTASH_REDIS_REST_URL` (https; plain http only to `localhost`, `127.0.0.1`
+  or `[::1]`, so the token never crosses a network in clear text) and `UPSTASH_REDIS_REST_TOKEN` are read only
   by `parseMetricsEnv`, called from `ctx.metrics()` and `ctx.metricsReader()`
   (`apps/web/src/server/upstash-metrics.ts`), never by `createTRPCContext`. The first call builds a
   `fetch`-based Upstash REST client (`HINCRBY`, `HGETALL`, bearer token, timeout) behind
@@ -117,7 +118,8 @@ taken first, so a refused call has no effect.
 
 Routers in `apps/web/src/server/routers/`: `events` (`list`, `get`) and `seats` (`map`), sharing
 zod schemas in `catalog-schemas.ts`. They read through `ctx.db`, a process-wide Prisma client
-created lazily from `DATABASE_URL` (`parseDatabaseEnv` validates only that variable). A missing
+created lazily from `DATABASE_URL` and `DATABASE_DRIVER` (`neon`, the default, or `pg` for a local
+Postgres; `parseDatabaseEnv` validates only these two). A missing
 event is a `NOT_FOUND` tRPC error. Integration tests run against real Postgres. See
 [database](../database/index.md).
 

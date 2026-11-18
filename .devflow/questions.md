@@ -234,3 +234,35 @@ Does the notification handler's provider.send (also fingerprinted by TD-051) mov
 Assumed: No: it needs a reworked pending/send/resume flow the ACs don't cover; left as a follow-up
 
 Answer: (open)
+
+## 2026-11-18 17:44 ticket 17
+
+What does the apply step do for decisions whose side effects later tickets build (late/mismatched payment refunds, payments on non-pending orders)?
+
+Assumed: decide returns the spec's answer; the handler throws 'not handled yet' so the runner retries on the delay schedule (today's behaviour, never drops captured money); tickets 19 and 22 replace the throw
+
+Answer: (open)
+
+## 2026-11-18 17:44 ticket 17
+
+How does poison behave before the DLQ (ticket 25) exists?
+
+Assumed: Roll back, log as error, nak on the normal delay schedule; ADR 0011 forbids term without a confirmed DLQ copy
+
+Answer: (open)
+
+## 2026-11-18 17:44 ticket 17
+
+A demo reset can delete an EXPIRED/CANCELLED order; a later payment.succeeded then hits an unknown orderId. Poison or refund?
+
+Assumed: Poison, per the spec and ticket; docs/database/index.md now leaves refund-vs-poison open for the late-payment ticket. A human should decide whether the spec needs a demo-reset exception
+
+Answer: (open)
+
+## 2026-11-18 17:44 ticket 17
+
+Matrix gaps the spec leaves open?
+
+Assumed: refunded with APPLIED ledger -> noop refund_not_requested; final failed on PENDING with APPLIED -> noop payment_applied; late and mismatched on PENDING -> late rule wins (EXPIRED + refund); on-time payment on EXPIRED order -> refund reason late_delivery
+
+Answer: (open)

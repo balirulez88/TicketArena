@@ -32,6 +32,7 @@ export {
   type PaymentSagaDeps,
   type SagaContext,
   type SagaMessage,
+  type SagaOutcome,
 } from "./payment-saga";
 export {
   type BookingMetricCounts,
@@ -44,3 +45,17 @@ export {
   type RedisMetricsDeleteClient,
   type RedisMetricsReadClient,
 } from "./redis-metrics";
+export {
+  decide,
+  type LedgerDisposition,
+  type LedgerEntry,
+  type NoopReason,
+  type PoisonReason,
+  type RefundReason,
+  type RetryReason,
+  type SagaDecision,
+  type SagaEvent,
+  type SagaOrderState,
+  type SagaOrderStatus,
+  type TransitionReason,
+} from "./saga-decision";

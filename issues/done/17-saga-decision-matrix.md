@@ -4,7 +4,9 @@
 
 **Blocked by:** 08, 44 (payment latency outside the runner transaction)
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-18 on devflow/run-202611181443 (run 202611181443)
 
 - [ ] Pure `decide(orderState, ledger, event, T)` returns `transition | noop | refund | retry | poison`, with a reason code for every `noop`.
 - [ ] The booking-saga handler: dedupe check → lock order → `T = clock.now()` → `decide` → apply → `processed_messages` → outbox, one transaction.

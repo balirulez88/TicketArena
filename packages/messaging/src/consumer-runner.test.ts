@@ -277,4 +277,59 @@ describe("consumer runner", () => {
     expect(await prisma.outboxEvent.count({ where: { id } })).toBe(1);
     expect(await prisma.processedMessage.count({ where: { consumer: name } })).toBe(1);
   });
+  describe.each([
+    ["retry", "state_not_reached"],
+    ["poison", "unknown_order"],
+  ] as const)("a handler outcome of %s", (outcome, reason) => {
+    it("rolls the transaction back and naks with the scheduled delay, never acking or terminating", async () => {
+      const { name, subject } = newConsumer();
+      const id = newUuid();
+      const outcomes: string[] = [];
+      const recordingBus: MessageBus = {
+        ...bus,
+        ensureTopology: () => bus.ensureTopology(),
+        publish: (input) => bus.publish(input),
+        close: () => bus.close(),
+        subscribe: async (spec) => {
+          const subscription = await bus.subscribe(spec);
+          return {
+            fetch: async (options) =>
+              (await subscription.fetch(options)).map((message) => ({
+                ...message,
+                ack: () => {
+                  outcomes.push("ack");
+                  message.ack();
+                },
+                nak: (delayMs) => {
+                  outcomes.push(`nak:${delayMs}`);
+                  message.nak(delayMs);
+                },
+                term: (why) => {
+                  outcomes.push("term");
+                  message.term(why);
+                },
+              })),
+          };
+        },
+      };
+      const runner = await createConsumerRunner({
+        bus: recordingBus,
+        prisma,
+        consumer: name,
+        filterSubject: subject,
+        retryDelayMs: (deliveryCount) => deliveryCount * 1_000,
+        handler: async (tx, message) => {
+          await recordSideEffect(message, tx);
+          return { outcome, reason };
+        },
+      });
+      await bus.publish({ subject, data: "x", msgId: id });
+
+      await runner.pollOnce();
+
+      expect(outcomes).toEqual(["nak:1000"]);
+      expect(await prisma.processedMessage.count({ where: { consumer: name } })).toBe(0);
+      expect(await prisma.outboxEvent.count({ where: { id } })).toBe(0);
+    });
+  });
 });

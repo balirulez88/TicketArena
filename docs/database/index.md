@@ -173,8 +173,9 @@ guarantees.
 
 Known limitation: the reset deletes `EXPIRED` and `CANCELLED` demo orders even while a late
 capture for one may still be in flight, so the later `payment.succeeded` meets an unknown order
-(the saga currently throws and the message is retried). The late-payment ticket should treat a
-missing order as refundable.
+(`decide` returns `poison` for an unknown `orderId`, as the spec requires; until the DLQ exists the
+message is redelivered on the retry schedule). Whether such a capture should be refunded instead is
+an open question for the late-payment ticket.
 
 Catalog API (`apps/web`): `events.list`, `events.get`, `seats.map`. Inputs and outputs are zod
 validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.

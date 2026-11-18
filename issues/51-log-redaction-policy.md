@@ -6,7 +6,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** hardening, after the MVP (scope cut 2026-11-18)
 
 - [ ] The web and worker loggers redact buyer contact fields (email and phone, wherever they appear in a logged object, including inside a serialized error) before anything is written.
 - [ ] TD-048: a test makes a consumer handler fail with an error that carries a buyer's email and phone, and asserts that the logged line keeps the error's name and the correlation ids but contains neither contact detail.

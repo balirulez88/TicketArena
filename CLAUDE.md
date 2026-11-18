@@ -10,32 +10,35 @@ Agent instructions for TicketArena. Humans: see `README.md`.
 
 ## Workflow
 
-`/grill-me` → `/to-spec` → `/to-tickets` → `ralph-loop.sh` (`/implement` + `/tdd` → `/update-docs`
-→ independent `/code-review` → fix → merge).
-Skill sources live in `skills/`; `.claude/skills/*` are thin wrappers.
-Opt-in alternative for the execution step only: `RALPH_DRIVER=lead` (one Lead session per explicit
-`--ticket`, [ADR 0017](docs/adr/0017-opt-in-lead-driver.md)); the same host checks judge it. Ralph is the default.
+The **devflow** Claude Code plugin drives the work (installed per machine; config in
+`.devflow/config.json`):
+`/devflow:grill-me` → `/devflow:to-spec` → `/devflow:to-tickets` → `/devflow:run`, with
+`/devflow:status` and `/devflow:stop` during a run. A run implements one ticket at a time
+test-first, gates it, reviews it once, and commits it on a `devflow/run-*` branch; it never pushes.
+Questions it answered itself are in `.devflow/questions.md`.
+
+The previous harness (`ralph-loop.sh`, `scripts/ralph-*`, the Docker sandbox) is **frozen** at the
+`harness-v1` tag: do not extend or fix it, and do not run it.
 
 ## Quality gate (all must pass, zero warnings)
 
 ```bash
+pnpm infra:up       # local Postgres/Redis/NATS for integration tests (TEST_* in .env.test)
 pnpm run lint       # biome ci --error-on-warnings
 pnpm run typecheck  # tsc strict in every workspace
 pnpm run test       # vitest
-pnpm run test:harness  # ralph-loop review policy, evidence gate, artifact retention (bash, node:test)
-pnpm run check:debt # technical debt register is valid (docs/technical-debt.md)
-pnpm run check      # all of the above
-pnpm test:sandbox   # Docker: a rejected sandbox run keeps logs, branch and status on the host
-pnpm infra:up       # local Postgres/Redis/NATS for integration tests (TEST_* in .env.test)
 pnpm run format     # auto-fix formatting + import order
 ```
+
+These four checks are the devflow gate. `pnpm run check` additionally runs the frozen harness's
+self-tests (`test:harness`, `check:debt`); it is not part of a ticket.
 
 Never weaken the gate: no `biome-ignore`, `@ts-ignore`, `@ts-expect-error`, `any`, non-null `!`,
 skipped tests, or edits that relax `biome.json` / `tsconfig.base.json`.
 
 ## Code conventions
 
-- **TDD at agreed seams** (`skills/tdd.md`): test behaviour through public interfaces; mock only
+- **TDD at agreed seams** (`/devflow:tdd`): test behaviour through public interfaces; mock only
   system boundaries (network, time, randomness), never our own modules.
 - **SOLID, small deep modules**: narrow interfaces that hide storage and protocol details.
 - **Dependency injection**: packages never read `process.env`; apps validate config at the
@@ -52,17 +55,17 @@ skipped tests, or edits that relax `biome.json` / `tsconfig.base.json`.
 
 ## Code review
 
-`/code-review <fixed-point>` runs the generic two-axis review (`skills/code-review/`). Its
-TicketArena-specific rules live in [`docs/workflow/code-review.md`](docs/workflow/code-review.md):
-reviewers must read that file. Ralph reviews every slice before merging; `CRITICAL`/`HIGH`
-findings block the merge.
+TicketArena-specific review rules live in
+[`docs/workflow/code-review.md`](docs/workflow/code-review.md): reviewers must read that file.
+A devflow run reviews every ticket once; only `CRITICAL`/`HIGH` findings block, and
+`MEDIUM`/`LOW` findings go into the commit message as follow-ups.
 
 ## Technical debt
 
-Deferred `MEDIUM`/`LOW` findings live in [`docs/technical-debt.md`](docs/technical-debt.md).
-Before changing code, read the entries for the files you touch; entries whose `Target` names your
-ticket are part of it. Resolve an entry only with a fix and a test named in `Verification`, then
-`pnpm run format:debt`. Never delete entries.
+[`docs/technical-debt.md`](docs/technical-debt.md) is a **frozen record** of findings from the
+harness-v1 era. It is not part of any ticket and is not updated by runs. Read an entry only when it
+explains a problem in code you are changing. New follow-ups live in commit messages; a human
+decides which become tickets.
 
 ## Layout
 
@@ -72,6 +75,7 @@ packages/db       Prisma schema, migrations, client factory (Neon adapter)
 docs/             architecture memory (keep current via skills/update-docs.md)
 issues/           local ticket tracker (contract: issues/README.md); issues/done/ = completed
                   tickets, history only: read one only when the current ticket refers to it
-skills/           workflow skills (vendored from mattpocock/skills + local)
-ralph-loop.sh     autonomous TDD harness; runs inside the Docker sandbox
+.devflow/         devflow config and the record of questions a run answered itself
+skills/           harness-v1 skills (frozen; devflow ships its own)
+ralph-loop.sh     harness v1 (frozen at the harness-v1 tag)
 ```

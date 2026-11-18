@@ -8,7 +8,9 @@
 
 **Blocked by:** 45 (worker loop error reporting), 49 (Prisma schema drift)
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** hardening, after the MVP (scope cut 2026-11-18)
 
 Scope: the relay (`packages/messaging/src/outbox-relay.ts`), every service's outbox store (booking, payment, notification), the worker's health endpoint, and the consumers of every event type an outbox can hold. Each criterion names its test and the sabotage that test must catch.
 

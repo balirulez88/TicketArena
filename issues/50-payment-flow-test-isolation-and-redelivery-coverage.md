@@ -6,7 +6,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** hardening, after the MVP (scope cut 2026-11-18)
 
 - [ ] TD-072: each test in `apps/worker/src/payment-flow.test.ts` runs with its own consumers (or stream prefix), or drains them before stopping its worker, so no test receives another test's event; the AT-14/AT-15 assertions hold as exact counts without scoping deliveries to work around leakage.
 - [ ] TD-062: a notification whose send fails is redelivered as the same message after the `nak` (same message id), and a partial failure (EMAIL sent, then the SMS send fails) ends, after redelivery, with both channels `SENT` under the same keys and no duplicate delivery; the dead `.catch(() => undefined)` is gone.

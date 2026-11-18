@@ -4,7 +4,9 @@
 
 **Blocked by:** 28
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** after the MVP (scope cut 2026-11-18)
 
 - [ ] An Upstash REST adapter implements `QueueStore`, including the Lua scripts.
 - [ ] One contract suite runs against both adapters; CI provides an Upstash-compatible HTTP endpoint in front of Redis.

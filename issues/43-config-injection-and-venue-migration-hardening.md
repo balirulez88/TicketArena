@@ -4,7 +4,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** hardening, after the MVP (scope cut 2026-11-18)
 
 - [ ] TD-001: `packages/db` never reads `process.env`; the seed's database URL is validated at an app or script boundary and injected (a test fails if any file under `packages/*/src` outside tests reads `process.env`).
 - [ ] TD-003: a tRPC procedure that does not use the database succeeds when `DATABASE_URL` is unset, while a procedure that needs it still fails fast with a message naming `DATABASE_URL` (tests for both).

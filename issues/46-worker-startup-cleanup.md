@@ -6,7 +6,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** hardening, after the MVP (scope cut 2026-11-18)
 
 - [ ] TD-034: `startWorker` with a port that is already in use rejects with an error naming the port, and after the rejection no relay or consumer runner is running (test: no further outbox publishes or message fetches happen after the rejection).
 - [ ] TD-034: if any step of `startWorker` throws after a relay or runner has started, everything already started is stopped before the error propagates (test).

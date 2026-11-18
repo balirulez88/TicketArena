@@ -35,3 +35,8 @@ Thumbs.db
 
 # Claude Code per-user settings
 .claude/settings.local.json
+
+# devflow runtime files (config.json and questions.md are tracked)
+.devflow/run.json
+.devflow/progress.md
+.devflow/logs/

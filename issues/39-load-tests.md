@@ -4,7 +4,9 @@
 
 **Blocked by:** 31, 54, 55, 56, 57 (ticket 12 was split into 54–57; every part must be done)
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** after the MVP (scope cut 2026-11-18)
 
 - [ ] Queue storm: 5k virtual users join one event → admissions never exceed `admitRate`, no 5xx, refresh keeps the position.
 - [ ] Hot seat: 500 virtual users on 10 seats → zero oversell in the database; report the `SEAT_UNAVAILABLE`/`BOOKING_BUSY` split, throughput and p95/p99.

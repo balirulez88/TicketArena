@@ -62,17 +62,17 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
 | OPEN          | 0        | 0    | 0      | 39  | 39    |
-| PLANNED       | 0        | 0    | 14     | 25  | 39    |
+| PLANNED       | 0        | 0    | 13     | 24  | 37    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
-| RESOLVED      | 0        | 3    | 8      | 6   | 17    |
+| RESOLVED      | 0        | 3    | 9      | 7   | 19    |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 | Risk            | OPEN | PLANNED | IN_PROGRESS | RESOLVED | ACCEPTED_RISK | Total |
 | --------------- | ---- | ------- | ----------- | -------- | ------------- | ----- |
-| CORRECTNESS     | 1    | 5       | 0           | 6        | 0             | 12    |
+| CORRECTNESS     | 1    | 4       | 0           | 7        | 0             | 12    |
 | CONCURRENCY     | 0    | 2       | 0           | 2        | 0             | 4     |
 | SECURITY        | 1    | 2       | 0           | 2        | 0             | 5     |
-| VERIFICATION    | 8    | 17      | 0           | 5        | 0             | 30    |
+| VERIFICATION    | 8    | 16      | 0           | 6        | 0             | 30    |
 | OPERABILITY     | 5    | 10      | 0           | 2        | 0             | 17    |
 | MAINTAINABILITY | 24   | 3       | 0           | 0        | 0             | 27    |
 | UNTRIAGED       | 0    | 0       | 0           | 0        | 0             | 0     |
@@ -609,7 +609,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-022: Racing-duplicate test checks only the returned order ids
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** LOW
 - **Risk:** VERIFICATION
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -624,13 +624,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** ticket 16 (`issues/16-checkout-idempotency-hardening.md`), AT-12
 - **Blocks:** none
 - **Acceptance:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** ticket 16 (commit `d8c04ae`, devflow run 202611181233): the concurrent-duplicates race test now counts the order rows, order lines and `order.placed` outbox rows, and expects exactly one order and one event.
+- **Verification:** `packages/booking/src/place-order.test.ts::AT-12: concurrent duplicates yield one order, one set of lines and one order.placed event`
 - **Fingerprints:** `packages/booking/src/place-order.test.ts#racing-duplicate-test-checks-only-the-returned-order-ids`
 - **History:**
   - 2026-10-30: recorded: LOW missing_test at `packages/booking/src/place-order.test.ts:123`, standards axis (ticket 05 review-2 standards, run 20261030-135423)
   - 2026-10-30: planned for ticket 16 (`issues/16-checkout-idempotency-hardening.md`), AT-12 (correctness review of tickets 03-05, 2026-10-30)
   - 2026-11-06: triaged: VERIFICATION, owned by ticket 16, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-18: resolved by a human after devflow run 202611181233 (ticket 16); the register is otherwise frozen
 
 ### TD-023: Hard-coded EUR fallback and repeated inline line shape
 
@@ -1128,7 +1129,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-043: placeOrder tells the replay result from the fresh result with an `"order" in placed` check
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** MEDIUM
 - **Risk:** CORRECTNESS
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -1143,13 +1144,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** ticket 16 (`issues/16-checkout-idempotency-hardening.md`)
 - **Blocks:** none
 - **Acceptance:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** ticket 16 (commit `d8c04ae`, devflow run 202611181233): `placeOrder`'s transaction returns a tagged `created`/`replayed` result, and only `created` logs "order placed".
+- **Verification:** `packages/booking/src/booking-logging.test.ts::a replayed placeOrder logs no 'order placed' line and returns the original order view`
 - **Fingerprints:** `packages/booking/src/booking-service.ts#placeorder-tells-the-replay-result-from-the-fresh-result-wit`; `packages/booking/src/booking-service.ts#transaction-result-discriminated-by-an-order-in-placed-check`
 - **History:**
   - 2026-11-03: recorded: MEDIUM maintainability at `packages/booking/src/booking-service.ts:528`, standards axis (ticket 07 review-2 standards, run 20261103-123322)
   - 2026-11-03: seen again: LOW maintainability at `packages/booking/src/booking-service.ts:528`, spec axis (ticket 07 review-2 spec, run 20261103-123322)
   - 2026-11-06: triaged: CORRECTNESS, owned by ticket 16, blocks no ticket (initial triage, ticket 53)
+  - 2026-11-18: resolved by a human after devflow run 202611181233 (ticket 16); the register is otherwise frozen
 
 ### TD-044: The message body is JSON-parsed and envelope-validated up to three times per message
 

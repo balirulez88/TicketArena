@@ -145,7 +145,7 @@ The catalog has no performance date; what date do the event pages show?
 
 Assumed: The on-sale time (onSaleAt); adding a performance date needs a schema migration and contract change
 
-Answer: (open)
+Answer: Accepted (2026-11-18): a performance date needs a migration the MVP does not need.
 
 ## 2026-11-18 14:57 ticket 32
 
@@ -153,7 +153,7 @@ What is the on-sale status?
 
 Assumed: Client-clock hint: 'On sale now' if onSaleAt is past, else 'Upcoming', always with the on-sale time; the server decides
 
-Answer: (open)
+Answer: Accepted (2026-11-18): the label is a hint; holdSeats enforces onSaleAt (ticket 61).
 
 ## 2026-11-18 14:57 ticket 32
 
@@ -161,7 +161,7 @@ Are unselectable seats natively disabled?
 
 Assumed: No: aria-disabled and focusable so screen-reader and keyboard users hear their status; arrow keys move within a section, all seats stay in Tab order
 
-Answer: (open)
+Answer: Accepted (2026-11-18).
 
 ## 2026-11-18 14:57 ticket 32
 
@@ -169,7 +169,7 @@ Where do prices per section appear?
 
 Assumed: Event page only; events.list contract unchanged and returns no prices
 
-Answer: (open)
+Answer: Accepted (2026-11-18).
 
 ## 2026-11-18 15:15 ticket 35
 
@@ -177,7 +177,7 @@ What does admin.snapshot cover, and what are pending payments?
 
 Assumed: All events ordered by onSaleAt; seats, queue length, active shoppers and counters per event; orders by status global (orders have no eventId); pending payments = orders in PENDING_PAYMENT (ADR 0009: booking does not read the payment schema)
 
-Answer: (open)
+Answer: Accepted (2026-11-18).
 
 ## 2026-11-18 15:15 ticket 35
 
@@ -185,7 +185,7 @@ How is the admin cookie signed and scoped?
 
 Assumed: HMAC with SESSION_SECRET over a ta_admin:-prefixed payload including expiry; 8h, httpOnly, Secure, SameSite=Strict; ADMIN_PASSWORD min 12 chars, constant-time compare; changing ADMIN_PASSWORD does not revoke issued cookies
 
-Answer: (open)
+Answer: Accepted (2026-11-18): an 8-hour cookie that survives a password change is acceptable for the demo.
 
 ## 2026-11-18 15:15 ticket 35
 
@@ -193,7 +193,7 @@ Login rate limiting and logout?
 
 Assumed: Neither built in this ticket; form POST to /api/admin/login with 303 redirects; missing/invalid cookie is UNAUTHORIZED
 
-Answer: (open)
+Answer: Accepted (2026-11-18) for this ticket. Login rate limiting and logout must exist before the public deployment. Fix: ticket 65.
 
 ## 2026-11-18 15:33 ticket 37
 
@@ -201,7 +201,7 @@ What does 'results appear in the feed' mean before the feed (ticket 36) exists?
 
 Assumed: The winning hold's normal seat.held outbox row is the race's feed entry; runRace returns its holdId and correlationId; losers write nothing; no new event type, no feed UI
 
-Answer: (open)
+Answer: Accepted (2026-11-18).
 
 ## 2026-11-18 15:33 ticket 37
 
@@ -209,7 +209,7 @@ What blocks the demo reset, and what does it delete?
 
 Assumed: Blocked by PENDING_PAYMENT demo orders or order_payments with REFUND_REQUESTED or MANUAL_REVIEW; deletes demo holds, orders, order_lines, order_payments and the event's Redis keys; keeps outbox_events, processed_messages, payment and notification schemas
 
-Answer: (open)
+Answer: Overridden (2026-11-18): the reset must be conservative and keep financial audit history. It never deletes orders, order lines or ledger rows, so a delayed, duplicate or late payment always finds its order and is reconciled by the saga; it still refuses while a demo order is PENDING_PAYMENT or a refund obligation is open. Until a safe cleanup mechanism exists, nothing financial is deleted. Fix: ticket 64.
 
 ## 2026-11-18 15:33 ticket 37
 
@@ -217,7 +217,7 @@ How is the 1-per-10s limit stored and enforced?
 
 Assumed: SET admin:rate:<action> NX PX 10000 on the shared Upstash store, global per action, taken before other checks, fails closed; refusal is TOO_MANY_REQUESTS with retry seconds
 
-Answer: (open)
+Answer: Accepted (2026-11-18).
 
 ## 2026-11-18 15:53 ticket 44
 
@@ -225,7 +225,7 @@ AC1 names Prisma's default 5 s timeout; must the test sleep over 5 s?
 
 Assumed: No: the test injects a 500 ms runner transaction timeout and a 900 ms real sleep; it fails on the old code, so it proves the bug without a 5 s wait
 
-Answer: (open)
+Answer: Accepted (2026-11-18): the test proves the bug without a 5 s wait.
 
 ## 2026-11-18 15:53 ticket 44
 
@@ -233,7 +233,7 @@ Does the notification handler's provider.send (also fingerprinted by TD-051) mov
 
 Assumed: No: it needs a reworked pending/send/resume flow the ACs don't cover; left as a follow-up
 
-Answer: (open)
+Answer: Accepted (2026-11-18) for this ticket. The notification send still runs inside the transaction (the rest of TD-051). Fix: ticket 66.
 
 ## 2026-11-18 17:44 ticket 17
 
@@ -241,7 +241,7 @@ What does the apply step do for decisions whose side effects later tickets build
 
 Assumed: decide returns the spec's answer; the handler throws 'not handled yet' so the runner retries on the delay schedule (today's behaviour, never drops captured money); tickets 19 and 22 replace the throw
 
-Answer: (open)
+Answer: Accepted (2026-11-18): captured money is never dropped; tickets 19 and 22 replace the throw.
 
 ## 2026-11-18 17:44 ticket 17
 
@@ -249,7 +249,7 @@ How does poison behave before the DLQ (ticket 25) exists?
 
 Assumed: Roll back, log as error, nak on the normal delay schedule; ADR 0011 forbids term without a confirmed DLQ copy
 
-Answer: (open)
+Answer: Accepted (2026-11-18): ADR 0011 forbids term without a confirmed DLQ copy.
 
 ## 2026-11-18 17:44 ticket 17
 
@@ -257,7 +257,7 @@ A demo reset can delete an EXPIRED/CANCELLED order; a later payment.succeeded th
 
 Assumed: Poison, per the spec and ticket; docs/database/index.md now leaves refund-vs-poison open for the late-payment ticket. A human should decide whether the spec needs a demo-reset exception
 
-Answer: (open)
+Answer: Overridden (2026-11-18): refund, not poison. A captured payment.succeeded whose order no longer exists must eventually be refunded, safely and idempotently (one refund per paymentId, however often it is redelivered). Ticket 17 is unchanged; ticket 19 builds it and updates the spec. Ticket 64 makes the case rare by keeping orders on a demo reset.
 
 ## 2026-11-18 17:44 ticket 17
 
@@ -265,4 +265,4 @@ Matrix gaps the spec leaves open?
 
 Assumed: refunded with APPLIED ledger -> noop refund_not_requested; final failed on PENDING with APPLIED -> noop payment_applied; late and mismatched on PENDING -> late rule wins (EXPIRED + refund); on-time payment on EXPIRED order -> refund reason late_delivery
 
-Answer: (open)
+Answer: Accepted (2026-11-18): every gap resolves towards returning the money.

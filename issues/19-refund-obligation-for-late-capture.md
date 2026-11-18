@@ -10,3 +10,6 @@
 - [ ] `PENDING_PAYMENT` + `succeeded` with `capturedAt > paymentDeadline` → `EXPIRED`, seats freed, `order.expired`, ledger row `REFUND_REQUESTED` with `refundRequestedAt`, outbox `payment.refund_requested` (with contact), one transaction.
 - [ ] `EXPIRED` or `CANCELLED` + any `succeeded` → refund obligation.
 - [ ] AT-20: a capture after the deadline is refunded and the seats are not reclaimed, even if still free.
+- [ ] A captured `payment.succeeded` whose `orderId` no longer exists (for example after a demo reset that predates ticket 64) is refunded instead of poisoned: `payment.refund_requested` with reason `unknown_order` goes into the outbox in the same transaction as the dedupe record, and a redelivered or duplicate message refunds that `paymentId` exactly once. Answer to ticket 17's third question in `.devflow/questions.md`.
+
+**Documentation deliverable (reviewed, not test-verified):** the spec's Payment saga section and the `decide()` matrix say that an unknown `orderId` on a `succeeded` payment is a refund, while an unknown `paymentId` on a refund event stays poison.

@@ -228,9 +228,9 @@ describe("holdSeats metrics on the fast path and the race", () => {
     expect(calls).toEqual(["race_lost"]);
   });
 
-  // Until lazy expiry lands (TD-013, ticket 14) the locked step refuses an expired HELD seat that
-  // the snapshot let through. Nobody changed the seat in between, so no race was lost.
-  test("an expired HELD seat refused under the lock counts seat_unavailable, not race_lost", async () => {
+  // Lazy expiry (TD-013): the snapshot and the locked step agree that an expired hold frees its
+  // seat, so the call wins and no refusal is counted.
+  test("an expired HELD seat is held under the lock and counts hold_ok only", async () => {
     const event = await db().event.findFirstOrThrow({ where: { demo: true } });
     const seat = await freeSeat(event.id);
     await createBookingService({
@@ -245,11 +245,37 @@ describe("holdSeats metrics on the fast path and the race", () => {
       newId: randomUUID,
       metrics,
     });
-    expect(await settleWithin(service.holdSeats(bob, event.id, [seat.id]))).toMatchObject({
-      code: "SEAT_UNAVAILABLE",
-      seatIds: [seat.id],
+    expect(await settleWithin(service.holdSeats(bob, event.id, [seat.id]))).toBe("held");
+    expect(calls).toEqual(["hold_ok"]);
+  });
+
+  test("an expired HELD seat taken between snapshot and lock counts race_lost only", async () => {
+    const event = await db().event.findFirstOrThrow({ where: { demo: true } });
+    const seat = await freeSeat(event.id);
+    await createBookingService({
+      db: db(),
+      clock: { now: () => NOW },
+      newId: randomUUID,
+    }).holdSeats(alice, event.id, [seat.id]);
+    const lock = await lockSeatElsewhere(seat.id, "SOLD");
+    const { calls, metrics } = recordingMetrics();
+    const service = createBookingService({
+      db: db(),
+      clock: { now: () => new Date(NOW.getTime() + 24 * 60 * 60 * 1000) },
+      newId: randomUUID,
+      metrics,
     });
-    expect(calls).toEqual(["seat_unavailable"]);
+    const settled = service.holdSeats(bob, event.id, [seat.id]).then(
+      () => "held" as const,
+      (error: unknown) => error,
+    );
+    try {
+      await lock.waitForWaiter();
+    } finally {
+      await lock.release();
+    }
+    expect(await settled).toMatchObject({ code: "SEAT_UNAVAILABLE", seatIds: [seat.id] });
+    expect(calls).toEqual(["race_lost"]);
   });
 
   test("an unknown seat id counts seat_unavailable, not race_lost", async () => {

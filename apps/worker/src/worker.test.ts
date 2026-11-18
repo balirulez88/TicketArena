@@ -1,9 +1,11 @@
-import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
+import { randomUUID } from "node:crypto";
+import { createBookingService, type SweepResult } from "@ticketarena/booking";
+import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { connectJetStreamMessageBus, type MessageBus } from "@ticketarena/messaging";
 import { setupTestDatabase, setupTestNats } from "@ticketarena/test-infra";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parseWorkerEnv } from "./env.js";
-import { startWorker } from "./worker.js";
+import { SWEEP_INTERVAL_MS, startWorker } from "./worker.js";
 
 const database = setupTestDatabase();
 const nats = setupTestNats();
@@ -78,6 +80,101 @@ describe("worker", () => {
     } finally {
       await worker.stop();
     }
+  });
+});
+
+describe("worker hold sweeper", () => {
+  const NOW = new Date("2027-03-01T12:00:00.000Z");
+
+  function recordingSweeper(failFirst = false) {
+    let calls = 0;
+    return {
+      calls: () => calls,
+      booking: {
+        sweepExpired: async (): Promise<SweepResult> => {
+          calls += 1;
+          if (failFirst && calls === 1) {
+            throw new Error("database unavailable");
+          }
+          return { expiredHoldIds: [] };
+        },
+      },
+    };
+  }
+
+  it("expires a hold past holdExpiresAt and frees its seat through the booking service", async () => {
+    await seedCatalog(prisma, NOW);
+    const event = await prisma.event.findFirstOrThrow({ where: { demo: true } });
+    const seat = await prisma.seat.findFirstOrThrow({
+      where: { eventId: event.id, status: "AVAILABLE" },
+      orderBy: { id: "asc" },
+    });
+    const buyer = { sessionId: "c".repeat(32), buyerKey: "c".repeat(32) };
+    const hold = await createBookingService({
+      db: prisma,
+      clock: { now: () => NOW },
+      newId: randomUUID,
+    }).holdSeats(buyer, event.id, [seat.id]);
+    const booking = createBookingService({
+      db: prisma,
+      clock: { now: () => hold.holdExpiresAt },
+      newId: randomUUID,
+    });
+
+    const worker = await startWorker({
+      bus,
+      prisma,
+      port: 0,
+      sweeper: { booking, intervalMs: 20 },
+    });
+    try {
+      await expect
+        .poll(
+          async () => (await prisma.hold.findUniqueOrThrow({ where: { id: hold.id } })).status,
+          {
+            timeout: 10_000,
+          },
+        )
+        .toBe("EXPIRED");
+      expect((await prisma.seat.findUniqueOrThrow({ where: { id: seat.id } })).status).toBe(
+        "AVAILABLE",
+      );
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it("keeps sweeping after a failed sweep", async () => {
+    const sweeper = recordingSweeper(true);
+    const worker = await startWorker({
+      bus,
+      prisma,
+      port: 0,
+      sweeper: { booking: sweeper.booking, intervalMs: 20 },
+    });
+    try {
+      await expect.poll(() => sweeper.calls(), { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it("sweeps at start, then every 15 seconds by default, and stops without waiting out the interval", async () => {
+    expect(SWEEP_INTERVAL_MS).toBe(15_000);
+    const sweeper = recordingSweeper();
+    const worker = await startWorker({
+      bus,
+      prisma,
+      port: 0,
+      sweeper: { booking: sweeper.booking },
+    });
+    await expect.poll(() => sweeper.calls(), { timeout: 10_000 }).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(sweeper.calls()).toBe(1);
+
+    const stopping = Date.now();
+    await worker.stop();
+    expect(Date.now() - stopping).toBeLessThan(5_000);
   });
 });
 

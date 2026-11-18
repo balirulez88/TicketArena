@@ -21,6 +21,7 @@ export {
   type OrderLineView,
   type OrderView,
   SeatUnavailableError,
+  type SweepResult,
 } from "./booking-service";
 export {
   createPaymentSagaHandler,

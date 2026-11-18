@@ -1,5 +1,6 @@
 import {
   envelopeSchema,
+  holdExpiredPayloadSchema,
   holdReleasedPayloadSchema,
   seatHeldPayloadSchema,
 } from "@ticketarena/contracts";
@@ -79,5 +80,15 @@ describe("hold.released payload", () => {
 
   it("rejects a payload without holdId", () => {
     expect(holdReleasedPayloadSchema.safeParse({ seatIds: [seatId] }).success).toBe(false);
+  });
+});
+
+describe("hold.expired payload", () => {
+  it("accepts an empty seatIds list: every seat may have been taken over lazily", () => {
+    expect(holdExpiredPayloadSchema.safeParse({ holdId, seatIds: [] }).success).toBe(true);
+  });
+
+  it("rejects a payload without holdId", () => {
+    expect(holdExpiredPayloadSchema.safeParse({ seatIds: [seatId] }).success).toBe(false);
   });
 });

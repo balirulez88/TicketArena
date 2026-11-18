@@ -79,12 +79,16 @@ row in `outbox_events` whose `payload` is the full event envelope and whose `id`
 `claimBuyerKey = buyerKey` that are `IN_CHECKOUT`, `SOLD` or `HELD` with an unexpired hold (each
 seat once); if that plus the request exceeds 6 (`MAX_SEATS_PER_BUYER`) it rolls back with
 `LIMIT_EXCEEDED` (tRPC `CONFLICT`) and counts `limit_exceeded`, so overlapping requests never leave
-a partial hold. A seat that is not `AVAILABLE` fails with `SEAT_UNAVAILABLE` (tRPC `CONFLICT`) naming its id.
+a partial hold. Lazy expiry: a seat is free iff `AVAILABLE`, or `HELD` by a hold with
+`holdExpiresAt <= T` (the hold's expiry is read by a fresh, unlocked statement after the seat
+locks); such a seat is taken over by the new hold while the old hold stays `HELD` until the sweeper
+expires it. `IN_CHECKOUT` and `SOLD` are never free. Any other seat fails with `SEAT_UNAVAILABLE`
+(tRPC `CONFLICT`) naming its id.
 No SQL `now()`; the `Clock` is injected.
 
 Metrics: an optional `BookingMetrics` port counts `hold_ok`, `limit_exceeded`, `seat_unavailable` (snapshot refusals,
-and refusals under the lock of seats nobody changed since the snapshot, such as an expired but
-unswept hold or a seat outside the event) and `race_lost` (refused under the lock because a refused
+and refusals under the lock of seats nobody changed since the snapshot, such as a seat outside
+the event) and `race_lost` (refused under the lock because a refused
 seat's status or hold changed after the snapshot read it) per event. Counters are bumped
 after the outcome is decided, fire-and-forget; a failure is logged and never fails a booking. The
 Redis adapter (`createRedisBookingMetrics`) keeps one hash per event,
@@ -103,7 +107,7 @@ the pool's first connection.
 Orders: `booking.placeOrder` (no admission required) and `booking.getOrder` (owner only, else
 `NOT_FOUND`). `placeOrder` runs one transaction with the lock order buyer lock (same key as `holdSeats`, taken after an unlocked read of the hold's event), hold `FOR UPDATE`, seats
 `ORDER BY id FOR UPDATE`, then `T = clock.now()`. It requires a `HELD` hold owned by the caller's
-`BuyerKey` (else `NOT_FOUND`), `T < holdExpiresAt` (else `HOLD_EXPIRED`, tRPC
+`BuyerKey` (else `NOT_FOUND`; an `EXPIRED` hold, i.e. one the sweeper got first, is `HOLD_EXPIRED`), `T < holdExpiresAt` (else `HOLD_EXPIRED`, tRPC
 `PRECONDITION_FAILED`) and every seat still `HELD` with this `holdId`; the expected seat set is
 read from the hold's `seat.held` outbox event, so a seat that lost its `holdId` fails with
 `SEAT_UNAVAILABLE`. A non-`HELD` hold is refused (`HOLD_NOT_ACTIVE`) before the event is read, and a
@@ -124,6 +128,16 @@ seat taken over by another hold is left alone), and writes a `hold.released` out
 returned hold view lists the freed seats; the seats are holdable by anyone as soon as it commits.
 Releasing a hold does not end shopping: the buyer's waiting-room slot is untouched (slot logic
 arrives in ticket 30; only `placeOrder`, leaving or reaping end it).
+
+Expiry: one `T` per transaction and one rule everywhere, a hold is valid iff `T < holdExpiresAt`
+(snapshot, lazy takeover, buyer limit, `placeOrder`, sweeper). `BookingService.sweepExpired()` is
+the sweeper's step: per transaction (batches of 100, repeated until a short batch) it reads `T`,
+claims `HELD` holds with `holdExpiresAt <= T` `FOR UPDATE SKIP LOCKED`, locks the seats still `HELD`
+with those `holdId`s `ORDER BY id FOR UPDATE`, sets the holds `EXPIRED` and those seats `AVAILABLE`
+(`holdId` and `claimBuyerKey` cleared; a seat taken over lazily is left alone), and writes one
+`hold.expired` outbox row per hold. A hold `placeOrder` has locked is skipped; one it has converted
+no longer matches `HELD`, so checkout and the sweeper never both win (the hold row lock serializes
+them). `apps/worker` runs it every 15 s.
 
 Catalog API (`apps/web`): `events.list`, `events.get`, `seats.map`. Inputs and outputs are zod
 validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.

@@ -62,14 +62,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
 | OPEN          | 0        | 0    | 0      | 39  | 39    |
-| PLANNED       | 0        | 0    | 15     | 25  | 40    |
+| PLANNED       | 0        | 0    | 14     | 25  | 39    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
-| RESOLVED      | 0        | 3    | 7      | 6   | 16    |
+| RESOLVED      | 0        | 3    | 8      | 6   | 17    |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 | Risk            | OPEN | PLANNED | IN_PROGRESS | RESOLVED | ACCEPTED_RISK | Total |
 | --------------- | ---- | ------- | ----------- | -------- | ------------- | ----- |
-| CORRECTNESS     | 1    | 6       | 0           | 5        | 0             | 12    |
+| CORRECTNESS     | 1    | 5       | 0           | 6        | 0             | 12    |
 | CONCURRENCY     | 0    | 2       | 0           | 2        | 0             | 4     |
 | SECURITY        | 1    | 2       | 0           | 2        | 0             | 5     |
 | VERIFICATION    | 8    | 17      | 0           | 5        | 0             | 30    |
@@ -378,7 +378,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-013: Lazy hold expiry is not implemented; expired holds block seats until a sweeper exists
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** MEDIUM
 - **Risk:** CORRECTNESS
 - **Triage:** 2026-11-06: initial triage when the debt gate was introduced (ticket 53, harness/53-risk-based-debt-gate)
@@ -393,8 +393,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** ticket 14 (`issues/14-hold-expiry.md`), AC1 and AC7
 - **Blocks:** 38
 - **Acceptance:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** ticket 14 (commit `d21ab7a`, devflow run 202611180958): `holdSeats` treats a `HELD` seat whose hold expired at T, read after the seat locks, as free; the worker sweeps expired holds.
+- **Verification:** `packages/booking/src/hold-expiry.test.ts::AT-07: an expired hold's seat can be held by another buyer before the sweeper runs`; `packages/booking/src/hold-expiry.test.ts::decides expiry with T read after the seat locks, not before the lock wait`; `packages/booking/src/hold-fast-path.test.ts::an expired HELD seat is held under the lock and counts hold_ok only`
 - **Fingerprints:** `packages/booking/src/booking-service.ts#availability-check-ignores-lazy-expiry-so-the-schema-comment`; `packages/db/prisma/schema.prisma#schema-comment-promises-lazy-expiry-that-is-not-implemented`
 - **History:**
   - 2026-10-30: recorded: MEDIUM regression_risk at `packages/booking/src/booking-service.ts:73`, standards axis (ticket 04 review-1 standards, run 20261030-134316)
@@ -405,6 +405,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-03: ticket 38 now lists ticket 14 as a blocker, so deployment cannot start before lazy expiry is verified (user decision, 2026-11-03)
   - 2026-11-05: when ticket 14 lands, the expired HELD seat becomes holdable, so TD-066's Verification test `hold-fast-path.test.ts::an expired HELD seat refused under the lock counts seat_unavailable, not race_lost` must be replaced by a refusal of an unchanged seat that does not rely on this gap
   - 2026-11-06: triaged: CORRECTNESS, owned by ticket 14, blocks ticket(s) 38 until it is resolved (initial triage, ticket 53)
+  - 2026-11-18: resolved by a human after devflow run 202611180958 (ticket 14); the register is otherwise frozen
 
 ### TD-014: Duplicate seat ids are not rejected at the service level
 

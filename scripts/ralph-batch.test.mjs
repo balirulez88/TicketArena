@@ -33,6 +33,7 @@ const identity = {
 const RUNNER = `
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 const ticket = process.argv[process.argv.indexOf("--ticket") + 1];
 const log = process.env.STUB_RUNNER_LOG;
 const calls = existsSync(log) ? readFileSync(log, "utf8").split("\\n").filter((l) => l === ticket).length : 0;
@@ -41,6 +42,12 @@ const action = (JSON.parse(process.env.STUB_PLAN || "{}")[ticket] || [])[calls] 
 const git = (...args) => execFileSync("git", args, { encoding: "utf8" });
 const file = readdirSync("issues").find((name) => name.startsWith(ticket + "-"));
 const slug = file.replace(/\\.md$/, "");
+const quarantine = "refs/ralph/rejected/" + slug + "-20261108-102624";
+function block() {
+  const path = "issues/" + file;
+  writeFileSync(path, readFileSync(path, "utf8").replace(/^\\*\\*Status:\\*\\* .*$/m, "**Status:** blocked"));
+  git("commit", "--quiet", "-am", "chore(issues): block " + path);
+}
 function merge() {
   git("switch", "--quiet", "-c", "slice/" + slug);
   const text = readFileSync("issues/" + file, "utf8").replace(/^\\*\\*Status:\\*\\* .*$/m, "**Status:** done");
@@ -60,9 +67,48 @@ switch (action) {
   case "crash": process.exit(1);
   case "noop": process.exit(0);
   case "reject": {
-    const path = "issues/" + file;
-    writeFileSync(path, readFileSync(path, "utf8").replace(/^\\*\\*Status:\\*\\* .*$/m, "**Status:** blocked"));
-    git("commit", "--quiet", "-am", "chore(issues): block " + path);
+    block();
+    process.exit(1);
+  }
+  // The four outcomes the host's importer can leave (TD-059 WS2):
+  case "reject-quarantined": {
+    git("update-ref", quarantine, "HEAD", "");
+    block();
+    process.exit(1);
+  }
+  case "reject-incoming": {
+    // The quarantine ref could not be created: the work stays in the run's incoming refs.
+    git("update-ref", "refs/ralph/incoming/20261108-102624-1/slice/" + slug, "HEAD", "");
+    block();
+    process.exit(1);
+  }
+  case "reject-unblocked": {
+    // D2 without the importer's hold: quarantined, but the blocked status was never committed.
+    git("update-ref", quarantine, "HEAD", "");
+    process.exit(1);
+  }
+  case "reject-held": {
+    // D2 as the importer leaves it: quarantined, and held for recovery.
+    git("update-ref", quarantine, "HEAD", "");
+    const { placeRecoveryHold } = await import(pathToFileURL(process.cwd() + "/scripts/ralph-quarantine.mjs").href);
+    placeRecoveryHold(process.cwd(), { slug, commit: git("rev-parse", "HEAD").trim(), preserved: [quarantine], reason: "commit failed" });
+    process.exit(1);
+  }
+  case "reject-hostile": {
+    // D2 seen through refs the container chose: its own rejected/* branch (not quarantined), an
+    // incoming ref sorted first that points at a blob, and one whose name carries a C1 control
+    // character (CSI, U+009B). The importer neither blocked the ticket nor placed a hold.
+    const run = "refs/ralph/incoming/20261108-102624-1/";
+    const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], { input: "x", encoding: "utf8" }).trim();
+    git("update-ref", run + "0-blob", blob, "");
+    git("update-ref", run + "rejected/" + slug + "-20261108-102624", "HEAD", "");
+    git("update-ref", run + "x\u009b31mred", "HEAD", "");
+    process.exit(1);
+  }
+  case "unavailable": {
+    // The host review could not run: the importer keeps the run's refs and changes nothing.
+    git("update-ref", "refs/ralph/incoming/20261108-102624-1/main", "HEAD", "");
+    git("update-ref", "refs/ralph/incoming/20261108-102624-1/slice/" + slug, "HEAD", "");
     process.exit(1);
   }
   case "reject-side": {
@@ -133,7 +179,12 @@ function fixture(
     join(source, "scripts", "ralph-batch.mjs"),
     join(host, "scripts", "ralph-batch.mjs"),
   );
-  for (const script of ["ralph-debt.mjs", "ralph-artifacts.mjs"]) {
+  for (const script of [
+    "ralph-debt.mjs",
+    "ralph-artifacts.mjs",
+    "ralph-quarantine.mjs",
+    "ralph-push-inspect.mjs",
+  ]) {
     copyFileSync(join(source, "scripts", script), join(host, "scripts", script));
   }
   mkdirSync(join(host, "docs"), { recursive: true });
@@ -252,6 +303,8 @@ const mergedCount = (fx, number) =>
     .split("\n")
     .filter((s) => s.startsWith(`Merge slice/${number}-`)).length;
 const onGithub = (fx) => git(fx.github, "rev-parse", "main");
+const holds = (fx) =>
+  git(fx.host, "for-each-ref", "--format=%(refname) %(objectname)", "refs/ralph/recovery/");
 
 describe("bounded batch", () => {
   it("stops at the batch limit with every merged ticket pushed and CI-verified", () => {
@@ -329,11 +382,8 @@ describe("bounded batch", () => {
     const fx = fixture();
     const { code, out } = batch(fx, ["--max-tickets", "3"], { plan: { "01": ["reject"] } });
     assert.equal(code, 1, out);
-    assert.match(out, /STOPPED: rejected: ticket 01 was rejected/);
-    assert.match(
-      out,
-      /see refs\/ralph\/rejected\/ or refs\/ralph\/incoming\/ \(the importer's log names it\) and \.ralph\/logs/,
-    );
+    assert.match(out, /STOPPED: rejected: ticket 01 was rejected and is blocked on main/);
+    assert.match(out, /this run left no new quarantine or incoming ref; the importer's log names/);
     assert.deepEqual(runnerCalls(fx), ["01"]);
     assert.equal(state(fx).tickets[0].stage, "rejected");
   });
@@ -371,15 +421,16 @@ describe("bounded batch", () => {
     assert.deepEqual(runnerCalls(fx), ["01"]);
   });
 
-  it("a rejection whose blocked status reached only a side branch is still a rejection", () => {
+  it("names an actual side branch that holds the blocked status, and holds the ticket", () => {
     const fx = fixture();
     const { code, out } = batch(fx, ["--max-tickets", "3"], { plan: { "01": ["reject-side"] } });
     assert.equal(code, 1, out);
     assert.match(
       out,
-      /STOPPED: rejected: ticket 01 was rejected and is blocked on a ralph\/blocked-\* side branch/,
+      /STOPPED: recovery-required: ticket 01 was rejected, but its blocked status is only on refs\/heads\/ralph\/blocked-run1, not on main/,
     );
-    assert.match(out, /see refs\/ralph\/rejected\/01-t01-run1 and \.ralph\/logs/);
+    assert.match(out, /its work is preserved on refs\/ralph\/rejected\/01-t01-run1/);
+    assert.match(out, /held by refs\/ralph\/recovery\/01-t01/);
     assert.deepEqual(runnerCalls(fx), ["01"]);
     assert.equal(state(fx).tickets[0].stage, "rejected");
   });
@@ -390,9 +441,141 @@ describe("bounded batch", () => {
       plan: { "01": ["reject-side-legacy"] },
     });
     assert.equal(code, 1, out);
-    assert.match(out, /STOPPED: rejected: ticket 01 was rejected/);
-    assert.match(out, /see refs\/heads\/rejected\/01-t01-run1 and \.ralph\/logs/);
+    assert.match(out, /STOPPED: recovery-required: ticket 01 was rejected/);
+    assert.match(out, /its work is preserved on refs\/heads\/rejected\/01-t01-run1/);
     assert.equal(state(fx).tickets[0].stage, "rejected");
+  });
+
+  // --- TD-059 WS2: what the batch reports, and the recovery hold (D2) ---------------------------
+
+  it("reports a ticket blocked on main with its work on the quarantine ref", () => {
+    const fx = fixture();
+    const { code, out } = batch(fx, ["--max-tickets", "3"], {
+      plan: { "01": ["reject-quarantined"] },
+    });
+    assert.equal(code, 1, out);
+    assert.match(
+      out,
+      /STOPPED: rejected: ticket 01 was rejected and is blocked on main; its work is preserved on refs\/ralph\/rejected\/01-t01-20261108-102624/,
+    );
+    assert.doesNotMatch(out, /side branch|ralph\/blocked/);
+    assert.equal(holds(fx), "");
+  });
+
+  it("reports work preserved only in incoming refs, and keeps them", () => {
+    const fx = fixture();
+    const { code, out } = batch(fx, ["--max-tickets", "3"], {
+      plan: { "01": ["reject-incoming"] },
+    });
+    assert.equal(code, 1, out);
+    assert.match(
+      out,
+      /STOPPED: rejected: .*no quarantine ref could be created, so its work is preserved only in refs\/ralph\/incoming\/20261108-102624-1\/slice\/01-t01/,
+    );
+    assert.notEqual(git(fx.host, "for-each-ref", "refs/ralph/incoming/"), "");
+    assert.doesNotMatch(out, /side branch|ralph\/blocked/);
+  });
+
+  it("does not mistake an unavailable host review for a rejection", () => {
+    const fx = fixture();
+    const { code, out } = batch(fx, ["--max-tickets", "3"], { plan: { "01": ["unavailable"] } });
+    assert.equal(code, 1, out);
+    assert.match(out, /STOPPED \(resumable\): runner-failed/);
+    assert.equal(holds(fx), "");
+  });
+
+  it("fails closed when the blocked status could not be committed (D2), across fresh runs", () => {
+    const fx = fixture();
+    const first = batch(fx, ["--max-tickets", "3"], { plan: { "01": ["reject-unblocked"] } });
+    assert.equal(first.code, 1, first.out);
+    assert.match(
+      first.out,
+      /STOPPED: recovery-required: ticket 01 was rejected, but its blocked status could not be committed on main, so it still looks ready-for-agent; its work is preserved on refs\/ralph\/rejected\/01-t01-20261108-102624; held by refs\/ralph\/recovery\/01-t01 \([0-9a-f]{40}\)/,
+    );
+    assert.doesNotMatch(first.out, /side branch|ralph\/blocked/);
+    const [hold = ""] = holds(fx).split("\n");
+    const object = hold.split(" ")[1] ?? "";
+    assert.match(first.out, new RegExp(`release --ticket 01-t01 --expect ${object}`));
+    const quarantined = git(fx.host, "rev-parse", "refs/ralph/rejected/01-t01-20261108-102624");
+
+    // A fresh invocation does not resume past it, and a new batch stops before any run.
+    const again = batch(fx, ["--max-tickets", "3"]);
+    assert.equal(again.code, 1);
+    assert.match(again.out, /stopped on recovery-required/);
+    for (let i = 0; i < 2; i += 1) {
+      const fresh = batch(fx, ["--new", "--max-tickets", "3"]);
+      assert.equal(fresh.code, 1, fresh.out);
+      assert.match(
+        fresh.out,
+        /STOPPED: recovery-required: recovery hold refs\/ralph\/recovery\/01-t01/,
+      );
+      assert.match(fresh.out, /refs\/ralph\/rejected\/01-t01-20261108-102624/);
+    }
+    assert.deepEqual(runnerCalls(fx), ["01"], "the held ticket never ran again");
+    assert.equal(
+      git(fx.host, "rev-parse", "refs/ralph/rejected/01-t01-20261108-102624"),
+      quarantined,
+    );
+
+    // A human reconciles: commits the status, pushes it, releases exactly that hold.
+    const path = join(fx.host, "issues", "01-t01.md");
+    writeFileSync(path, readFileSync(path, "utf8").replace("ready-for-agent", "blocked"));
+    git(fx.host, "commit", "--quiet", "-am", "chore(issues): block issues/01-t01.md by hand");
+    git(fx.host, "push", "--quiet", "origin", "main");
+    const release = spawnSync(
+      process.execPath,
+      ["scripts/ralph-quarantine.mjs", "release", "--ticket", "01-t01", "--expect", object],
+      { cwd: fx.host, encoding: "utf8" },
+    );
+    assert.equal(release.status, 0, release.stderr);
+    const resumed = batch(fx, ["--new", "--max-tickets", "1"]);
+    assert.equal(resumed.code, 0, resumed.out);
+    assert.deepEqual(runnerCalls(fx), ["01", "02"]);
+    assert.equal(
+      git(fx.host, "rev-parse", "refs/ralph/rejected/01-t01-20261108-102624"),
+      quarantined,
+    );
+  });
+
+  it("holds a rejection seen only through hostile incoming refs, and prints them masked", () => {
+    const fx = fixture();
+    const { code, out } = batch(fx, ["--max-tickets", "3"], { plan: { "01": ["reject-hostile"] } });
+    assert.equal(code, 1, out);
+    assert.match(
+      out,
+      /STOPPED: recovery-required: ticket 01 was rejected, but its blocked status could not be committed on main/,
+    );
+    // The hold is placed although the first preserved ref is not a commit; it names the slice.
+    const [hold = ""] = holds(fx).split("\n");
+    const object = hold.split(" ")[1] ?? "";
+    const record = JSON.parse(git(fx.host, "cat-file", "-p", object));
+    assert.equal(record.commit, git(fx.host, "rev-parse", "main"));
+    assert.match(out, /held by refs\/ralph\/recovery\/01-t01/);
+    // No C1 control character reaches the terminal or the batch state.
+    const c1 = /[\u0080-\u009f]/;
+    assert.equal(c1.test(out), false);
+    assert.match(out, /x\?+31mred/);
+    assert.equal(c1.test(JSON.stringify(state(fx))), false);
+    assert.deepEqual(runnerCalls(fx), ["01"]);
+  });
+
+  it("keeps the importer's own hold rather than writing a second one", () => {
+    const fx = fixture();
+    const { code, out } = batch(fx, ["--max-tickets", "3"], { plan: { "01": ["reject-held"] } });
+    assert.equal(code, 1, out);
+    const [hold = ""] = holds(fx).split("\n");
+    const object = hold.split(" ")[1] ?? "";
+    assert.equal(JSON.parse(git(fx.host, "cat-file", "-p", object)).reason, "commit failed");
+    assert.match(out, new RegExp(`held by refs/ralph/recovery/01-t01 \\(${object}\\)`));
+  });
+
+  it("starts nothing while any recovery hold exists, even an unreadable one", () => {
+    const fx = fixture();
+    git(fx.host, "update-ref", "refs/ralph/recovery/02-t02", "HEAD");
+    const { code, out } = batch(fx, ["--max-tickets", "3"]);
+    assert.equal(code, 1, out);
+    assert.match(out, /STOPPED: recovery-required: recovery hold refs\/ralph\/recovery\/02-t02/);
+    assert.deepEqual(runnerCalls(fx), []);
   });
 
   it("does not mistake an earlier run's quarantine ref for a new rejection", () => {
@@ -548,6 +731,34 @@ describe("one batch at a time", () => {
     const { code, out } = batch(fx, ["--once"], sandbox);
     assert.equal(code, 1, out);
     assert.match(out, /a Ralph batch holds .*lock/);
+  });
+
+  it("a plain sandbox run starts no container while a recovery hold exists (D2)", () => {
+    const fx = fixture();
+    copyFileSync(
+      join(source, "scripts", "ralph-driver.sh"),
+      join(fx.host, "scripts", "ralph-driver.sh"),
+    );
+    const sandbox = { entry: withSandbox(fx) };
+    git(fx.host, "update-ref", "refs/ralph/recovery/01-t01", "HEAD");
+    // Any Docker call is recorded: the refusal must come first.
+    const bin = join(fx.dir, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "docker"), `#!/bin/sh\necho "$@" >>"${fx.dir}/docker.log"\n`);
+    const result = spawnSync(sandbox.entry[0], [sandbox.entry[1], "--ticket", "01"], {
+      cwd: fx.host,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ...identity,
+        ANTHROPIC_API_KEY: "test",
+        PATH: `${bin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH}`,
+      },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /recovery hold refs\/ralph\/recovery\/01-t01/);
+    assert.match(result.stderr, /a recovery hold is in place/);
+    assert.equal(existsSync(join(fx.dir, "docker.log")), false, "no Docker command ran");
   });
 });
 

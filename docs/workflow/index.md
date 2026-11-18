@@ -284,11 +284,24 @@ and its `Merge slice/<slug>:` commit, and only `scripts/ralph-accept.mjs` puts t
 validating the run. A rerun therefore resumes at the right checkpoint (run, push,
 CI) and never runs a merged ticket twice. The limit is stored with the batch; a conflicting
 `--max-tickets` is refused. Every step first rechecks that `main` is checked out and clean
-(`checkout-changed` otherwise), so what is pushed is exactly what was accepted. A run that leaves
-a new `refs/ralph/rejected/<slug>-*` ref is a rejection (so is a new `rejected/<slug>-*` branch,
-which only a runner outside the sandbox leaves), and the stop message names that ref. A run
-whose output the host refused (sandbox exit 3) ends the batch with `untrusted-result`; it is
-never retried automatically.
+(`checkout-changed` otherwise), so what is pushed is exactly what was accepted. After a failed
+run the batch compares the refs before and after it and reports only what the repository shows:
+
+1. The ticket is `blocked` on `main`, and the run left a new `refs/ralph/rejected/<slug>-*` ref
+   (or a `rejected/<slug>-*` branch, which only a runner outside the sandbox leaves): `rejected`,
+   naming that ref.
+2. The ticket is `blocked` on `main`, but no quarantine ref could be created: `rejected`, naming
+   the run's refs in `refs/ralph/incoming/<run>/`, where the work only is.
+3. The ticket is still `ready-for-agent` on `main`, but the run left a quarantine ref, its own
+   `rejected/*` branch in the incoming refs, a recovery hold, or a `ralph/blocked-*` side branch
+   (named only when one actually exists, locally, imported or as a remote-tracking copy):
+   `recovery-required`. The batch places a [recovery hold](#recovery-holds-td-059-d2) if the
+   importer has not, and names the refs that keep the work.
+4. None of these: `runner-failed` (resumable), as for a review the provider cut off.
+
+A run whose output the host refused (sandbox exit 3) ends the batch with `untrusted-result`; it is
+never retried automatically. While any recovery hold exists, every batch stops with
+`recovery-required` before it runs anything, `--new` included.
 `.ralph/batch/lock` (an atomic `mkdir`)
 admits one batch at a time, and `pnpm sandbox` refuses (best effort) to run beside one. A lock left by a killed batch is never taken over
 automatically: the message says so, and a human removes it after checking that no batch or
@@ -612,8 +625,10 @@ repository from a run, and everything in `out/` is data to it:
   only if Yama restricts `ptrace`. The verdict is the containers' exit status, nothing else.
 - The **host's own review** then judges the exact slice commit (see Independent review). If it
   does not approve, none of the run lands: the host blocks the ticket in its own commit and keeps
-  the work on `refs/ralph/rejected/<slug>-<run>`. A reviewer cut off by the provider leaves the
-  host unchanged.
+  the work on `refs/ralph/rejected/<slug>-<run>`. If that commit fails, the importer keeps every
+  ref, places a [recovery hold](#recovery-holds-td-059-d2) and exits `1` with the verdict
+  `recovery-required`. A reviewer cut off by the provider leaves the host unchanged. While any
+  recovery hold exists, the importer applies nothing from any run.
 - A **pause** is adopted only if it is exactly what `pause_ticket` writes. It must belong to the
   run's ticket and to parked work that is in the bundle on the base, with `paused^ = gated` and
   attempt and round within limits, and the parked work must obey the path rules. The host
@@ -668,9 +683,16 @@ identities. The importer never creates `refs/heads/rejected/*` for a sandbox run
   (a stale lock, or a ref already named like the directory). Then the host logs why and leaves
   the run's incoming refs in `refs/ralph/incoming/<run>/` instead of clearing them, so the work
   stays recoverable. The host review's block commit then names that location, not a quarantine
-  ref, and the batch's stop message points to both places.
-- **Inspect, never check out:** `git for-each-ref refs/ralph/rejected/`,
-  `git log -p refs/ralph/rejected/<name>`, `git show refs/ralph/rejected/<name>:<path>`.
+  ref, and the batch's stop message names those incoming refs.
+- **Inspect, never check out:** `node scripts/ralph-quarantine.mjs list` shows every
+  quarantine ref, legacy `refs/heads/rejected/*` branch, incoming ref and published
+  remote-tracking copy (`refs/remotes/<remote>/rejected/*`), each labelled with its kind, commit,
+  ticket, subject, date and whether it is replayable and why not. Incoming refs and published
+  copies are listed but never replayable. `node scripts/ralph-quarantine.mjs inspect <full ref>`
+  adds the host's rejection record, the changed paths and security warnings (`.github/`, env,
+  key and credential files, protected harness paths, symlinks and submodules, credential patterns
+  in added lines). Both only read: they never check anything out, write a ref or the index, or run
+  a diff driver or textconv filter. `git log -p` and `git show <ref>:<path>` remain fine.
 - **What it protects against.** A ref outside `refs/heads/` is not a branch. `git push --all`
   and `git push --branches` do not send it, `git branch` does not list it, and tools that only
   check out branches do not offer it.
@@ -683,8 +705,37 @@ identities. The importer never creates `refs/heads/rejected/*` for a sandbox run
   created before this change, or by `ralph-loop.sh` outside the sandbox, stay under
   `refs/heads/rejected/`. Neither is migrated or deleted automatically. The rejected branch that
   is already on the public remote, and its evidence-first cleanup, are maintainer steps of ticket
-  52. `ralph-replay.mjs` still reads only `rejected/<slug>-<run>` branches. Accepting a candidate
-  under `refs/ralph/rejected/` is still open in ticket 52.
+  52. Replay accepts both namespaces (see below).
+
+### Recovery holds (TD-059, D2)
+
+A host-review rejection is two steps: the work is quarantined, then the ticket's blocked status is
+committed on `main`. If the commit fails (a hook, a lock, the identity, the disk), the ticket still
+looks `ready-for-agent` and would be selected again. The host fails closed:
+
+- `scripts/ralph-accept.mjs` keeps the quarantine ref **and** the run's incoming refs, undoes the
+  staged status line, and creates `refs/ralph/recovery/<slug>`. That is a create-only ref to a blob
+  holding the ticket, the slice commit, every ref that preserves the work, the reason, the base
+  and the run. Its output names those refs and the release command. If the importer could not
+  place the hold, the batch places it when it sees case 3 above.
+- While **any** hold exists, nothing runs: the importer applies nothing (verdict
+  `recovery-required`), every batch stops before its first step, `--new` included,
+  `scripts/sandbox.sh` refuses before any container, and `ralph-loop.sh` refuses at its run-level
+  check (`require_debt_verdicts`), for both drivers. A hold that cannot be read counts as a hold.
+- **Reconciling is a human step.** Commit the ticket's blocked status on `main` (or decide it
+  should run again), push it, read the hold with `node scripts/ralph-quarantine.mjs holds`, then:
+  `node scripts/ralph-quarantine.mjs release --ticket <NN-slug> --expect <hold object>`. The
+  release removes exactly that hold at exactly that object, and refuses while the ticket is still
+  `ready-for-agent` on `main` unless `--rerun` says it should run again. It never touches a
+  quarantine or incoming ref.
+- **Limits.** The hold is a local ref of this repository: `refs/ralph/` is never pushed. Another
+  clone or host does not see it and would select the ticket from `main` as it is. Run batches from
+  the one host repository. If even the hold cannot be written, the batch's stop message says so
+  and asks that no run start before reconciliation; nothing enforces that. If the quarantine ref
+  fails too, the run looks like an unavailable review (`runner-failed`, resumable): only the
+  importer's `RECOVERY REQUIRED` log tells them apart. Releasing without `--rerun` also refuses when
+  the base or the ticket file cannot be read. A dangling symbolic ref under `refs/ralph/recovery/`
+  is not detected (ADR 0023).
 
 ## Replaying a rejected candidate ([ADR 0018](../adr/0018-host-side-replay-of-a-rejected-candidate.md))
 
@@ -692,19 +743,27 @@ When the host review blocked a slice because of its ticket (for example a docume
 criterion), amend the ticket and set it `ready-for-agent` in a reviewed commit, then:
 
 ```bash
-node scripts/ralph-replay.mjs --candidate rejected/<slug>-<run> --expect <full commit>            # reproduce + RED
-node scripts/ralph-replay.mjs --candidate rejected/<slug>-<run> --expect <full commit> --accept   # + importer
+node scripts/ralph-quarantine.mjs list                                                           # what is replayable
+node scripts/ralph-replay.mjs --candidate refs/ralph/rejected/<slug>-<run> --expect <full commit>           # reproduce + RED
+node scripts/ralph-replay.mjs --candidate refs/ralph/rejected/<slug>-<run> --expect <full commit> --accept  # + importer
 ```
 
 It reproduces the implementation byte for byte, re-proves RED in the hardened container and hands
 the bundle to `ralph-accept.mjs`, which still runs the path rules, the debt gate, the hardened gate
-and fresh independent reviews. It is host-only, never writes the quarantine branch and refuses a
+and fresh independent reviews. It is host-only, never writes the candidate ref and refuses a
 moved candidate or a base that changed the candidate's files.
 
-**Not yet for `refs/ralph/rejected/`.** Replay still reads only `rejected/<slug>-<run>` branches,
-and it looks for the host's old block-commit wording ("preserved on rejected/…"). A candidate the
-host review rejected after the quarantine namespace move (TD-059) is kept as
-`refs/ralph/rejected/<slug>-<run>`, and its block commit names that ref. So replay refuses it
-until ticket 52's replay criterion is implemented. Do not recreate it as a branch to get around
-this. Until then, the global debt hold (TD-059, `ALL_AGENT_TICKETS`) stops every sandbox run, so
-no such candidate can arise.
+**Which candidates** ([ADR 0023](../adr/0023-quarantine-replay-namespaces-and-recovery-holds.md)).
+`--candidate` is a full ref, `refs/ralph/rejected/<slug>-<run>` or a legacy
+`refs/heads/rejected/<slug>-<run>`, or the alias `rejected/<slug>-<run>`, which means exactly
+those two and never what Git would guess. Anything else is refused: incoming refs, published
+remote-tracking copies, tags, symbolic refs, refs to a non-commit, malformed names. So is a name
+whose two namespaces hold different commits. The host's record on `main`'s first-parent history
+must name the candidate exactly, with the first 12 characters of its commit; `--expect` pins all
+40. A current record (`preserved on refs/ralph/rejected/<s>`) covers only that ref. A legacy
+record (`preserved on rejected/<s>`) covers the legacy branch and, as the one compatibility
+exception (D1), the same candidate after the maintainer moved it to `refs/ralph/rejected/<s>` with
+the identical suffix and commit. Replay logs when it uses that exception. A record is matched as
+the importer's whole message, never as a substring. The scratch refs the replay makes for its one
+fetch, `refs/ralph/replay/<replay id>/{main,slice}`, are create-only, and it deletes only those,
+only at the commits it put there.

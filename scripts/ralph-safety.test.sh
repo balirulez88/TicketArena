@@ -433,6 +433,22 @@ check "the harness stops with an error" \
 check "the remote's main is unchanged and it has no other branch" \
   "[[ \$(git -C '${remote}' rev-parse main) == '${before}' && \$(remote_refs '${remote}') == refs/heads/main ]]"
 
+# --- TD-059 WS2 (D2): an unreconciled rejection holds every run until a human releases it -------
+
+echo "recovery-hold-starts-nothing:"
+dir="$(new_repo recovery-hold)"
+hold="$(printf '{"ticket":"02-other"}\n' | git -C "${dir}" hash-object -w --stdin)"
+git -C "${dir}" update-ref refs/ralph/recovery/02-other "${hold}"
+code="$(run_harness "${dir}" STUB_REVIEW=clean)"
+HARNESS_ARGS=()
+check "the harness refuses before any agent runs, naming the hold" \
+  "[[ ${code} != 0 ]] && grep -q 'recovery hold(s) in place: refs/ralph/recovery/02-other' '${dir}.out' && ! agent_ran '${dir}' && ! merged '${dir}'"
+check "the dry run refuses too" "! dry_run '${dir}'"
+git -C "${dir}" update-ref -d refs/ralph/recovery/02-other "${hold}"
+code="$(run_harness "${dir}" STUB_REVIEW=clean)"
+HARNESS_ARGS=()
+check "once released, the ticket runs and merges" "[[ ${code} == 0 ]] && merged '${dir}'"
+
 if ((failures > 0)); then
   echo "ralph-loop safety scenarios: ${failures} check(s) failed" >&2
   exit 1

@@ -14,9 +14,11 @@ ticket has since been amended. The only remaining route was to pay for a new imp
 
 ## Decision
 
-> Note (TD-059, 2026-11-16): the host now keeps host-review rejections as
-> `refs/ralph/rejected/<slug>-<run>`, not as branches. Replay does not accept those yet; that is
-> ticket 52's open replay criterion. See `docs/workflow/index.md`, Replaying a rejected candidate.
+> Note (TD-059, 2026-11-17): the host keeps host-review rejections as
+> `refs/ralph/rejected/<slug>-<run>`, not as branches. Replay accepts those and legacy
+> `refs/heads/rejected/` branches, by exact name, with the narrow legacy-record exception for
+> migrated candidates: [ADR 0023](0023-quarantine-replay-namespaces-and-recovery-holds.md). Where
+> this ADR says "quarantine branch", read "quarantine ref".
 
 `scripts/ralph-replay.mjs` is a host-side tool, run by a human from a clean checkout of the base
 branch, never inside the sandbox. For a quarantine branch pinned by its full commit it:

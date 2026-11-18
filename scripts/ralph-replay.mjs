@@ -2,15 +2,24 @@
 //
 // Host-side replay of a rejected candidate onto the current base (ADR 0018). A slice that the
 // host review blocked for a reason that lay in its TICKET, not its code, is kept on
-// rejected/<slug>-<run>. After a human has fixed the ticket on the base, this script re-presents
-// that exact implementation to the existing importer, so nothing about it is re-bought from a
-// model and nothing is waived:
+// refs/ralph/rejected/<slug>-<run> (before TD-059: refs/heads/rejected/<slug>-<run>). After a human
+// has fixed the ticket on the base, this script re-presents that exact implementation to the
+// existing importer, so nothing about it is re-bought from a model and nothing is waived:
 //
-//   node scripts/ralph-replay.mjs --candidate rejected/<slug>-<run> --expect <full sha> [--accept]
+//   node scripts/ralph-replay.mjs --candidate refs/ralph/rejected/<slug>-<run> --expect <sha>
+//                                 [--accept]
+//
+// The candidate is named by its full ref, or by the alias rejected/<slug>-<run> for exactly the
+// two quarantine namespaces. Incoming refs, published copies and anything else are refused, as are
+// symbolic refs, non-commits and a twin in the other namespace at another commit
+// (scripts/ralph-quarantine.mjs; its `list` shows what is replayable).
 //
 // What it does, on the host, with Git plumbing and no model:
-//   1. Pins the candidate: the branch must still be at --expect, be one commit on a commit that
-//      is an ancestor of the base, and carry Ralph's slice subject. The branch is never written.
+//   1. Pins the candidate: the ref must still be at --expect, be one commit on a commit that is an
+//      ancestor of the base, carry Ralph's slice subject, and be named, with its commit, by the
+//      host's own record of the rejection on the base. A legacy record also covers the same
+//      candidate migrated to refs/ralph/rejected/ under the same suffix (D1). The ref is never
+//      written.
 //   2. Reproduces its implementation changes on the base, byte for byte (same paths, modes and
 //      blobs). A path that the base changed since the candidate's own base is refused: the
 //      implementation would not be the one that was reviewed. Symlinks and submodules are refused.
@@ -40,12 +49,18 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import {
+  hostRejection,
+  QuarantineRefusal,
+  removeReplayRef,
+  resolveCandidate,
+} from "./ralph-quarantine.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const env = process.env;
 const BASE = env.RALPH_BASE_BRANCH || "main";
 const SHA = /^[0-9a-f]{40}$/;
-const QUARANTINE = /^rejected\/(\d{2}-[a-z0-9-]+)-\d{8}-\d{6}$/;
+const ZERO = "0".repeat(40);
 const SUBJECT = /^([a-z]+)\(slice-(\d{2})\): (.+)$/;
 const TEST_FILE = /\.test\.tsx?$/;
 // What the lead driver's RED proof applies to the base: the candidate's tests and their fixtures.
@@ -131,45 +146,15 @@ function buildTree(base, edits) {
   }
 }
 
-// The host's own record that this commit was rejected by the host review. Only the importer
-// writes to the base branch, so a candidate a container quarantined itself (reject_slice) has no
-// such commit: its content never went through the host review and is not replayable.
-function assertHostRejected(base, name, tip, slug) {
-  const subject = `chore(issues): block issues/${slug}.md after the host review`;
-  const candidates = git([
-    "log",
-    "--first-parent",
-    "--fixed-strings",
-    `--grep=${subject}`,
-    "--format=%H",
-    base,
-  ])
-    .split("\n")
-    .filter(Boolean);
-  const recorded = candidates.some(
-    (commit) =>
-      git(["log", "-1", "--format=%s", commit]) === subject &&
-      git(["log", "-1", "--format=%b", commit]).includes(`preserved on ${name}`) &&
-      git(["log", "-1", "--format=%b", commit]).includes(tip.slice(0, 12)),
-  );
-  if (!recorded) {
-    refuse(
-      `no host-review rejection of ${name} at ${tip.slice(0, 12)} is recorded on ${BASE}'s first-parent history ("${subject}"); only a candidate the host review rejected can be replayed`,
-    );
-  }
-}
-
 /** Pins and reads the candidate. Nothing here can change it. */
-function readCandidate(name, expect, base) {
-  const match = QUARANTINE.exec(name);
-  if (!match) {
-    refuse(`${name} is not a quarantine branch (rejected/<NN-slug>-<yyyymmdd>-<hhmmss>)`);
-  }
-  const slug = match[1];
+function readCandidate(requested, expect, base) {
+  // Exact resolution only, never Git's short-name guessing and never outside the two quarantine
+  // namespaces (scripts/ralph-quarantine.mjs).
+  const found = resolveCandidate(root, requested);
+  const { ref: name, slug, sha: tip } = found;
   if (!SHA.test(expect)) {
     refuse("--expect needs the candidate's full 40-character commit");
   }
-  const tip = git(["rev-parse", "--verify", "--quiet", `refs/heads/${name}^{commit}`]);
   if (tip !== expect) {
     refuse(
       `${name} is at ${tip}, not at the expected ${expect}: the candidate is not the one you pinned`,
@@ -179,7 +164,15 @@ function readCandidate(name, expect, base) {
   if (parents.length !== 1) {
     refuse(`${name} is not one commit on one parent`);
   }
-  assertHostRejected(base, name, tip, slug);
+  // The host's own record of the review's rejection. Only the importer writes to the base branch,
+  // so a candidate a container quarantined itself (reject_slice) has none: its content never went
+  // through the host review and is not replayable.
+  const evidence = hostRejection(root, { base, candidate: found });
+  if (evidence.form === "legacy-migrated") {
+    log(
+      `${name} is covered by the legacy record ${evidence.recordedAs} (${evidence.commit.slice(0, 12)}): same suffix, same commit (D1)`,
+    );
+  }
   const [origin] = parents;
   if (!succeeds(["merge-base", "--is-ancestor", origin, base])) {
     refuse(`the candidate's own base ${origin.slice(0, 12)} is not part of ${BASE}'s history`);
@@ -342,8 +335,8 @@ function writeRun(candidate, built, base) {
   const prefix = `refs/ralph/replay/${id}`;
   const scratch = mkdtempSync(join(tmpdir(), "ralph-replay-bundle-"));
   try {
-    git(["update-ref", `${prefix}/main`, built.merge]);
-    git(["update-ref", `${prefix}/slice`, built.slice]);
+    git(["update-ref", `${prefix}/main`, built.merge, ZERO]);
+    git(["update-ref", `${prefix}/slice`, built.slice, ZERO]);
     run(["init", "--quiet", "--bare", scratch]);
     run(
       [
@@ -364,8 +357,15 @@ function writeRun(candidate, built, base) {
     rmSync(runDir, { recursive: true, force: true });
     throw error;
   } finally {
-    succeeds(["update-ref", "-d", `${prefix}/main`]);
-    succeeds(["update-ref", "-d", `${prefix}/slice`]);
+    // Only the replay's own scratch refs, and only at the commits it put there.
+    for (const [ref, sha] of [
+      [`${prefix}/main`, built.merge],
+      [`${prefix}/slice`, built.slice],
+    ]) {
+      if (!removeReplayRef(root, ref, sha) && succeeds(["show-ref", "--verify", "--quiet", ref])) {
+        log(`WARNING: ${ref} is no longer at ${sha.slice(0, 12)} and was left in place`);
+      }
+    }
     rmSync(scratch, { recursive: true, force: true });
   }
   writeFileSync(
@@ -476,7 +476,7 @@ function main() {
   });
   if (!(values.candidate && values.expect)) {
     throw new Refusal(
-      "usage: ralph-replay.mjs --candidate rejected/<slug>-<run> --expect <sha> [--accept]",
+      "usage: ralph-replay.mjs --candidate refs/ralph/rejected/<slug>-<run> --expect <sha> [--accept]",
     );
   }
   return replay({ candidate: values.candidate, expect: values.expect, accept: values.accept }).exit;
@@ -487,7 +487,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exitCode = main();
   } catch (error) {
     log(
-      `${error instanceof Refusal ? "REFUSED" : "ERROR"}: ${error instanceof Error ? error.message : String(error)}`,
+      `${error instanceof Refusal || error instanceof QuarantineRefusal ? "REFUSED" : "ERROR"}: ${error instanceof Error ? error.message : String(error)}`,
     );
     process.exitCode = 1;
   }

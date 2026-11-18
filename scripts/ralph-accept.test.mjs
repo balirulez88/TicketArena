@@ -9,6 +9,7 @@ import "./ralph-test-workspace.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -123,6 +124,8 @@ function hostRepo() {
     "ralph-debt.mjs",
     "ralph-host-review.mjs",
     "ralph-provider.mjs",
+    "ralph-push-inspect.mjs",
+    "ralph-quarantine.mjs",
     "ralph-review-prompt.mjs",
     "ralph-review.mjs",
     "ralph-toolchain.mjs",
@@ -1365,6 +1368,88 @@ describe("ralph-accept: the host's own review of the exact candidate (TD-058)", 
     assertReviewRejected(host, result, { slice, base });
     const report = join(host, ".ralph", "host-review", "run1", "01-demo", "review.md");
     assert.match(readFileSync(report, "utf8"), /BLOCKED/);
+  });
+
+  // D2: the quarantine is kept, but the host cannot commit the ticket's blocked status, so the
+  // base would still offer the ticket to Ralph. A failing pre-commit hook stands in for any
+  // reason a commit fails (hook, identity, lock, disk). Git on Linux silently skips a hook that is
+  // not executable, while Git for Windows runs it anyway, so the mode must be set explicitly.
+  const failingCommit = (host) => {
+    const hook = join(host, ".git", "hooks", "pre-commit");
+    writeFileSync(hook, "#!/bin/sh\nexit 1\n");
+    chmodSync(hook, 0o755);
+  };
+  const HOLD = "refs/ralph/recovery/01-demo";
+
+  it("holds the ticket for recovery when its blocked status cannot be committed (D2)", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    const { slice } = merge(ws);
+    failingCommit(host);
+    const run = finish(host, ws, { name: "20261104-130000-4242" });
+    const result = accept(host, run, { base, review: "critical" });
+    assert.equal(result.code, 1, result.output);
+    assert.equal(verdictOf(run), "recovery-required");
+    // Nothing reached main, and the checkout is clean again (the staged status is undone).
+    assert.equal(git(host, "rev-parse", "main"), base);
+    assert.equal(statusOf(host, "main"), "ready-for-agent");
+    assert.equal(git(host, "status", "--porcelain"), "");
+    // Every place the work is reachable from is kept.
+    const quarantined = `${QUARANTINE}/01-demo-20261104-130000`;
+    assert.equal(git(host, "rev-parse", quarantined), slice);
+    const incoming = git(host, "for-each-ref", "--format=%(refname)", "refs/ralph/incoming/");
+    assert.notEqual(incoming, "", "the incoming refs are kept too");
+    // The durable hold names the real refs, not a side branch that does not exist.
+    const hold = JSON.parse(git(host, "cat-file", "-p", HOLD));
+    assert.equal(hold.commit, slice);
+    assert.ok(hold.preserved.includes(quarantined));
+    for (const ref of incoming.split("\n")) {
+      assert.ok(hold.preserved.includes(ref), ref);
+    }
+    assert.match(result.output, /RECOVERY REQUIRED/);
+    assert.match(result.output, new RegExp(quarantined));
+    assert.doesNotMatch(result.output, /ralph\/blocked-/);
+  });
+
+  it("names the incoming refs when neither the quarantine ref nor the status was written", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    git(host, "update-ref", `${QUARANTINE}/01-demo-20261104-130000`, base);
+    const ws = container(host);
+    const { slice } = merge(ws);
+    failingCommit(host);
+    const run = finish(host, ws, { name: "20261104-130000-4242" });
+    const result = accept(host, run, { base, review: "critical" });
+    assert.equal(verdictOf(run), "recovery-required");
+    const hold = JSON.parse(git(host, "cat-file", "-p", HOLD));
+    assert.equal(hold.commit, slice);
+    assert.ok(hold.preserved.length > 0);
+    assert.ok(hold.preserved.every((ref) => ref.startsWith("refs/ralph/incoming/")));
+    assert.match(result.output, /refs\/ralph\/incoming\/20261104-130000-4242\//);
+    assert.equal(git(host, "rev-parse", `${QUARANTINE}/01-demo-20261104-130000`), base);
+  });
+
+  it("applies nothing while a recovery hold exists, on any later run", () => {
+    const host = hostRepo();
+    const base = git(host, "rev-parse", "main");
+    const ws = container(host);
+    merge(ws);
+    failingCommit(host);
+    const first = accept(host, finish(host, ws, { name: "run1" }), { base, review: "critical" });
+    rmSync(join(host, ".git", "hooks", "pre-commit"));
+    // A fresh, clean run of the next ticket: still nothing lands until a human reconciles.
+    const next = container(host);
+    merge(next, "02-next");
+    const before = snapshot(host);
+    const run = finish(host, next, { name: "run2" });
+    const result = accept(host, run, { base, ticket: "02" });
+    assert.equal(result.code, 1, result.output);
+    assert.equal(verdictOf(run), "recovery-required");
+    assert.match(result.output, /recovery hold refs\/ralph\/recovery\/01-demo/);
+    assert.deepEqual(snapshot(host), before);
+    assert.deepEqual(result.verified, first.verified, "no gate ran for the held run");
+    assert.deepEqual(result.reviewed, first.reviewed, "no review ran for the held run");
   });
 
   it("leaves the host untouched when the provider cuts a reviewer off", () => {

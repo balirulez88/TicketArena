@@ -63,6 +63,13 @@ if [[ "${verify}" == false ]]; then
     echo "sandbox: the working tree is not clean; commit or stash first" >&2
     exit 1
   }
+  # TD-059 D2: a rejection whose blocked status never reached the base keeps the ticket looking
+  # ready; until a human releases its recovery hold, no run starts here (the container's clone
+  # cannot see the hold, so this host-side check is the one that counts for a sandbox run).
+  node "${REPO_ROOT}/scripts/ralph-quarantine.mjs" holds --check || {
+    echo "sandbox: a recovery hold is in place (above); reconcile it before any run" >&2
+    exit 1
+  }
   # Readiness (ADR 0019): a ticket that cannot start costs no image, container or session.
   if [[ "${RALPH_DRIVER:-}" == lead ]]; then
     bash "${REPO_ROOT}/scripts/ralph-lead.sh" "$@" --dry-run || exit $?

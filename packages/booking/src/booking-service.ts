@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   envelopeLogBindings,
   envelopeSchema,
+  holdReleasedPayloadSchema,
   type Logger,
   orderPlacedPayloadSchema,
   seatHeldPayloadSchema,
@@ -90,6 +91,12 @@ export interface BookingService {
     contact: Contact,
     idempotencyKey: string,
   ): Promise<OrderView>;
+  /**
+   * Gives a `HELD` hold back: `NOT_FOUND` unless the buyer owns it, `HOLD_NOT_ACTIVE` otherwise.
+   * The returned view lists the seats this release freed. The buyer's waiting-room slot is not
+   * touched: releasing a hold does not end shopping.
+   */
+  releaseHold(buyer: Buyer, holdId: string): Promise<HoldView>;
   /** `null` for an unknown order and for someone else's: existence is not leaked. */
   getOrder(buyer: Buyer, orderId: string): Promise<OrderView | null>;
 }
@@ -202,6 +209,8 @@ const PAYMENT_WINDOW_MS = 5 * 60_000;
 const ORDER_PLACED_EVENT = "order.placed";
 const placedEnvelope = envelopeSchema(orderPlacedPayloadSchema);
 const PG_UNIQUE_VIOLATION = "P2002";
+const HOLD_RELEASED_EVENT = "hold.released";
+const releasedEnvelope = envelopeSchema(holdReleasedPayloadSchema);
 
 interface LockedHold {
   readonly buyerKey: string;
@@ -773,6 +782,76 @@ export function createBookingService({
         }
         throw error;
       }
+    },
+
+    async releaseHold(buyer, holdId) {
+      // Unlocked read only to learn which buyer lock to take; the locked read below decides.
+      const owned = await ownedHold(buyer, holdId);
+      const released = await db.$transaction(async (tx) => {
+        // Global lock order: buyer, hold, then seats by id, matching holdSeats (ADR 0005).
+        await lockBuyer(tx, owned.eventId, buyer.buyerKey);
+        const holds = await tx.$queryRaw<LockedHold[]>`
+          SELECT "buyerKey", status::text AS status, "holdExpiresAt",
+                 "correlationId"::text AS "correlationId", "eventId"::text AS "eventId"
+          FROM holds WHERE id = ${holdId}::uuid FOR UPDATE`;
+        const hold = holds[0];
+        if (hold === undefined || hold.buyerKey !== buyer.buyerKey) {
+          throw new HoldNotFoundError(holdId);
+        }
+        if (hold.status !== "HELD") {
+          throw new HoldNotActiveError(holdId, hold.status);
+        }
+        // Only seats still carrying this holdId: a seat taken over by another hold is not ours
+        // to free. The hold row lock serializes this with placeOrder on the same hold.
+        const seats = await tx.$queryRaw<{ id: string }[]>`
+          SELECT id::text AS id FROM seats
+          WHERE "holdId" = ${holdId}::uuid AND status::text = 'HELD'
+          ORDER BY id FOR UPDATE`;
+        const seatIds = seats.map((seat) => seat.id);
+        const releasedAt = clock.now();
+
+        await tx.hold.update({ where: { id: holdId }, data: { status: "RELEASED" } });
+        await tx.seat.updateMany({
+          where: { id: { in: seatIds }, holdId },
+          data: { status: "AVAILABLE", holdId: null, claimBuyerKey: null },
+        });
+
+        // Same transaction as the state change: the event exists iff the release committed.
+        const envelope = releasedEnvelope.parse({
+          id: newId(),
+          type: HOLD_RELEASED_EVENT,
+          version: 1,
+          occurredAt: releasedAt.toISOString(),
+          correlationId: hold.correlationId,
+          causationId: null,
+          holdId,
+          payload: { holdId, seatIds },
+        });
+        await tx.outboxEvent.create({
+          data: {
+            id: envelope.id,
+            aggregateType: "hold",
+            aggregateId: holdId,
+            eventType: HOLD_RELEASED_EVENT,
+            payload: envelope,
+          },
+        });
+
+        return {
+          id: holdId,
+          eventId: hold.eventId,
+          seatIds,
+          status: "RELEASED" as const,
+          holdExpiresAt: hold.holdExpiresAt,
+          correlationId: hold.correlationId,
+        };
+      });
+      logger
+        .child(
+          envelopeLogBindings({ correlationId: released.correlationId, causationId: null, holdId }),
+        )
+        .info({ seatIds: released.seatIds }, "hold released");
+      return released;
     },
 
     async getOrder(buyer, orderId) {

@@ -115,6 +115,16 @@ row (`PENDING_PAYMENT`, `paymentDeadline = T + 5 min`, the hold's `correlationId
 stored order; the same key with a different `requestHash` (hold + contact) fails with a
 `CONFLICT`. `holdId` is unique on `orders`, so a hold yields at most one order.
 
+Releasing: `booking.releaseHold` (owner only, else `NOT_FOUND`) gives back a `HELD` hold; any
+other status is `HOLD_NOT_ACTIVE` (tRPC `CONFLICT`). An expired but unswept hold is still `HELD`
+and can be released. One transaction with the same lock order as `placeOrder` (buyer lock, hold
+`FOR UPDATE`, then the seats still `HELD` with this `holdId` `ORDER BY id FOR UPDATE`) sets the
+hold `RELEASED`, sets exactly those seats `AVAILABLE` with `holdId` and `claimBuyerKey` cleared (a
+seat taken over by another hold is left alone), and writes a `hold.released` outbox row. The
+returned hold view lists the freed seats; the seats are holdable by anyone as soon as it commits.
+Releasing a hold does not end shopping: the buyer's waiting-room slot is untouched (slot logic
+arrives in ticket 30; only `placeOrder`, leaving or reaping end it).
+
 Catalog API (`apps/web`): `events.list`, `events.get`, `seats.map`. Inputs and outputs are zod
 validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.
 

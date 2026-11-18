@@ -57,12 +57,16 @@ optional `holdId`/`orderId`, `payload`); the full envelope is stored as the outb
 | Event type          | Producer                                         | Consumers      | Payload version |
 | ------------------- | ------------------------------------------------ | -------------- | --------------- |
 | `seat.held`         | `BookingService.holdSeats` (same TX)             | none yet       | 1               |
+| `hold.released`     | `BookingService.releaseHold` (same TX)           | none yet       | 1               |
 | `order.placed`      | `BookingService.placeOrder` (same TX)            | `payment`      | 1               |
 | `payment.succeeded` | mock Payment handler (same TX, `payment` outbox) | `booking-saga` | 1               |
 | `order.confirmed`   | booking saga handler (same TX)                   | `notification` | 1               |
 
 `seat.held` payload: `holdId`, `eventId`, `seatIds`, `holdExpiresAt`. Its `correlationId` is
 minted here and reused by every later event of the booking.
+
+`hold.released` payload: `holdId`, `seatIds` (the seats this release freed; may be empty when every
+seat was taken over). It carries the hold's `correlationId` and `causationId: null`.
 
 `order.placed` payload: `orderId`, `holdId`, `amountMinor`, `currency`, `paymentDeadline`, `contact`
 (`email`, optional `phone`). It carries the hold's `correlationId`.

@@ -4,6 +4,14 @@
   "done": "issues/done",
   "gate": "pnpm infra:up && pnpm run lint && pnpm run typecheck && pnpm run test",
   "docs": "docs/index.md",
-  "protected": ["biome.json", "tsconfig.base.json", ".github/workflows/ci.yml"],
-  "maxTicketsPerRun": 10
+  "protected": [
+    "biome.json",
+    "tsconfig.base.json",
+    ".github/workflows/ci.yml"
+  ],
+  "maxTicketsPerRun": 10,
+  "learning": {
+    "dir": "docs/learning",
+    "language": "Hungarian"
+  }
 }

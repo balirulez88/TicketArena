@@ -42,7 +42,8 @@ below shows what is built.
 | Database & Prisma   | catalog, holds, orders, payment, notification | [database/](database/index.md)         |
 | Async messaging     | relay and consumer runner                     | [messaging/](messaging/index.md)       |
 | Agent workflow & CI | operational                                   | [workflow/](workflow/index.md)         |
-| Technical debt      | tracked, triaged, gated (ADR 0016)            | [technical-debt.md](technical-debt.md) |
+| Technical debt      | frozen record (harness-v1 era)                | [technical-debt.md](technical-debt.md) |
+| Learning notes      | one per ticket: decision, alternatives, Q&A   | [learning/](learning/index.md)         |
 | Decisions (ADRs)    | 17 accepted                                   | [adr/](adr/index.md)                   |
 | Feature specs       | MVP ready                                     | [specs/](specs/index.md)               |
 | Domain vocabulary   | seeded                                        | [glossary.md](glossary.md)             |

@@ -1335,8 +1335,8 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Impact:** A configured latencyMs above a few seconds makes the transaction time out, so the message is retried forever. Even short waits hold a pooled connection while idle, which limits throughput. The default (no latency) and the test sleep stub hide this.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Planned for ticket 44, ahead of further payment work; the default latency is zero, so nothing affected runs yet. Triage 2026-11-06: provider latency inside the runner transaction can time it out and redeliver forever; the saga (17) and consumer recovery (27) build on that transaction.
 - **Remediation:** Do the latency wait before the transaction (for example a handler pre-step), or document and enforce a latency bound below the transaction timeout. Add a test with a real sleep close to the timeout.
-- **Target:** ticket 44 (`issues/44-payment-latency-outside-the-transaction.md`); must merge before tickets 17 and 27, which are blocked by it, so no further payment or saga work builds on the transaction behaviour
-- **Blocks:** 17, 27
+- **Target:** ticket 66 (`issues/66-notification-send-outside-the-transaction.md`); the payment half was fixed by ticket 44, the notification send remains
+- **Blocks:** 27
 - **Acceptance:** none
 - **Resolution:** none
 - **Verification:** none
@@ -1346,6 +1346,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
   - 2026-11-04: planned for ticket 44 (`issues/44-payment-latency-outside-the-transaction.md`), before tickets 17 and 27 (remediation planning, 2026-11-04)
   - 2026-11-05: seen again: MEDIUM regression_risk at `apps/worker/src/notification/notification-handler.ts:77`, standards axis (ticket 09 review-3 standards, run 20261105-075349)
   - 2026-11-06: triaged: CONCURRENCY, owned by ticket 44, blocks ticket(s) 17, 27 until it is resolved (initial triage, ticket 53)
+  - 2026-11-18: reconciled, still PLANNED: ticket 44 (355fe8c) moved the payment latency wait before the transaction; the notification handler still awaits provider.send inside it. Retargeted to ticket 66; ticket 17 shipped (ac8b235), so it no longer blocks 17 (CI reconciliation on PR #10, 2026-11-18; review by the maintainer at merge)
 
 ### TD-052: bookingStore, paymentStore and notificationStore are line-for-line copies; service names are listed in two places
 
@@ -1388,7 +1389,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** Non-blocking under the merge policy (blocking: CRITICAL, HIGH); deferred when the ticket merged. Escalate if its real impact grows. Triage 2026-11-06: the Payment consumer's behaviour on a redelivered order.placed is unproven; the saga (17) builds on it.
 - **Remediation:** Add a test pinning the intended behaviour: either an idempotent skip when an attempt already exists for the order, or an asserted failure plus the redelivery outcome.
 - **Target:** ticket 50 (`issues/50-payment-flow-test-isolation-and-redelivery-coverage.md`)
-- **Blocks:** 17
+- **Blocks:** none
 - **Acceptance:** none
 - **Resolution:** none
 - **Verification:** none
@@ -1396,6 +1397,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-03: recorded: LOW missing_test at `apps/worker/src/payment/payment-handler.test.ts:129`, standards axis (ticket 08 review-2 standards, run 20261103-160343)
   - 2026-11-06: triaged: VERIFICATION, owned by ticket 50, blocks ticket(s) 17 until it is resolved (initial triage, ticket 53)
+  - 2026-11-18: reconciled, still PLANNED for ticket 50: ticket 17 shipped (ac8b235) before it, so the entry no longer blocks 17 (CI reconciliation on PR #10, 2026-11-18; review by the maintainer at merge)
 
 ### TD-054: Consumer-info assertion may read the state before the broker has processed the ack
 
@@ -1863,7 +1865,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Justification:** Test isolation only; production consumers are per deployment and idempotent per `(sourceEventId, channel)`. The scoped assertions keep AT-14/AT-15 exact for each order. Triage 2026-11-06: payment-flow tests share one durable consumer, so a test can see another's event; the saga (17) extends these tests.
 - **Remediation:** Give each test its own consumer (or stream prefix), or have each test wait until the notification consumer has no pending or unacked messages before `worker.stop()`.
 - **Target:** ticket 50 (`issues/50-payment-flow-test-isolation-and-redelivery-coverage.md`)
-- **Blocks:** 17
+- **Blocks:** none
 - **Acceptance:** none
 - **Resolution:** none
 - **Verification:** none
@@ -1871,6 +1873,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **History:**
   - 2026-11-05: recorded: LOW test_isolation at `apps/worker/src/payment-flow.test.ts:56`, found while deflaking AT-15 (repeated runs) and confirmed by the branch's Standards and Spec review
   - 2026-11-06: triaged: VERIFICATION, owned by ticket 50, blocks ticket(s) 17 until it is resolved (initial triage, ticket 53)
+  - 2026-11-18: reconciled, still PLANNED for ticket 50: ticket 17 shipped (ac8b235) before it, so the entry no longer blocks 17 (CI reconciliation on PR #10, 2026-11-18; review by the maintainer at merge)
 
 ### TD-073: One constant serves as both the per-hold cap and the per-buyer limit
 

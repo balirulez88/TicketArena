@@ -2,7 +2,13 @@ import { z } from "zod";
 
 const serverEnvSchema = z.object({
   DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
-  UPSTASH_REDIS_REST_URL: z.url({ protocol: /^https$/ }),
+  UPSTASH_REDIS_REST_URL: z.url().refine((value) => {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" ||
+      (url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname))
+    );
+  }, "HTTPS required except for localhost"),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
   /** node-redis connection for the waiting-room queue (`redis://` locally, `rediss://` hosted). */
   REDIS_URL: z.url({ protocol: /^rediss?$/ }),

@@ -65,7 +65,7 @@ let sharedDb: PrismaClient | undefined;
 function database(): PrismaClient {
   sharedDb ??= createPrismaClient({
     connectionString: parseDatabaseEnv(process.env).DATABASE_URL,
-    driver: "neon",
+    driver: process.env["DATABASE_DRIVER"] === "pg" ? "pg" : "neon",
   });
   return sharedDb;
 }

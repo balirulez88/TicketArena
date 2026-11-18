@@ -41,6 +41,8 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Outbox**             | The `outbox_events` table; integration events committed atomically with business data.                 |
 | **Relay**              | The process that publishes PENDING outbox rows to the broker.                                          |
 | **Consumer runner**    | Worker component running a durable pull consumer; dedupes via `processed_messages` in the handler TX.  |
+| **Seat map**           | The event page's grid of seat buttons by section; shows each seat's price and status.                  |
+| **Seat selection**     | Up to 6 available seats a visitor picked on the seat map before a hold; client-only state.             |
 | **Slice**              | One tracer-bullet ticket: a thin, complete path through every layer, green on its own.                 |
 | **Seam**               | A public interface where tests observe behaviour without reaching inside.                              |
 | **Debt gate**          | The host check that holds a ticket on unresolved or untriaged technical debt it relies on (ADR 0016).  |

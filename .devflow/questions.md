@@ -138,3 +138,35 @@ Where is the slot freed on order placement?
 Assumed: In the web booking.placeOrder router after the order commits, best-effort (Redis failure logged, order unaffected); holdSeats sends a best-effort heartbeat
 
 Answer: Accepted (2026-11-18): a lost free is bounded by the 30-minute admission expiry.
+
+## 2026-11-18 14:57 ticket 32
+
+The catalog has no performance date; what date do the event pages show?
+
+Assumed: The on-sale time (onSaleAt); adding a performance date needs a schema migration and contract change
+
+Answer: (open)
+
+## 2026-11-18 14:57 ticket 32
+
+What is the on-sale status?
+
+Assumed: Client-clock hint: 'On sale now' if onSaleAt is past, else 'Upcoming', always with the on-sale time; the server decides
+
+Answer: (open)
+
+## 2026-11-18 14:57 ticket 32
+
+Are unselectable seats natively disabled?
+
+Assumed: No: aria-disabled and focusable so screen-reader and keyboard users hear their status; arrow keys move within a section, all seats stay in Tab order
+
+Answer: (open)
+
+## 2026-11-18 14:57 ticket 32
+
+Where do prices per section appear?
+
+Assumed: Event page only; events.list contract unchanged and returns no prices
+
+Answer: (open)

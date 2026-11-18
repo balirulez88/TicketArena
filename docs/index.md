@@ -54,6 +54,9 @@ below shows what is built.
   `packages/booking`, `packages/messaging`, `packages/waiting-room`.
 - `apps/web`: Next.js App Router with an end-to-end tRPC tracer (`health.check`), validated
   server env (`parseServerEnv`), shadcn/ui tokens on Tailwind v4.
+- Web UI: `/events` and `/events/[eventId]` (venue, on-sale status, prices per section, seat map
+  of native buttons with accessible names; up to 6 seats selectable in a Zustand store, server
+  data via TanStack Query). See [architecture/](architecture/index.md#web-ui).
 - Guest identity: `proxy.ts` issues a signed `ta_session` cookie; `IdentityService` resolves a
   `Principal` onto the tRPC context (`session.whoami`). See
   [architecture/](architecture/index.md#identity).

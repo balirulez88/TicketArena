@@ -73,6 +73,32 @@ created lazily from `DATABASE_URL` (`parseDatabaseEnv` validates only that varia
 event is a `NOT_FOUND` tRPC error. Integration tests run against real Postgres. See
 [database](../database/index.md).
 
+## Web UI
+
+Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client components).
+
+- **Pages:** `/events` lists events (venue, on-sale date, on-sale status) and links to
+  `/events/[eventId]`, which shows the event (venue, on-sale status, a "Prices per section" table)
+  and its seat map. The queue room, checkout, order status and `/admin` pages are not built yet.
+- **Server state:** components read `events.list`, `events.get` and `seats.map` through TanStack
+  Query (`useTRPC().….queryOptions`) under `TRPCReactProvider`; no server data is copied into
+  client stores. The on-sale badge compares `onSaleAt` with the visitor's clock and is only a
+  hint. The catalog has no performance date, so the date shown is the on-sale time.
+- **Seat map** (`components/seat-map/seat-map.tsx`): one CSS grid area per section (a `fieldset`
+  named "Section X"), and inside it a grid of native `<button>`s placed by row and seat number.
+  Each button's `aria-label` is "Section, row, seat, price, status" and `aria-pressed` reflects
+  selection. Held, in-checkout and sold seats stay focusable with `aria-disabled`. Tab, Enter and
+  Space work as for any button; arrow keys move focus to the neighbouring seat in the section.
+  A `role="status"` line announces "n of 6 seats selected" and the limit.
+- **Seat selection** (`components/seat-map/seat-selection.tsx`): a Zustand store created per
+  `SeatSelectionProvider` (keyed by event, so it never leaks across events or server requests);
+  `toggleSeat` adds only `AVAILABLE` seats, at most `MAX_SELECTED_SEATS` (6), and always allows
+  deselecting. It is a UI rule only: the buyer limit is enforced by `holdSeats`.
+- **shadcn/ui:** `components/ui/` holds the copied `Card`, `Badge` and `Table` sources (Badge
+  without `asChild`).
+- **Component tests** run in jsdom (`// @vitest-environment jsdom` per file) with Testing Library;
+  the event tests fake only `fetch` behind a real tRPC client.
+
 ## Worker
 
 Code: `apps/worker/src/`; decision: [ADR 0013](../adr/0013-deployment-topology.md). `startWorker` ensures

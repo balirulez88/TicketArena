@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { ApiStatus } from "./api-status";
 
 export default function HomePage() {
@@ -7,6 +8,9 @@ export default function HomePage() {
       <p className="text-lg text-muted-foreground">
         Fair, high-traffic ticket sales behind a digital waiting room.
       </p>
+      <Link href="/events" className="font-medium underline-offset-4 hover:underline">
+        Browse events
+      </Link>
       <ApiStatus />
     </main>
   );

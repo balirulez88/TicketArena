@@ -9,6 +9,7 @@ import "./ralph-test-workspace.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -1371,9 +1372,13 @@ describe("ralph-accept: the host's own review of the exact candidate (TD-058)", 
 
   // D2: the quarantine is kept, but the host cannot commit the ticket's blocked status, so the
   // base would still offer the ticket to Ralph. A failing pre-commit hook stands in for any
-  // reason a commit fails (hook, identity, lock, disk).
-  const failingCommit = (host) =>
-    writeFileSync(join(host, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 1\n");
+  // reason a commit fails (hook, identity, lock, disk). Git on Linux silently skips a hook that is
+  // not executable, while Git for Windows runs it anyway, so the mode must be set explicitly.
+  const failingCommit = (host) => {
+    const hook = join(host, ".git", "hooks", "pre-commit");
+    writeFileSync(hook, "#!/bin/sh\nexit 1\n");
+    chmodSync(hook, 0o755);
+  };
   const HOLD = "refs/ralph/recovery/01-demo";
 
   it("holds the ticket for recovery when its blocked status cannot be committed (D2)", () => {

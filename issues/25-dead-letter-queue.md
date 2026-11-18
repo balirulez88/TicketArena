@@ -4,7 +4,9 @@
 
 **Blocked by:** 24, 49 (Prisma schema drift), 59 (terminal outbox failures)
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** retry, DLQ and recovery after the MVP (2026-11-18)
 
 - [ ] The DLQ gate runs before the handler: `deliveryCount > 5`, schema-invalid or unknown version → DLQ without invoking the handler; a `decide` poison outcome also routes to the DLQ.
 - [ ] DLQ publish to `ta.dlq.<consumer>` with `Nats-Msg-Id = dlq:<consumer>:<envelope id>`, carrying the original envelope, error and delivery count; await PubAck; then `term`.

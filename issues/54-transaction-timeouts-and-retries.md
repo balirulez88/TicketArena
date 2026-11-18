@@ -6,13 +6,9 @@
 
 **Blocked by:** 10
 
-**Status:** blocked
+**Status:** ready-for-agent
 
-**Stays blocked until its dependency recovery is implemented and verified (maintainer decision, 2026-11-14):** the 2026-11-08 run was quarantined by the container before host review because its RED tests needed `@neondatabase/serverless` as a devDependency of `packages/booking`, which the base did not have; Ralph cannot add a dependency and prove RED in one run, and no replay route exists for a container-rejected candidate. The status returns to `ready-for-agent` only after all of the following, each recorded in the commit that changes the status:
-1. A reviewed `chore` commit on `main` adds the devDependency (exact version, lockfile updated) and nothing else; `pnpm run check` and GitHub CI pass on it.
-2. On that `main`, a test file in `packages/booking` importing `@neondatabase/serverless` resolves and runs inside the Ralph sandbox image (a throwaway check, recorded, not committed), so RED can be proved there.
-3. The debt gate shows ticket 54 `clear` (`node scripts/ralph-debt.mjs gate docs/technical-debt.md`), which also requires TD-059 resolved by ticket 52.
-4. The maintainer approves the reset; the earlier candidate counts as reference only, like the rejected attempts of ticket 12.
+**Unblocked 2026-11-18 (devflow):** the earlier block was a harness-v1 limitation (it could not add a dependency and prove RED in one run). Under devflow the implementer adds `@neondatabase/serverless` as an exact-version devDependency of `packages/booking` in this ticket. The 2026-11-08 candidate counts as reference only, like the rejected attempts of ticket 12.
 
 Each criterion names its test and the sabotage that test must catch: making the stated change to the production code must turn that test red.
 
@@ -33,7 +29,7 @@ Each criterion names its test and the sabotage that test must catch: making the 
 - [ ] Connection failures are not saturation: `createPrismaClient` applies `acquireTimeoutMs` to both drivers (the Neon pool's `PoolConfig` takes `connectionTimeoutMillis`). Against a local TCP listener that accepts and never answers, a `pg` client and a Neon client (test points `neonConfig.wsProxy` at it and restores it in `finally`) each fail within the bound with the pinned connect-timeout message `Connection terminated due to connection timeout`; the test asserts that message, not just any error. Those captured connect-timeout errors classify as internal errors, not `BOOKING_BUSY`, and count nothing. Sabotage: matching any "timeout" as saturation turns it red.
 - [ ] SQLSTATE `57014`: a statement cancelled by `statement_timeout` (real Postgres, a test-scoped trigger running `pg_sleep` past an injected timeout inside the service's transaction) fails with `BookingBusyError` after one attempt and counts `booking_busy`; a statement cancelled by `pg_cancel_backend` from another session is not `BOOKING_BUSY`: the service rethrows an error keeping `57014` in its cause chain and the router returns `INTERNAL_SERVER_ERROR`. The field or message that tells them apart is pinned in both tests and the coupling noted next to it.
 - [ ] Narrow public surface: `packages/booking/src/index.ts` exports only what code outside the package uses (the service, its errors and ports, `bookingTransactionOptions`, the default timeouts, the acquire timeout, the worst-case function and the metrics factory); constants only tests use are imported by tests from their module. Test: an allow-list test in `packages/booking` compares the runtime export names of `src/index.ts` (`Object.keys` of the module namespace) with an explicit sorted list of the permitted names, and fails naming both the unexpected and the missing exports. Types are not runtime exports, so the allow-list also covers them through a type-level check or a source-level export listing that fails on additions. Sabotage: exporting any extra name from `index.ts` (for example a test-only constant) turns it red; removing a permitted export turns it red too.
-- [ ] TD-020 and TD-067 are `RESOLVED` in `docs/technical-debt.md`, with the tests that prove them named in `Verification` (the host refuses the merge otherwise).
+- [ ] The commit message names, for each of TD-020, TD-067, the test that proves it fixed. The debt register is frozen: a human closes those entries after the merge.
 
 **Documentation deliverable (reviewed, not test-verified):** all four items are mandatory and the host review blocks the merge if any is missing or inaccurate; they are claims about the code and the dependencies, so each must be checkable against them.
 - `docs/database/index.md` records that the Postgres-error conversion the classifier relies on is the same in `@prisma/adapter-pg` and `@prisma/adapter-neon` (`convertDriverError` in both; pg adds only socket and TLS cases), naming the versions checked.

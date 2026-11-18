@@ -6,7 +6,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-18 on devflow/run-202611181443 (run 202611181443)
 
 **Status reason:** back in scope 2026-11-18: the saga chain (17) needs payment latency outside the transaction
 

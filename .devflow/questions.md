@@ -218,3 +218,19 @@ How is the 1-per-10s limit stored and enforced?
 Assumed: SET admin:rate:<action> NX PX 10000 on the shared Upstash store, global per action, taken before other checks, fails closed; refusal is TOO_MANY_REQUESTS with retry seconds
 
 Answer: (open)
+
+## 2026-11-18 15:53 ticket 44
+
+AC1 names Prisma's default 5 s timeout; must the test sleep over 5 s?
+
+Assumed: No: the test injects a 500 ms runner transaction timeout and a 900 ms real sleep; it fails on the old code, so it proves the bug without a 5 s wait
+
+Answer: (open)
+
+## 2026-11-18 15:53 ticket 44
+
+Does the notification handler's provider.send (also fingerprinted by TD-051) move out of the transaction too?
+
+Assumed: No: it needs a reworked pending/send/resume flow the ACs don't cover; left as a follow-up
+
+Answer: (open)

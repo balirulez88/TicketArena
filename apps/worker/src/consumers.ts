@@ -41,7 +41,7 @@ export function createServiceConsumers(
       service: "payment",
       consumer: "payment",
       filterSubject: "ta.order.placed",
-      handler: createPaymentHandler({
+      ...createPaymentHandler({
         clock: deps.clock,
         random: deps.random,
         newId: deps.newId,

@@ -44,7 +44,9 @@ publishing the same row twice in one pass.
   `processed_messages(consumer, messageId, streamSeq)` and then calls the handler. A unique violation of
   that insert is a duplicate and is acked; any handler error, including its own unique violation, rolls back
   and `nak`s with the ADR 0011 delay (1 s, 5 s, 30 s, 2 min). A message without `Nats-Msg-Id` is `term`ed and
-  never processed. The DLQ gate and recovery from ADR 0011 are not built yet.
+  never processed. An optional `beforeTransaction(message)` step runs first, outside the transaction, on every
+  delivery (duplicates included); it is for slow work that needs no database, must be safe to repeat, and a throw
+  `nak`s like a handler failure. The DLQ gate and recovery from ADR 0011 are not built yet.
 - **Port:** `MessageBus` hides the broker; `jetstream-message-bus.ts` is the only module importing
   `@nats-io/*` (a test enforces it). `message-bus.contract.ts` is the contract suite run against real NATS.
 
@@ -103,7 +105,15 @@ the provider's key dedupe absorbs that.
 `apps/worker/src/consumers.ts` registers the durable consumers `payment` and `booking-saga`. `payment` (`service: "payment"`)
 handles `order.placed` in `apps/worker/src/payment/`: one CAPTURED `payment.payment_attempts` row and a
 `payment.succeeded` event, with latency and outcome drawn from the injected `Random`/`Clock`. A
-`+dup@` email emits the result twice under distinct event ids. `booking-saga` handles
+`+dup@` email emits the result twice under distinct event ids.
+
+**Provider latency runs outside the transaction**, in the runner's `beforeTransaction` step, i.e.
+before dedupe-and-capture (TD-051). Awaited inside the runner's transaction it would hold a pooled
+connection idle for the whole wait, and a wait longer than the interactive-transaction timeout
+(Prisma's default 5 s, set per client via `createPrismaClient({ transaction })`) would roll the
+capture back and redeliver the message forever. A redelivered `order.placed` waits again and is
+then acked as a duplicate by the `processed_messages` insert, so the wait never causes a second
+capture or a second `payment.succeeded`. `booking-saga` handles
 `payment.succeeded` (`createPaymentSagaHandler`, `packages/booking`): lock the order, ignore a known
 `paymentId`, else in one transaction set the order `CONFIRMED`, insert the `APPLIED` ledger row, set
 the seats `SOLD` and write `order.confirmed`. Late, mismatched or non-pending cases throw (retried)

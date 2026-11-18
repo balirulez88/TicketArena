@@ -25,6 +25,14 @@ export interface ConsumerRunnerOptions {
   /** Durable name; also the `consumer` half of the `processed_messages` key. */
   readonly consumer: string;
   readonly filterSubject: string;
+  /**
+   * Runs before the transaction opens, on every delivery including duplicates, for slow work
+   * that needs no database (e.g. a provider's latency): awaited inside the transaction it would
+   * hold a pooled connection idle and could outlast the interactive-transaction timeout, turning
+   * one slow message into endless redelivery. It must be safe to repeat; it never decides
+   * whether the message is a duplicate. A throw naks the message like a handler failure.
+   */
+  readonly beforeTransaction?: (message: ReceivedMessage) => Promise<void>;
   /** Receives the transaction that also holds the dedupe row, so state and checkpoint commit together. */
   readonly handler: (
     tx: TransactionClient,
@@ -70,6 +78,7 @@ export async function createConsumerRunner(
       return;
     }
     try {
+      await options.beforeTransaction?.(message);
       await options.prisma.$transaction(async (tx) => {
         try {
           await store.insertProcessed(tx, {

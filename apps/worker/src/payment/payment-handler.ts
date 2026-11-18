@@ -5,7 +5,11 @@ import {
   silentLogger,
 } from "@ticketarena/contracts";
 import type { TransactionClient } from "@ticketarena/db";
-import type { HandlerContext, ReceivedMessage } from "@ticketarena/messaging";
+import type {
+  ConsumerRunnerOptions,
+  HandlerContext,
+  ReceivedMessage,
+} from "@ticketarena/messaging";
 
 export interface PaymentClock {
   now(): Date;
@@ -30,28 +34,39 @@ const ATTEMPT_NO = 1;
 const DUPLICATE_RESULT_MAGIC = "+dup@";
 const orderPlacedEnvelope = envelopeSchema(orderPlacedPayloadSchema);
 
+export type PaymentConsumerSteps = Required<
+  Pick<ConsumerRunnerOptions, "beforeTransaction" | "handler">
+>;
+
 /**
  * The mock provider: one attempt per order (MVP), captured immediately. It touches only the
- * `payment` schema and learns about the order solely from `order.placed` (ADR 0009). Run it
- * with a consumer runner bound to `service: "payment"` so the dedupe row and the result events
- * share this handler's transaction.
+ * `payment` schema and learns about the order solely from `order.placed` (ADR 0009). Spread the
+ * result into a consumer runner bound to `service: "payment"` so the dedupe row and the result
+ * events share the handler's transaction.
+ *
+ * The provider latency is the `beforeTransaction` step, not part of the handler (TD-051): a wait
+ * inside the runner's transaction would pin a pooled connection and, past the transaction
+ * timeout, roll back and redeliver forever. A duplicate delivery still waits, then is skipped by
+ * the dedupe insert, so the wait can never cause a second capture.
  */
-export function createPaymentHandler(deps: PaymentHandlerDeps) {
+export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerSteps {
   const latency = deps.latencyMs ?? { min: 0, max: 0 };
   const logger = deps.logger ?? silentLogger;
 
-  return async function handleOrderPlaced(
+  async function awaitProviderLatency(): Promise<void> {
+    const waitMs = latency.min + deps.random.next() * (latency.max - latency.min);
+    if (waitMs > 0) {
+      await deps.clock.sleep(waitMs);
+    }
+  }
+
+  async function handleOrderPlaced(
     tx: TransactionClient,
     message: ReceivedMessage,
     { emit }: HandlerContext,
   ): Promise<void> {
     const placed = orderPlacedEnvelope.parse(JSON.parse(message.data));
     const order = placed.payload;
-
-    const waitMs = latency.min + deps.random.next() * (latency.max - latency.min);
-    if (waitMs > 0) {
-      await deps.clock.sleep(waitMs);
-    }
     const capturedAt = deps.clock.now();
     const paymentId = deps.newId();
 
@@ -94,5 +109,7 @@ export function createPaymentHandler(deps: PaymentHandlerDeps) {
       });
     }
     logger.info({ orderId: order.orderId, paymentId, copies }, "payment captured");
-  };
+  }
+
+  return { beforeTransaction: awaitProviderLatency, handler: handleOrderPlaced };
 }

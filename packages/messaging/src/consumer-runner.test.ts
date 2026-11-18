@@ -111,6 +111,39 @@ describe("consumer runner", () => {
     expect(await prisma.processedMessage.count({ where: { consumer: name } })).toBe(1);
   });
 
+  it("retries a message whose beforeTransaction step fails, without recording it as processed", async () => {
+    const { name, subject } = newConsumer();
+    const id = newUuid();
+    let steps = 0;
+    let handled = 0;
+    const runner = await createConsumerRunner({
+      bus,
+      prisma,
+      consumer: name,
+      filterSubject: subject,
+      retryDelayMs: () => 0,
+      beforeTransaction: async () => {
+        steps += 1;
+        if (steps === 1) {
+          throw new Error("provider unavailable");
+        }
+      },
+      handler: async () => {
+        handled += 1;
+      },
+    });
+    await bus.publish({ subject, data: "x", msgId: id });
+
+    await runner.pollOnce();
+    expect(handled).toBe(0);
+    expect(await prisma.processedMessage.count({ where: { consumer: name } })).toBe(0);
+    await runner.pollOnce();
+
+    expect(steps).toBe(2);
+    expect(handled).toBe(1);
+    expect(await prisma.processedMessage.count({ where: { consumer: name } })).toBe(1);
+  });
+
   it("does not ack a unique violation raised by the handler's own writes", async () => {
     const { name, subject } = newConsumer();
     const id = newUuid();

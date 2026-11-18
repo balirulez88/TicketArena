@@ -170,3 +170,27 @@ Where do prices per section appear?
 Assumed: Event page only; events.list contract unchanged and returns no prices
 
 Answer: (open)
+
+## 2026-11-18 15:15 ticket 35
+
+What does admin.snapshot cover, and what are pending payments?
+
+Assumed: All events ordered by onSaleAt; seats, queue length, active shoppers and counters per event; orders by status global (orders have no eventId); pending payments = orders in PENDING_PAYMENT (ADR 0009: booking does not read the payment schema)
+
+Answer: (open)
+
+## 2026-11-18 15:15 ticket 35
+
+How is the admin cookie signed and scoped?
+
+Assumed: HMAC with SESSION_SECRET over a ta_admin:-prefixed payload including expiry; 8h, httpOnly, Secure, SameSite=Strict; ADMIN_PASSWORD min 12 chars, constant-time compare; changing ADMIN_PASSWORD does not revoke issued cookies
+
+Answer: (open)
+
+## 2026-11-18 15:15 ticket 35
+
+Login rate limiting and logout?
+
+Assumed: Neither built in this ticket; form POST to /api/admin/login with 303 redirects; missing/invalid cookie is UNAUTHORIZED
+
+Answer: (open)

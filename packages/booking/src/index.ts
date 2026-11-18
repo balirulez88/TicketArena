@@ -30,4 +30,11 @@ export {
   type SagaContext,
   type SagaMessage,
 } from "./payment-saga";
-export { createRedisBookingMetrics, type RedisMetricsClient } from "./redis-metrics";
+export {
+  type BookingMetricCounts,
+  type BookingMetricsReader,
+  createRedisBookingMetrics,
+  createRedisBookingMetricsReader,
+  type RedisMetricsClient,
+  type RedisMetricsReadClient,
+} from "./redis-metrics";

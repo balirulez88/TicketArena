@@ -57,6 +57,11 @@ below shows what is built.
 - Web UI: `/events` and `/events/[eventId]` (venue, on-sale status, prices per section, seat map
   of native buttons with accessible names; up to 6 seats selectable in a Zustand store, server
   data via TanStack Query). See [architecture/](architecture/index.md#web-ui).
+- Admin: `/admin/login` checks `ADMIN_PASSWORD` and sets a signed `ta_admin` cookie (8 h);
+  `proxy.ts` guards `/admin` and `adminProcedure` guards admin procedures (`UNAUTHORIZED`).
+  `/admin` polls `admin.snapshot` every second: seats by status per event, orders by status,
+  pending payments, queue length, active shoppers and the booking counters. See
+  [architecture/](architecture/index.md#admin-api).
 - Guest identity: `proxy.ts` issues a signed `ta_session` cookie; `IdentityService` resolves a
   `Principal` onto the tRPC context (`session.whoami`). See
   [architecture/](architecture/index.md#identity).

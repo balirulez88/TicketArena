@@ -1,5 +1,11 @@
 import { describe, expect, test } from "vitest";
-import { parseMetricsEnv, parseQueueEnv, parseServerEnv, parseSessionEnv } from "./env";
+import {
+  parseAdminEnv,
+  parseMetricsEnv,
+  parseQueueEnv,
+  parseServerEnv,
+  parseSessionEnv,
+} from "./env";
 
 const validEnv = {
   DATABASE_URL: "postgresql://user:pass@db.example.com/ticketarena?sslmode=require",
@@ -7,6 +13,7 @@ const validEnv = {
   UPSTASH_REDIS_REST_TOKEN: "token",
   REDIS_URL: "rediss://default:secret@example.upstash.io:6379",
   SESSION_SECRET: "s".repeat(32),
+  ADMIN_PASSWORD: "correct horse battery",
 };
 
 describe("parseServerEnv", () => {
@@ -34,6 +41,35 @@ describe("parseServerEnv", () => {
     expect(() => parseServerEnv({ ...validEnv, SESSION_SECRET: "short" })).toThrow(
       /SESSION_SECRET/,
     );
+  });
+});
+
+describe("parseServerEnv ADMIN_PASSWORD", () => {
+  test("names ADMIN_PASSWORD when it is missing", () => {
+    const { ADMIN_PASSWORD: _omitted, ...incomplete } = validEnv;
+    expect(() => parseServerEnv(incomplete)).toThrow(/ADMIN_PASSWORD/);
+  });
+
+  test("names ADMIN_PASSWORD when it is shorter than 12 characters", () => {
+    expect(() => parseServerEnv({ ...validEnv, ADMIN_PASSWORD: "short" })).toThrow(
+      /ADMIN_PASSWORD/,
+    );
+  });
+});
+
+describe("parseAdminEnv", () => {
+  test("returns the admin password and session secret, ignoring unrelated variables", () => {
+    expect(
+      parseAdminEnv({
+        ADMIN_PASSWORD: "correct horse battery",
+        SESSION_SECRET: "s".repeat(32),
+        REDIS_URL: "",
+      }),
+    ).toEqual({ ADMIN_PASSWORD: "correct horse battery", SESSION_SECRET: "s".repeat(32) });
+  });
+
+  test("names ADMIN_PASSWORD when it is missing", () => {
+    expect(() => parseAdminEnv({ SESSION_SECRET: "s".repeat(32) })).toThrow(/ADMIN_PASSWORD/);
   });
 });
 

@@ -1,4 +1,5 @@
 import { createCallerFactory, createTRPCRouter } from "../trpc";
+import { adminRouter } from "./admin";
 import { bookingRouter } from "./booking";
 import { eventsRouter } from "./events";
 import { healthRouter } from "./health";
@@ -7,6 +8,7 @@ import { seatsRouter } from "./seats";
 import { sessionRouter } from "./session";
 
 export const appRouter = createTRPCRouter({
+  admin: adminRouter,
   booking: bookingRouter,
   events: eventsRouter,
   health: healthRouter,

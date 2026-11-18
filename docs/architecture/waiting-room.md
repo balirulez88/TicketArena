@@ -32,8 +32,8 @@ heartbeats the session's slot and returns `ADMITTED` when it holds one, else `QU
 and ETA, or `NOT_QUEUED`. `leave` leaves the queue and frees the slot in one atomic step; `{ left }` is true if
 either happened. `admitTick` admits no one before the event's `onSaleAt`. ETA = `ceil(position / admitRatePerSecond)`; the web app assumes 10 admissions
 per second (the worker's default `ADMIT_RATE_PER_SECOND`) and does not read the worker's setting.
-`counts(eventId)` returns `{ queued, active }` (queue length and active shoppers) for the
-dashboard.
+`counts(eventId)` returns `{ queued, active }` (queue length and active shoppers); `admin.snapshot`
+reads it for every event.
 
 ## Redis keys
 

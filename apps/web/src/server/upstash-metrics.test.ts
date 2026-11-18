@@ -1,7 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Logger } from "@ticketarena/contracts";
+import { type Logger, silentLogger } from "@ticketarena/contracts";
+import { setupTestUpstash } from "@ticketarena/test-infra";
 import { afterEach, describe, expect, test } from "vitest";
+
+const upstash = setupTestUpstash();
 
 const TOKEN = "super-secret-token";
 
@@ -98,6 +102,68 @@ describe("createUpstashMetricsClient", () => {
     expect(failure).toBeInstanceOf(Error);
     expect(String((failure as Error).message)).toMatch(/HINCRBY/);
     expect(String((failure as Error).message)).not.toContain(TOKEN);
+  });
+});
+
+describe("createUpstashMetricsClient against an Upstash-compatible endpoint", () => {
+  test("hGetAll returns the hash fields hIncrBy wrote, as a record", async () => {
+    const { createUpstashMetricsClient } = await import("./upstash-metrics");
+    const client = createUpstashMetricsClient({ url: upstash.url, token: upstash.token });
+    const key = `${upstash.prefix}booking:metrics:${randomUUID()}`;
+    await client.hIncrBy(key, "hold_ok", 2);
+    await client.hIncrBy(key, "race_lost", 1);
+
+    expect(await client.hGetAll(key)).toEqual({ hold_ok: "2", race_lost: "1" });
+  });
+
+  test("hGetAll of a missing key is an empty record", async () => {
+    const { createUpstashMetricsClient } = await import("./upstash-metrics");
+    const client = createUpstashMetricsClient({ url: upstash.url, token: upstash.token });
+
+    expect(await client.hGetAll(`${upstash.prefix}missing`)).toEqual({});
+  });
+
+  test("an hGetAll error reply rejects naming HGETALL and never the token", async () => {
+    const { createUpstashMetricsClient } = await import("./upstash-metrics");
+    const { url } = await fake(json(200, { error: "WRONGTYPE" }));
+
+    const failure = await createUpstashMetricsClient({ url, token: TOKEN })
+      .hGetAll("k")
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(String((failure as Error).message)).toMatch(/HGETALL/);
+    expect(String((failure as Error).message)).not.toContain(TOKEN);
+  });
+});
+
+describe("createLazyMetricsReader", () => {
+  test("a bad configuration fails naming the variable, without reading the environment early", async () => {
+    const { createLazyMetricsReader } = await import("./upstash-metrics");
+    let reads = 0;
+    const reader = createLazyMetricsReader({
+      readEnv: () => {
+        reads += 1;
+        return { UPSTASH_REDIS_REST_TOKEN: "t" };
+      },
+      logger: silentLogger,
+    });
+
+    expect(reads).toBe(0);
+    expect(() => reader()).toThrow(/UPSTASH_REDIS_REST_URL/);
+  });
+
+  test("a valid configuration resolves one cached reader", async () => {
+    const { createLazyMetricsReader } = await import("./upstash-metrics");
+    const reader = createLazyMetricsReader({
+      readEnv: () => ({
+        UPSTASH_REDIS_REST_URL: "https://example.upstash.io",
+        UPSTASH_REDIS_REST_TOKEN: "t",
+      }),
+      logger: silentLogger,
+    });
+
+    expect(reader()).toBe(reader());
   });
 });
 

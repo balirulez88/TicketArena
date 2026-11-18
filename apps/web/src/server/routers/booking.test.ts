@@ -24,9 +24,13 @@ function caller(principal: Principal) {
   return createCaller({
     now: () => NOW,
     principal,
+    isAdmin: false,
     db: db(),
     logger: silentLogger,
     metrics: () => ({ increment: async () => undefined }),
+    metricsReader: () => {
+      throw new Error("metrics are not read here");
+    },
     queueStore: () => Promise.reject(new Error("the queue is not used here")),
     random: { next: () => 0 },
   });
@@ -286,9 +290,13 @@ describe("booking.placeOrder / getOrder", () => {
     const late = createCaller({
       now: () => new Date("2027-03-01T12:10:00.000Z"),
       principal: alice,
+      isAdmin: false,
       db: db(),
       logger: silentLogger,
       metrics: () => ({ increment: async () => undefined }),
+      metricsReader: () => {
+        throw new Error("metrics are not read here");
+      },
       queueStore: () => Promise.reject(new Error("the queue is not used here")),
       random: { next: () => 0 },
     });
@@ -329,9 +337,13 @@ describe("booking.holdSeats saturation", () => {
         createCaller({
           now: () => NOW,
           principal: alice,
+          isAdmin: false,
           db: tight,
           logger: silentLogger,
           metrics: () => ({ increment: async () => undefined }),
+          metricsReader: () => {
+            throw new Error("metrics are not read here");
+          },
           queueStore: () => Promise.reject(new Error("the queue is not used here")),
           random: { next: () => 0 },
         }).booking.holdSeats({ eventId, seatIds: [seatId] }),

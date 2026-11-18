@@ -2,10 +2,9 @@
 
 [← Workflow](index.md)
 
-Project-specific guidance for the generic [`code-review`](../../skills/code-review/SKILL.md)
-skill. The skill finds this file through `CLAUDE.md`; it adds TicketArena's rules to the skill's
-generic smell and risk baselines. Severities follow the skill. Whether a finding blocks a merge is
-the [Ralph merge policy](index.md#independent-review), not this file.
+Project-specific guidance for every reviewer (the devflow `reviewer` agent, `/devflow:review`).
+Reviewers find this file through `CLAUDE.md`. Severities follow the reviewer's definitions: only
+`CRITICAL` and `HIGH` block, and a breach of a hard rule below is at least `HIGH`.
 
 Authoritative context, in order: accepted [ADRs](../adr/index.md), the
 [MVP spec](../specs/ticketarena-mvp.md), [`CLAUDE.md`](../../CLAUDE.md) conventions, the
@@ -46,12 +45,10 @@ Vitest. Biome and `tsc` already enforce formatting, lint rules and types: do not
 
 ## Technical debt
 
-[`docs/technical-debt.md`](../technical-debt.md) holds findings earlier reviews deferred. Read
-the entries whose components the change touches. A finding that is the same problem as an entry
-names it in `debt`; knowing about a problem is no reason to rate it lower. A change that makes a
-deferred problem worse or newly reachable is rated by its real impact, which can block the
-merge. An entry the changeset marks `RESOLVED` needs a fix and a test that proves it; a claim
-without one is `HIGH`.
+[`docs/technical-debt.md`](../technical-debt.md) is a frozen record from the harness-v1 era. A
+change is not required to resolve its entries, and an existing entry is never a finding against a
+ticket that did not cause it. Only a change that makes a recorded problem worse is rated, by its
+real impact.
 
 ## Scope
 

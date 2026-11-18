@@ -4,7 +4,9 @@
 
 **Blocked by:** 20
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** after the MVP (scope cut 2026-11-18)
 
 - [ ] Reconciler (worker, every 5 min): `REFUND_REQUESTED` rows older than 10 min re-emit `payment.refund_requested` via the outbox and increment `refundAttempts`.
 - [ ] After 3 re-emits the row moves to `MANUAL_REVIEW`.

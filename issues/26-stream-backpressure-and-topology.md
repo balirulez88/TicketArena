@@ -4,7 +4,9 @@
 
 **Blocked by:** 06
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** after the MVP (scope cut 2026-11-18)
 
 - [ ] AT-35: `ensureTopology()` is idempotent and updates config in place; the two streams' subjects do not overlap; with `max_bytes` exceeded, publishes are rejected and outbox rows stay `PENDING` until space frees.
 - [ ] Outbox lag (age of the oldest `PENDING` row) is computable for the dashboard.

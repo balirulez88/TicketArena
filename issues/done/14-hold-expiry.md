@@ -4,7 +4,9 @@
 
 **Blocked by:** 05, 07
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-18 on devflow/run-202611180958 (run 202611180958)
 
 - [ ] `holdSeats` treats a `HELD` seat whose hold has `holdExpiresAt <= T` as free (`T` read after locks).
 - [ ] Sweeper (worker, every 15s): `FOR UPDATE SKIP LOCKED` on `HELD` holds with `holdExpiresAt <= T`; hold → `EXPIRED`, its seats → `AVAILABLE`, outbox `hold.expired`.

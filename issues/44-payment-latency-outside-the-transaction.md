@@ -6,7 +6,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** hardening, after the MVP (scope cut 2026-11-18)
 
 - [ ] TD-051: with a configured latency longer than the runner's interactive-transaction timeout (Prisma's default 5 s), an `order.placed` is captured exactly once and `payment.succeeded` is emitted once, on the first delivery (integration test against real Postgres and NATS with a real sleep, not the sleep stub).
 - [ ] TD-051: no database transaction is open while the provider latency elapses (a test observes that the handler's transaction starts only after the wait).

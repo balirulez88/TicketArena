@@ -6,7 +6,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** hardening, after the MVP (scope cut 2026-11-18)
 
 - [ ] TD-031: a relay tick that fails outside a single row's publish (claim query, status update or commit fails, e.g. the database is unreachable) is logged at `error` with the cause, and the relay keeps running and publishes once the outage ends (test with a real outage or a failing injected store).
 - [ ] TD-031: a sustained outage is not logged on every 250 ms tick: repeated identical failures are rate-limited, and the first success after them is logged (test with a controlled clock).

@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import {
   envelopeLogBindings,
   envelopeSchema,
+  holdExpiredPayloadSchema,
+  holdReleasedPayloadSchema,
   type Logger,
   orderPlacedPayloadSchema,
   seatHeldPayloadSchema,
@@ -90,8 +92,24 @@ export interface BookingService {
     contact: Contact,
     idempotencyKey: string,
   ): Promise<OrderView>;
+  /**
+   * Gives a `HELD` hold back: `NOT_FOUND` unless the buyer owns it, `HOLD_NOT_ACTIVE` otherwise.
+   * The returned view lists the seats this release freed. The buyer's waiting-room slot is not
+   * touched: releasing a hold does not end shopping.
+   */
+  releaseHold(buyer: Buyer, holdId: string): Promise<HoldView>;
   /** `null` for an unknown order and for someone else's: existence is not leaked. */
   getOrder(buyer: Buyer, orderId: string): Promise<OrderView | null>;
+  /**
+   * The sweeper's step: every `HELD` hold with `holdExpiresAt <= T` becomes `EXPIRED`, frees the
+   * seats it still owns and writes `hold.expired`. Holds another transaction has locked are
+   * skipped, never waited for; the next sweep finds them if they are still `HELD`.
+   */
+  sweepExpired(): Promise<SweepResult>;
+}
+
+export interface SweepResult {
+  readonly expiredHoldIds: readonly string[];
 }
 
 export class HoldNotFoundError extends Error {
@@ -202,6 +220,12 @@ const PAYMENT_WINDOW_MS = 5 * 60_000;
 const ORDER_PLACED_EVENT = "order.placed";
 const placedEnvelope = envelopeSchema(orderPlacedPayloadSchema);
 const PG_UNIQUE_VIOLATION = "P2002";
+const HOLD_RELEASED_EVENT = "hold.released";
+const releasedEnvelope = envelopeSchema(holdReleasedPayloadSchema);
+const HOLD_EXPIRED_EVENT = "hold.expired";
+const expiredEnvelope = envelopeSchema(holdExpiredPayloadSchema);
+// Bounds one sweep transaction; a sweep repeats batches until a short one says nothing is left.
+const SWEEP_BATCH_SIZE = 100;
 
 interface LockedHold {
   readonly buyerKey: string;
@@ -219,6 +243,21 @@ interface PricedSeat {
 
 const orderInclude = { lines: { orderBy: { seatId: "asc" } } } as const;
 
+/** A hold is valid iff `T < holdExpiresAt`: the one rule every path applies to the same `T`. */
+function isExpiredAt(holdExpiresAt: Date, decidedAt: Date): boolean {
+  return decidedAt.getTime() >= holdExpiresAt.getTime();
+}
+
+/** A swept hold reads as expired to the buyer, whichever side's clock decided it. */
+function assertHeld(holdId: string, status: string): void {
+  if (status === "EXPIRED") {
+    throw new HoldExpiredError(holdId);
+  }
+  if (status !== "HELD") {
+    throw new HoldNotActiveError(holdId, status);
+  }
+}
+
 function assertPlaceable(
   holdId: string,
   hold: LockedHold,
@@ -226,10 +265,8 @@ function assertPlaceable(
   seats: readonly { id: string; status: string; holdId: string | null }[],
   placedAt: Date,
 ): void {
-  if (hold.status !== "HELD") {
-    throw new HoldNotActiveError(holdId, hold.status);
-  }
-  if (placedAt.getTime() >= hold.holdExpiresAt.getTime()) {
+  assertHeld(holdId, hold.status);
+  if (isExpiredAt(hold.holdExpiresAt, placedAt)) {
     throw new HoldExpiredError(holdId);
   }
   // Defends against clock skew between instances: expiry alone is not proof the seats are ours.
@@ -372,9 +409,47 @@ interface Snapshot {
 }
 
 /**
+ * Lazy expiry (ADR 0005): a seat is free iff `AVAILABLE`, or `HELD` by a hold that is expired at
+ * `T`. `IN_CHECKOUT` and `SOLD` are never free. The seats are locked, the holds are not: the
+ * expiries are read by a fresh statement so a hold committed during the lock wait is visible
+ * (READ COMMITTED), and leaving hold rows unlocked keeps the global lock order (hold before seat).
+ * An expiry never moves, so reading it unlocked cannot change the decision.
+ */
+async function freeSeats(
+  tx: Pick<PrismaClient, "$queryRaw">,
+  locked: readonly SeatState[],
+  decidedAt: Date,
+): Promise<Set<string>> {
+  const holdIds = [
+    ...new Set(
+      locked.flatMap((seat) =>
+        seat.status === "HELD" && seat.holdId !== null ? [seat.holdId] : [],
+      ),
+    ),
+  ];
+  const holds =
+    holdIds.length === 0
+      ? []
+      : await tx.$queryRaw<{ id: string; holdExpiresAt: Date }[]>`
+          SELECT id::text AS id, "holdExpiresAt" FROM holds WHERE id = ANY(${holdIds}::uuid[])`;
+  const expired = new Set(
+    holds.filter((hold) => isExpiredAt(hold.holdExpiresAt, decidedAt)).map((hold) => hold.id),
+  );
+  return new Set(
+    locked
+      .filter(
+        (seat) =>
+          seat.status === "AVAILABLE" ||
+          (seat.status === "HELD" && seat.holdId !== null && expired.has(seat.holdId)),
+      )
+      .map((seat) => seat.id),
+  );
+}
+
+/**
  * A refusal under the lock is a lost race only when a refused seat changed after the snapshot
  * read it, i.e. another buyer got there first. A refused seat the snapshot saw as it still is
- * (an expired but unswept hold, TD-013) or never saw (not in the event) lost no race.
+ * or never saw (not in the event) lost no race.
  */
 function lostRace(
   seen: ReadonlyMap<string, SeatState>,
@@ -501,6 +576,80 @@ export function createBookingService({
     return owned;
   }
 
+  /** One transaction, one `T`: expires up to a batch of holds and reports the ids it expired. */
+  async function sweepBatch(): Promise<{ id: string; correlationId: string; seatIds: string[] }[]> {
+    const swept = await db.$transaction(async (tx) => {
+      // T is read before the claim because the claim filters by it. SKIP LOCKED never waits, so
+      // T is not stale by a hold lock wait; and since an expiry never moves, a hold expired at T
+      // stays expired. Under READ COMMITTED a hold placeOrder converted and committed no longer
+      // matches `status = 'HELD'`; one it still has locked is skipped (spec: Expiry).
+      const sweptAt = clock.now();
+      const holds = await tx.$queryRaw<{ id: string; correlationId: string }[]>`
+        SELECT id::text AS id, "correlationId"::text AS "correlationId"
+        FROM holds
+        WHERE status::text = 'HELD' AND "holdExpiresAt" <= ${sweptAt}
+        ORDER BY id
+        LIMIT ${SWEEP_BATCH_SIZE}
+        FOR UPDATE SKIP LOCKED`;
+      if (holds.length === 0) {
+        return [];
+      }
+      const holdIds = holds.map((hold) => hold.id);
+      // Lock order: holds, then seats by id (ADR 0005). Only seats these holds still own: a seat
+      // taken over lazily belongs to its new hold and must stay as it is.
+      const seats = await tx.$queryRaw<{ id: string; holdId: string }[]>`
+        SELECT id::text AS id, "holdId"::text AS "holdId" FROM seats
+        WHERE "holdId" = ANY(${holdIds}::uuid[]) AND status::text = 'HELD'
+        ORDER BY id FOR UPDATE`;
+
+      await tx.hold.updateMany({ where: { id: { in: holdIds } }, data: { status: "EXPIRED" } });
+      await tx.seat.updateMany({
+        where: { id: { in: seats.map((seat) => seat.id) }, holdId: { in: holdIds } },
+        data: { status: "AVAILABLE", holdId: null, claimBuyerKey: null },
+      });
+
+      const expired = holds.map((hold) => ({
+        ...hold,
+        seatIds: seats.filter((seat) => seat.holdId === hold.id).map((seat) => seat.id),
+      }));
+      // Same transaction as the state change: each event exists iff its expiry committed.
+      await tx.outboxEvent.createMany({
+        data: expired.map(({ id: holdId, correlationId, seatIds }) => {
+          const envelope = expiredEnvelope.parse({
+            id: newId(),
+            type: HOLD_EXPIRED_EVENT,
+            version: 1,
+            occurredAt: sweptAt.toISOString(),
+            correlationId,
+            causationId: null,
+            holdId,
+            payload: { holdId, seatIds },
+          });
+          return {
+            id: envelope.id,
+            aggregateType: "hold",
+            aggregateId: holdId,
+            eventType: HOLD_EXPIRED_EVENT,
+            payload: envelope,
+          };
+        }),
+      });
+      return expired;
+    });
+    for (const hold of swept) {
+      logger
+        .child(
+          envelopeLogBindings({
+            correlationId: hold.correlationId,
+            causationId: null,
+            holdId: hold.id,
+          }),
+        )
+        .info({ seatIds: hold.seatIds }, "hold expired");
+    }
+    return swept;
+  }
+
   async function holdOnce(buyer: Buyer, eventId: string, seatIds: readonly string[]) {
     if (seatIds.length === 0) {
       throw new InvalidSeatSelectionError("seatIds is empty");
@@ -532,7 +681,7 @@ export function createBookingService({
         // Decision time is read only after the locks are held: it is the linearization point.
         const decidedAt = clock.now();
 
-        const free = new Set(locked.filter((seat) => seat.status === "AVAILABLE").map((s) => s.id));
+        const free = await freeSeats(tx, locked, decidedAt);
         const unavailable = seatIds.filter((id) => !free.has(id));
         if (unavailable.length > 0) {
           throw new LockedRefusal(
@@ -541,7 +690,7 @@ export function createBookingService({
           );
         }
 
-        // Expired holds do not count: they are unswept but already released in effect (TD-013).
+        // Expired holds do not count: they are unswept but already released in effect.
         const [usage] = await tx.$queryRaw<{ used: bigint }[]>`
           SELECT count(*) AS used
           FROM seats s
@@ -670,9 +819,7 @@ export function createBookingService({
             return duplicate;
           }
           // Refused before the event is read: a settled hold needs no seat set.
-          if (hold.status !== "HELD") {
-            throw new HoldNotActiveError(holdId, hold.status);
-          }
+          assertHeld(holdId, hold.status);
           // The seat set comes from the hold's own seat.held event, written in the hold's
           // transaction: querying seats by holdId would silently miss a seat that lost its hold.
           const held = await tx.outboxEvent.findFirst({
@@ -772,6 +919,87 @@ export function createBookingService({
           }
         }
         throw error;
+      }
+    },
+
+    async releaseHold(buyer, holdId) {
+      // Unlocked read only to learn which buyer lock to take; the locked read below decides.
+      const owned = await ownedHold(buyer, holdId);
+      const released = await db.$transaction(async (tx) => {
+        // Global lock order: buyer, hold, then seats by id, matching holdSeats (ADR 0005).
+        await lockBuyer(tx, owned.eventId, buyer.buyerKey);
+        const holds = await tx.$queryRaw<LockedHold[]>`
+          SELECT "buyerKey", status::text AS status, "holdExpiresAt",
+                 "correlationId"::text AS "correlationId", "eventId"::text AS "eventId"
+          FROM holds WHERE id = ${holdId}::uuid FOR UPDATE`;
+        const hold = holds[0];
+        if (hold === undefined || hold.buyerKey !== buyer.buyerKey) {
+          throw new HoldNotFoundError(holdId);
+        }
+        if (hold.status !== "HELD") {
+          throw new HoldNotActiveError(holdId, hold.status);
+        }
+        // Only seats still carrying this holdId: a seat taken over by another hold is not ours
+        // to free. The hold row lock serializes this with placeOrder on the same hold.
+        const seats = await tx.$queryRaw<{ id: string }[]>`
+          SELECT id::text AS id FROM seats
+          WHERE "holdId" = ${holdId}::uuid AND status::text = 'HELD'
+          ORDER BY id FOR UPDATE`;
+        const seatIds = seats.map((seat) => seat.id);
+        const releasedAt = clock.now();
+
+        await tx.hold.update({ where: { id: holdId }, data: { status: "RELEASED" } });
+        await tx.seat.updateMany({
+          where: { id: { in: seatIds }, holdId },
+          data: { status: "AVAILABLE", holdId: null, claimBuyerKey: null },
+        });
+
+        // Same transaction as the state change: the event exists iff the release committed.
+        const envelope = releasedEnvelope.parse({
+          id: newId(),
+          type: HOLD_RELEASED_EVENT,
+          version: 1,
+          occurredAt: releasedAt.toISOString(),
+          correlationId: hold.correlationId,
+          causationId: null,
+          holdId,
+          payload: { holdId, seatIds },
+        });
+        await tx.outboxEvent.create({
+          data: {
+            id: envelope.id,
+            aggregateType: "hold",
+            aggregateId: holdId,
+            eventType: HOLD_RELEASED_EVENT,
+            payload: envelope,
+          },
+        });
+
+        return {
+          id: holdId,
+          eventId: hold.eventId,
+          seatIds,
+          status: "RELEASED" as const,
+          holdExpiresAt: hold.holdExpiresAt,
+          correlationId: hold.correlationId,
+        };
+      });
+      logger
+        .child(
+          envelopeLogBindings({ correlationId: released.correlationId, causationId: null, holdId }),
+        )
+        .info({ seatIds: released.seatIds }, "hold released");
+      return released;
+    },
+
+    async sweepExpired() {
+      const expiredHoldIds: string[] = [];
+      for (;;) {
+        const batch = await sweepBatch();
+        expiredHoldIds.push(...batch.map((hold) => hold.id));
+        if (batch.length < SWEEP_BATCH_SIZE) {
+          return { expiredHoldIds };
+        }
       }
     },
 

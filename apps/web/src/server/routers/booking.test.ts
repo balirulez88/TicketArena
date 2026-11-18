@@ -177,6 +177,41 @@ describe("booking.getHold", () => {
   });
 });
 
+describe("booking.releaseHold", () => {
+  test("releases the owner's hold and another buyer can hold the seat at once", async () => {
+    const { eventId, seatId } = await availableSeat();
+    const hold = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatId] });
+
+    const released = await caller(alice).booking.releaseHold({ holdId: hold.id });
+    const bobs = await caller(bob).booking.holdSeats({ eventId, seatIds: [seatId] });
+
+    expect(released).toMatchObject({ id: hold.id, status: "RELEASED", seatIds: [seatId] });
+    expect(bobs).toMatchObject({ status: "HELD", seatIds: [seatId] });
+    await caller(bob).booking.releaseHold({ holdId: bobs.id });
+  });
+
+  test("is NOT_FOUND for anyone but the owner and CONFLICT for a hold no longer HELD", async () => {
+    const { eventId, seatId } = await availableSeat();
+    const hold = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatId] });
+
+    await expect(caller(bob).booking.releaseHold({ holdId: hold.id })).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    await caller(alice).booking.releaseHold({ holdId: hold.id });
+    await expect(caller(alice).booking.releaseHold({ holdId: hold.id })).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: expect.stringContaining("HOLD_NOT_ACTIVE"),
+    });
+  });
+
+  test("rejects a malformed hold id naming the field", async () => {
+    await expect(caller(alice).booking.releaseHold({ holdId: "nope" })).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining("holdId"),
+    });
+  });
+});
+
 describe("booking.placeOrder / getOrder", () => {
   const contact = { email: "alice@example.com" };
 

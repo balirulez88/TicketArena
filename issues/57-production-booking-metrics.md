@@ -4,7 +4,9 @@
 
 **Blocked by:** 54, 55, 56
 
-**Status:** ready-for-agent
+**Status:** deferred
+
+**Status reason:** hardening, after the MVP (scope cut 2026-11-18)
 
 Each criterion names its test and the sabotage that test must catch. Tests use the helpers and client rules ticket 55 established (`@ticketarena/booking/testing`).
 

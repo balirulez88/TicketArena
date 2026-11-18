@@ -28,6 +28,8 @@ const holdSeatsInput = z.object({
 
 const getHoldInput = z.object({ holdId: z.uuid() });
 
+const releaseHoldInput = z.object({ holdId: z.uuid() });
+
 const placeOrderInput = z.object({
   holdId: z.uuid(),
   contact: z.object({ email: z.email(), phone: z.string().trim().min(1).max(32).optional() }),
@@ -109,6 +111,24 @@ export const bookingRouter = createTRPCRouter({
         throw new TRPCError({ code: "NOT_FOUND", message: `Hold ${input.holdId} not found` });
       }
       return hold;
+    }),
+
+  // Owner-only and HELD-only; does not touch the buyer's waiting-room slot (ticket 30).
+  releaseHold: publicProcedure
+    .input(releaseHoldInput)
+    .output(holdOutput)
+    .mutation(async ({ ctx, input }) => {
+      try {
+        return await bookingServiceFor(ctx).releaseHold(toBuyer(ctx.principal), input.holdId);
+      } catch (error) {
+        if (error instanceof HoldNotFoundError) {
+          throw new TRPCError({ code: "NOT_FOUND", message: error.message, cause: error });
+        }
+        if (error instanceof HoldNotActiveError) {
+          throw new TRPCError({ code: "CONFLICT", message: error.message, cause: error });
+        }
+        throw error;
+      }
     }),
 
   placeOrder: publicProcedure

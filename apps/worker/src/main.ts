@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { createBookingService } from "@ticketarena/booking";
 import { createPrismaClient } from "@ticketarena/db";
 import { connectJetStreamMessageBus } from "@ticketarena/messaging";
 import { createServiceConsumers } from "./consumers.js";
@@ -12,14 +13,23 @@ const logger = createWorkerLogger();
 const prisma = createPrismaClient({ connectionString: env.DATABASE_URL, driver: "pg" });
 const bus = await connectJetStreamMessageBus({ servers: env.NATS_URL });
 // The composition root is the only place that reads the system clock and Math.random.
+const clock = { now: () => new Date(), sleep: (ms: number) => delay(ms) };
 const consumers = createServiceConsumers({
   prisma,
-  clock: { now: () => new Date(), sleep: (ms) => delay(ms) },
+  clock,
   random: { next: Math.random },
   newId: randomUUID,
   logger,
 });
-const worker = await startWorker({ bus, prisma, port: env.PORT, logger, consumers });
+const booking = createBookingService({ db: prisma, clock, newId: randomUUID, logger });
+const worker = await startWorker({
+  bus,
+  prisma,
+  port: env.PORT,
+  logger,
+  consumers,
+  sweeper: { booking },
+});
 logger.info({ port: worker.port }, "worker listening");
 
 async function shutdown(): Promise<void> {

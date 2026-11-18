@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { Logger } from "@ticketarena/contracts";
+import type { BookingService } from "@ticketarena/booking";
+import { type Logger, silentLogger } from "@ticketarena/contracts";
 import type { PrismaClient } from "@ticketarena/db";
 import {
   type ConsumerRunnerOptions,
@@ -9,6 +10,10 @@ import {
   type MessageBus,
   type OutboxRelayOptions,
 } from "@ticketarena/messaging";
+import { createSweeperLoop } from "./sweeper.js";
+
+/** How often expired holds are swept (spec: Expiry); lazy expiry covers the gap in between. */
+export const SWEEP_INTERVAL_MS = 15_000;
 
 export interface WorkerOptions {
   readonly bus: MessageBus;
@@ -18,6 +23,11 @@ export interface WorkerOptions {
   readonly relay?: Pick<OutboxRelayOptions, "intervalMs" | "batchSize">;
   /** Durable consumers this worker hosts; services register theirs here. */
   readonly consumers?: readonly Omit<ConsumerRunnerOptions, "bus" | "prisma" | "logger">[];
+  /** The hold sweeper; the booking service carries the clock it decides expiry with. */
+  readonly sweeper?: {
+    readonly booking: Pick<BookingService, "sweepExpired">;
+    readonly intervalMs?: number;
+  };
 }
 
 export interface RunningWorker {
@@ -52,9 +62,18 @@ export async function startWorker(options: WorkerOptions): Promise<RunningWorker
       ...options.relay,
     }),
   );
+  const sweeper =
+    options.sweeper === undefined
+      ? undefined
+      : createSweeperLoop({
+          booking: options.sweeper.booking,
+          intervalMs: options.sweeper.intervalMs ?? SWEEP_INTERVAL_MS,
+          logger: options.logger ?? silentLogger,
+        });
   for (const runner of runners) {
     runner.start();
   }
+  sweeper?.start();
   for (const relay of relays) {
     relay.start();
   }
@@ -73,6 +92,7 @@ export async function startWorker(options: WorkerOptions): Promise<RunningWorker
     port: (server.address() as AddressInfo).port,
     async stop() {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      await sweeper?.stop();
       await Promise.all(relays.map((relay) => relay.stop()));
       await Promise.all(runners.map((runner) => runner.stop()));
     },

@@ -130,8 +130,10 @@ end
 return removed
 `;
 
-// Walks the active set, which maxActive bounds, so the script stays short. A slot is freed when
-// it is idle or its admission is missing or expired; expired jtis without a slot are dropped too.
+// Walks the whole active set in one call. While the queue is open maxActive bounds that set; once
+// it closes, immediate admission bypasses maxActive, so the set is bounded only by the buyers seen
+// in the last idle timeout (90 s). Bounded, batched reaping is ticket 69. A slot is freed when it
+// is idle or its admission is missing or expired; expired jtis without a slot are dropped too.
 // KEYS: active, admission, admitted. ARGV: now ms, idle cutoff ms. Returns the freed members.
 export const REAP_SCRIPT = `
 local now = tonumber(ARGV[1])
@@ -156,15 +158,24 @@ return freed
 `;
 
 // After the queue closes admission is immediate (ADR 0008), so the bucket and maxActive do not
-// apply. A member that holds a slot keeps it: a new jti would revoke the token it is using. The
-// queue entry goes in the same step, so a ticker never admits the member a second time.
+// apply. A member whose admission is still valid keeps it: a new jti would revoke the token it is
+// using. A slot whose admission expired (the reaper has not run yet) is replaced in the same step,
+// so the buyer is not stuck until the next reap. The queue entry goes too, so a ticker never
+// admits the member a second time.
 // KEYS: queue, active, admission, admitted. ARGV: member, now ms, ttl ms, jti.
-// Returns 1 when a slot was created, 0 when the member already held one.
+// Returns 1 when a slot was created or replaced, 0 when the member kept a valid one.
 export const ADMIT_IMMEDIATELY_SCRIPT = `
-if redis.call('ZSCORE', KEYS[2], ARGV[1]) then
-  return 0
-end
 local now = tonumber(ARGV[2])
+if redis.call('ZSCORE', KEYS[2], ARGV[1]) then
+  local old = redis.call('HGET', KEYS[3], ARGV[1])
+  local expires = old and redis.call('ZSCORE', KEYS[4], old)
+  if expires and tonumber(expires) > now then
+    return 0
+  end
+  if old then
+    redis.call('ZREM', KEYS[4], old)
+  end
+end
 redis.call('ZREM', KEYS[1], ARGV[1])
 redis.call('ZADD', KEYS[2], now, ARGV[1])
 redis.call('HSET', KEYS[3], ARGV[1], ARGV[4])
@@ -173,15 +184,16 @@ return 1
 `;
 
 // Read-only: the slot, its jti and the jti's expiry from one snapshot, so a slot freed in
-// between is never reported with a half-removed admission.
-// KEYS: active, admission, admitted. ARGV: member. Returns { jti, expiry ms } or {}.
+// between is never reported with a half-removed admission. An expired admission reads as none
+// even before the reaper frees its slot, so it is never reported, or minted into a token, as usable.
+// KEYS: active, admission, admitted. ARGV: member, now ms. Returns { jti, expiry ms } or {}.
 export const ADMISSION_SCRIPT = `
 if not redis.call('ZSCORE', KEYS[1], ARGV[1]) then
   return {}
 end
 local jti = redis.call('HGET', KEYS[2], ARGV[1])
 local expires = jti and redis.call('ZSCORE', KEYS[3], jti)
-if not expires then
+if not expires or tonumber(expires) <= tonumber(ARGV[2]) then
   return {}
 end
 return { jti, expires }
@@ -308,8 +320,11 @@ export function createScriptedQueueStore(
       return toInteger(reply, "admitImmediately") === 1;
     },
 
-    async admission(eventId, member) {
-      const reply = toStrings(await run("admission", slotKeys(eventId), [member]), "admission");
+    async admission(eventId, member, now) {
+      const reply = toStrings(
+        await run("admission", slotKeys(eventId), [member, String(now.getTime())]),
+        "admission",
+      );
       const [jti, expiresAt] = reply;
       return jti === undefined || expiresAt === undefined
         ? null

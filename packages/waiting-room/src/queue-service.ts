@@ -115,13 +115,25 @@ export function createQueueService(deps: QueueServiceDeps): QueueService {
       // A refresh, second tab or retry by an admitted session must not queue it again: the next
       // tick would re-admit it with a new jti and revoke the admission it is using.
       const outcome = await deps.store.join(event.id, sessionId, score);
-      return outcome.status === "ADMITTED" ? outcome : queued(outcome.position);
+      if (outcome.status === "QUEUED") {
+        return queued(outcome.position);
+      }
+      if ((await deps.store.admission(event.id, sessionId, now)) !== null) {
+        return outcome;
+      }
+      // The slot's admission expired and the reaper has not freed it yet: free it now, so the
+      // session rejoins at the back like any freed session instead of waiting for the next reap.
+      await deps.store.releaseSlot(event.id, sessionId);
+      const rejoined = await deps.store.join(event.id, sessionId, score);
+      return rejoined.status === "QUEUED" ? queued(rejoined.position) : rejoined;
     },
 
     async status(eventId, sessionId) {
-      if (await deps.store.heartbeat(eventId, sessionId, deps.clock.now())) {
-        const admission = await deps.store.admission(eventId, sessionId);
-        // null only when the slot was freed since the heartbeat: report it as no longer held.
+      const now = deps.clock.now();
+      if (await deps.store.heartbeat(eventId, sessionId, now)) {
+        const admission = await deps.store.admission(eventId, sessionId, now);
+        // null when the slot was freed since the heartbeat or its admission expired before the
+        // reaper ran: either way the session is not admitted.
         if (admission !== null) {
           return { status: "ADMITTED", admission };
         }

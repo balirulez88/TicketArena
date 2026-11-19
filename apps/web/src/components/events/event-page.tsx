@@ -59,6 +59,9 @@ function EventDetails({ event }: { readonly event: EventDetail }) {
 /**
  * The seat map and the hold controls under it. Once admitted the map polls
  * every 3 s like `queue.status`, so seats taken by others show up while the buyer chooses.
+ * A failed background refresh keeps the last seats on screen: the hold controls own the live
+ * hold, the checkout and its idempotency key, so unmounting them on a transient error would lose
+ * purchase state the server still has.
  */
 function EventSeats({
   eventId,
@@ -78,7 +81,7 @@ function EventSeats({
   if (seatMap.isPending) {
     return <p className="text-muted-foreground">Loading seats…</p>;
   }
-  if (seatMap.isError) {
+  if (seatMap.data === undefined) {
     return (
       <p role="alert" className="text-destructive">
         Seats could not be loaded.
@@ -87,6 +90,11 @@ function EventSeats({
   }
   return (
     <>
+      {seatMap.isError ? (
+        <p role="status" className="text-muted-foreground text-sm">
+          The seat map could not be refreshed; it shows the last known seats.
+        </p>
+      ) : null}
       <SeatMap seats={seatMap.data.seats} />
       <HoldControls eventId={eventId} seats={seatMap.data.seats} admitted={admitted} />
     </>
@@ -121,10 +129,12 @@ export function EventPage({ eventId }: { readonly eventId: string }) {
   if (event.isPending) {
     return <p className="text-muted-foreground">Loading event…</p>;
   }
-  if (event.isError) {
+  // Only a first load without data replaces the page: a failed refetch keeps the event, and the
+  // buying flow under it, on screen.
+  if (event.data === undefined) {
     return (
       <p role="alert" className="text-destructive">
-        {isMissing(event.error.data?.code) ? "Event not found." : "Event could not be loaded."}
+        {isMissing(event.error?.data?.code) ? "Event not found." : "Event could not be loaded."}
       </p>
     );
   }

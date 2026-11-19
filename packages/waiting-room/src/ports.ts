@@ -71,8 +71,11 @@ export interface QueueStore {
    * `true` when a slot was created.
    */
   admitImmediately(eventId: string, member: string, grant: ImmediateAdmission): Promise<boolean>;
-  /** The admission of the member's slot, or `null` when it holds none. */
-  admission(eventId: string, member: string): Promise<SlotAdmission | null>;
+  /**
+   * The admission of the member's slot, or `null` when it holds none or its admission expired by
+   * `now` (whether or not the reaper has freed the slot yet).
+   */
+  admission(eventId: string, member: string, now: Date): Promise<SlotAdmission | null>;
   /** `true` while the `jti` is in the event's admitted set and has not expired by `now`. */
   isAdmitted(eventId: string, jti: string, now: Date): Promise<boolean>;
   /** Queue length and active-slot count, read in one atomic step. */

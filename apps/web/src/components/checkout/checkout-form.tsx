@@ -1,8 +1,10 @@
 "use client";
 
 import { useMutation } from "@tanstack/react-query";
-import { type FormEvent, useId, useRef, useState } from "react";
+import type { inferRouterInputs } from "@trpc/server";
+import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 import { z } from "zod";
+import type { AppRouter } from "@/server/routers/_app";
 import { useTRPC } from "@/trpc/react";
 import { checkoutFailure } from "./checkout-failure";
 
@@ -41,6 +43,7 @@ export const checkoutFormSchema = z.object({
 });
 
 type Contact = z.output<typeof checkoutFormSchema>;
+type PlaceOrderInput = inferRouterInputs<AppRouter>["booking"]["placeOrder"];
 type FieldErrors = { readonly email?: string; readonly phone?: string };
 
 /** One checkout attempt: the contact it was submitted with and the idempotency key it owns. */
@@ -69,15 +72,26 @@ const inputClass = "rounded-md border px-3 py-2 aria-invalid:border-destructive"
  * one. Changing the contact starts a new attempt with a new key: reusing the key with a different
  * request would make the server answer `IDEMPOTENCY_KEY_REUSED`. A new hold mounts a new form, so
  * it never inherits an earlier hold's key.
+ *
+ * An attempt is unresolved while its request is in flight or its last answer was ambiguous (a
+ * network failure or server error: the order may have been committed). The hold's deadline does
+ * not end an unresolved attempt: when `holdExpired` turns true the form replays the request once
+ * with the same key, because the server answers a replay with the order it already placed even
+ * after the hold expired, and only the server's answer (the order, or `HOLD_EXPIRED`) decides.
+ * `onUnresolvedChange` tells the hold whether it may treat its deadline as the end.
  */
 export function CheckoutForm({
   holdId,
+  holdExpired,
   onPlaced,
   onHoldExpired,
+  onUnresolvedChange,
 }: {
   readonly holdId: string;
+  readonly holdExpired: boolean;
   readonly onPlaced: (orderId: string) => void;
   readonly onHoldExpired: () => void;
+  readonly onUnresolvedChange: (unresolved: boolean) => void;
 }) {
   const trpc = useTRPC();
   const ids = useId();
@@ -85,6 +99,8 @@ export function CheckoutForm({
   const [phone, setPhone] = useState("");
   const [errors, setErrors] = useState<FieldErrors>({});
   const attempt = useRef<Attempt | null>(null);
+  const lastRequest = useRef<PlaceOrderInput | null>(null);
+  const replayedAtDeadline = useRef(false);
 
   const placeOrder = useMutation(
     trpc.booking.placeOrder.mutationOptions({
@@ -126,19 +142,35 @@ export function CheckoutForm({
     setErrors({});
     const contact = parsed.data;
     const { idempotencyKey } = attemptFor(contact);
-    placeOrder.mutate({
+    const request: PlaceOrderInput = {
       holdId,
       contact:
         contact.phone === undefined
           ? { email: contact.email }
           : { email: contact.email, phone: contact.phone },
       idempotencyKey,
-    });
+    };
+    lastRequest.current = request;
+    placeOrder.mutate(request);
   }
 
   const emailId = `${ids}-email`;
   const phoneId = `${ids}-phone`;
   const failure = placeOrder.isError ? checkoutFailure(placeOrder.error) : null;
+  const unresolved = placeOrder.isPending || failure === "OTHER";
+  const replay = placeOrder.mutate;
+
+  useEffect(() => {
+    onUnresolvedChange(unresolved);
+  }, [unresolved, onUnresolvedChange]);
+
+  useEffect(() => {
+    const request = lastRequest.current;
+    if (holdExpired && failure === "OTHER" && request !== null && !replayedAtDeadline.current) {
+      replayedAtDeadline.current = true;
+      replay(request);
+    }
+  }, [holdExpired, failure, replay]);
 
   return (
     <form aria-label="Checkout" noValidate className="flex flex-col gap-3" onSubmit={onSubmit}>
@@ -192,9 +224,15 @@ export function CheckoutForm({
           Check your details and place the order again.
         </p>
       ) : null}
-      {failure === "OTHER" ? (
+      {failure === "OTHER" && !holdExpired ? (
         <p role="alert" className="text-destructive text-sm">
           Your order could not be placed. Please try again.
+        </p>
+      ) : null}
+      {failure === "OTHER" && holdExpired ? (
+        <p role="alert" className="text-destructive text-sm">
+          Your hold time ran out while your order was being placed, and we could not confirm it yet.
+          Place the order again to check: it will not be placed twice.
         </p>
       ) : null}
     </form>

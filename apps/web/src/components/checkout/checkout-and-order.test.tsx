@@ -82,6 +82,8 @@ let placeOrderAnswers: Answer[];
 /** getOrder answers in order; the last one repeats. */
 let getOrderAnswers: Answer[];
 let holdIds: string[];
+/** While true, `seats.map` fails like a server error, as a background refresh can. */
+let seatMapDown: boolean;
 let calls: { procedure: string; input: unknown }[];
 
 function callsTo(procedure: string) {
@@ -121,7 +123,9 @@ async function fakeApi(
     case "events.get":
       return respond({ data: event });
     case "seats.map":
-      return respond({ data: { eventId: EVENT_ID, seats } });
+      return seatMapDown
+        ? respond({ error: { code: "INTERNAL_SERVER_ERROR", httpStatus: 500, message: "down" } })
+        : respond({ data: { eventId: EVENT_ID, seats } });
     case "queue.status":
       return respond({ data: { status: "ADMITTED" } });
     case "booking.holdSeats":
@@ -192,6 +196,7 @@ beforeEach(() => {
   placeOrderAnswers = [{ data: order("PENDING_PAYMENT") }];
   getOrderAnswers = [{ data: order("PENDING_PAYMENT") }];
   holdIds = [HOLD_ID, SECOND_HOLD_ID];
+  seatMapDown = false;
   calls = [];
   keyCount = 0;
   // Randomness is a faked boundary: each generated idempotency key is distinct and predictable.
@@ -395,6 +400,106 @@ describe("Checkout refusals", () => {
     }
 
     expect(new Set(messages).size).toBe(3);
+  });
+});
+
+describe("Purchase state across background failures", () => {
+  test("a failed seat-map refresh keeps the hold, the checkout and its key, through recovery", async () => {
+    placeOrderAnswers = ["NETWORK_DOWN", { data: order("PENDING_PAYMENT") }];
+    const form = await holdingOneSeat();
+    fillContact(form, "alice@example.com");
+    submit(form);
+    await within(form).findByRole("alert");
+
+    seatMapDown = true;
+    await advance(3_000);
+    expect(await screen.findByText(/seat map could not be refreshed/i)).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Your hold" })).toBeTruthy();
+
+    seatMapDown = false;
+    await advance(3_000);
+    expect(screen.queryByText(/seat map could not be refreshed/i)).toBeNull();
+    const sameForm = screen.getByRole("form", { name: "Checkout" });
+    expect((within(sameForm).getByLabelText("Email") as HTMLInputElement).value).toBe(
+      "alice@example.com",
+    );
+    submit(sameForm);
+
+    await screen.findByRole("region", { name: "Order status" });
+    const keys = placeOrderKeys();
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+  });
+});
+
+describe("Checkout at the hold deadline", () => {
+  test("an unresolved checkout is replayed with the same key when the hold runs out, and the order it placed is shown", async () => {
+    placeOrderAnswers = ["NETWORK_DOWN", { data: order("PENDING_PAYMENT") }];
+    const form = await holdingOneSeat();
+    fillContact(form, "alice@example.com");
+    submit(form);
+    await within(form).findByRole("alert");
+
+    await advance(10 * 60_000);
+
+    await screen.findByRole("region", { name: "Order status" });
+    expect(screen.queryByText(/Your hold expired/)).toBeNull();
+    const keys = placeOrderKeys();
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  test("the replay at the deadline ends the hold when the server answers HOLD_EXPIRED", async () => {
+    placeOrderAnswers = [
+      "NETWORK_DOWN",
+      {
+        error: {
+          code: "PRECONDITION_FAILED",
+          httpStatus: 412,
+          message: `HOLD_EXPIRED: ${HOLD_ID}`,
+        },
+      },
+    ];
+    const form = await holdingOneSeat();
+    fillContact(form, "alice@example.com");
+    submit(form);
+    await within(form).findByRole("alert");
+
+    await advance(10 * 60_000);
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Your hold expired before your order was placed",
+    );
+    expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
+    expect(placeOrderKeys()).toHaveLength(2);
+  });
+
+  test("a replay at the deadline that still gets no answer keeps the checkout for a manual retry with the same key", async () => {
+    placeOrderAnswers = ["NETWORK_DOWN", "NETWORK_DOWN", { data: order("PENDING_PAYMENT") }];
+    const form = await holdingOneSeat();
+    fillContact(form, "alice@example.com");
+    submit(form);
+    await within(form).findByRole("alert");
+
+    await advance(10 * 60_000);
+    await advance(1_000);
+
+    expect(screen.getByRole("region", { name: "Your hold" })).toBeTruthy();
+    expect(placeOrderKeys()).toHaveLength(2);
+    submit(screen.getByRole("form", { name: "Checkout" }));
+
+    await screen.findByRole("region", { name: "Order status" });
+    const keys = placeOrderKeys();
+    expect(new Set(keys).size).toBe(1);
+  });
+
+  test("with no checkout submitted, the hold simply expires at the deadline", async () => {
+    await holdingOneSeat();
+
+    await advance(10 * 60_000);
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Your hold expired");
+    expect(placeOrderKeys()).toHaveLength(0);
   });
 });
 

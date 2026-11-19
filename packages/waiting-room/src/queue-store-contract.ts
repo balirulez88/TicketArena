@@ -381,14 +381,14 @@ export function describeQueueStoreContract(
       await queueOf(store, eventId, 2);
       const [admission] = await store.admit(eventId, request(T0, 1, 10));
 
-      expect(await store.admission(eventId, "m1")).toEqual({
+      expect(await store.admission(eventId, "m1", T0)).toEqual({
         jti: admission?.jti,
         expiresAt: at(TTL),
       });
-      expect(await store.admission(eventId, "m2")).toBeNull();
-      expect(await store.admission(eventId, "nobody")).toBeNull();
+      expect(await store.admission(eventId, "m2", T0)).toBeNull();
+      expect(await store.admission(eventId, "nobody", T0)).toBeNull();
       await store.releaseSlot(eventId, "m1");
-      expect(await store.admission(eventId, "m1")).toBeNull();
+      expect(await store.admission(eventId, "m1", T0)).toBeNull();
     });
 
     test("admitImmediately gives the member a slot and a jti valid for the ttl, bypassing the queue", async () => {
@@ -401,7 +401,7 @@ export function describeQueueStoreContract(
         await store.admitImmediately(eventId, "m2", { now: T0, admissionTtlMs: TTL, jti }),
       ).toBe(true);
 
-      expect(await store.admission(eventId, "m2")).toEqual({ jti, expiresAt: at(TTL) });
+      expect(await store.admission(eventId, "m2", T0)).toEqual({ jti, expiresAt: at(TTL) });
       expect(await store.isAdmitted(eventId, jti, at(TTL - 1))).toBe(true);
       expect(await store.position(eventId, "m2")).toBeNull();
       expect(await store.counts(eventId)).toEqual({ queued: 1, active: 1 });
@@ -422,7 +422,43 @@ export function describeQueueStoreContract(
         }),
       ).toBe(false);
 
-      expect(await store.admission(eventId, "m1")).toEqual({ jti: first, expiresAt: at(TTL) });
+      expect(await store.admission(eventId, "m1", T0)).toEqual({ jti: first, expiresAt: at(TTL) });
+      expect(await store.counts(eventId)).toEqual({ queued: 0, active: 1 });
+    });
+
+    test("admission is null once its jti expired, before any reap", async () => {
+      const store = storeWith("admission-expiry:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 1);
+      const [admission] = await store.admit(eventId, request(T0, 1, 10));
+
+      expect(await store.admission(eventId, "m1", at(TTL - 1))).toEqual({
+        jti: admission?.jti,
+        expiresAt: at(TTL),
+      });
+      expect(await store.admission(eventId, "m1", at(TTL))).toBeNull();
+    });
+
+    test("admitImmediately replaces a slot whose admission expired with a fresh jti", async () => {
+      const store = storeWith("admit-now-expired:");
+      const eventId = randomUUID();
+      const first = randomUUID();
+      const second = randomUUID();
+      await store.admitImmediately(eventId, "m1", { now: T0, admissionTtlMs: TTL, jti: first });
+
+      expect(
+        await store.admitImmediately(eventId, "m1", {
+          now: at(TTL),
+          admissionTtlMs: TTL,
+          jti: second,
+        }),
+      ).toBe(true);
+
+      expect(await store.admission(eventId, "m1", at(TTL))).toEqual({
+        jti: second,
+        expiresAt: at(2 * TTL),
+      });
+      expect(await store.isAdmitted(eventId, first, T0)).toBe(false);
       expect(await store.counts(eventId)).toEqual({ queued: 0, active: 1 });
     });
 

@@ -152,8 +152,12 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
   emptied and the hold (the mutation's result) shows as a "Your hold" region: its seats, a
   `role="timer"` countdown to the server's `holdExpiresAt` measured on the visitor's clock (the
   server alone decides expiry), and "Release seats" (`booking.releaseHold`). When the countdown
-  reaches zero the hold is dropped from the page with a "Your hold expired" alert; nothing is
-  sent, as the server already treats it as expired. Refusals are told apart by
+  reaches zero with no checkout in doubt, the hold is dropped from the page with a "Your hold
+  expired" alert; nothing is sent, as the server already treats it as expired. A checkout in doubt
+  at that moment is reconciled first (see Checkout). A failed background refresh of the seat map
+  or the event keeps the last data and the hold controls on screen (with a "could not be
+  refreshed" status), so the hold, the checkout and its key survive a transient error; only a
+  first load without data shows the error instead. Refusals are told apart by
   `hold-failure.ts`: `SEAT_UNAVAILABLE` (listing the taken seats by section, row and number) and
   `LIMIT_EXCEEDED` both arrive as `CONFLICT` and are split by the domain code that starts the
   error message; `BOOKING_BUSY` is `TOO_MANY_REQUESTS`, `FORBIDDEN` asks the buyer to join the queue
@@ -169,7 +173,12 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
   reused for every resubmission of the same contact, so a retry after a network error or lost
   response replays the server's order rather than placing another (ADR 0007). Changing the
   contact, or a new hold (which mounts a new form), starts a new attempt with a new key, so the UI
-  itself never sends one key with two different requests. Refusals are told apart by
+  itself never sends one key with two different requests. An attempt whose request is in flight
+  or whose last answer was ambiguous (network failure or server error) is **unresolved**: at the
+  hold's deadline it is replayed once with the same key instead of the hold being declared
+  expired, because the server answers a replay with the order it already placed even after the
+  hold expired. The order it returns replaces the hold; `HOLD_EXPIRED` ends it; another
+  ambiguous answer keeps the form for a manual retry with the same key. Refusals are told apart by
   `checkout-failure.ts`: `HOLD_EXPIRED` (`PRECONDITION_FAILED`) drops the hold with a "Your hold
   expired before your order was placed" alert; `IDEMPOTENCY_KEY_REUSED` (`CONFLICT`, recognised by
   the domain code starting the message) says the checkout was already submitted with different

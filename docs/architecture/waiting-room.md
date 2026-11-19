@@ -85,18 +85,23 @@ data. Times come from the injected clock (epoch ms), never Redis `TIME`.
   `active` at `now` and gets its `jti` in `admission` and in `admitted` with expiry
   `now + 30 min`; one token is spent per admitted member (an empty queue spends none).
   Re-admitting a member that still holds a slot replaces its old `jti`.
-- **admitImmediately** (queue closed): if the member holds a slot, nothing changes (a new `jti`
-  would revoke the token in use); otherwise `ZREM` from the queue, then the slot, the `admission`
+- **admitImmediately** (queue closed): if the member holds a slot whose admission is still valid,
+  nothing changes (a new `jti` would revoke the token in use); a slot whose admission expired
+  before the reaper ran has its old `jti` removed and is replaced; otherwise `ZREM` from the queue, then the slot, the `admission`
   entry and the `jti` with expiry `now + 30 min`, like one admission of **admit** but without the
   bucket or `maxActive`.
-- **admission** (read-only): the member's `jti` and its expiry, only while it holds a slot;
-  `QueueService.status` uses it for the token.
+- **admission** (read-only): the member's `jti` and its expiry, only while it holds a slot and
+  the admission has not expired by `now`, so an expired admission is never reported or minted
+  into a token while it waits for the reaper; `QueueService.status` uses it for the token, and
+  `QueueService.join` uses it to free an expired slot at once and requeue the session at the back.
 - **heartbeat**: `ZADD XX` of `now`, only if the member holds a slot.
 - **releaseSlot**: removes the slot, the member's `admission` entry and its `jti` from
   `admitted`, in one step.
 - **reap**: frees every slot last seen before the idle cutoff or whose `jti` is missing or expired
-  (the same three removals as releaseSlot), then drops expired `jti`s; it walks `active`, which
-  `maxActive` bounds.
+  (the same three removals as releaseSlot), then drops expired `jti`s; it walks all of `active`.
+  While the queue is open `maxActive` bounds that set; after it closes, immediate admission
+  bypasses `maxActive`, so it is bounded only by the buyers seen in the last 90 s (bounded,
+  batched reaping: ticket 69).
 - **clearEvent**: `DEL` of all six keys of the event in one script, as if no one had joined (the
   bucket starts full again); `admin.resetDemo` uses it for the demo event.
 - **isAdmitted** / **counts**: the `jti`'s `ZSCORE` against `now`; `ZCARD` of `queue` and

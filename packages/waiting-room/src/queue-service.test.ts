@@ -145,10 +145,6 @@ describe("QueueService.join", () => {
     const service = serviceAt(clock);
 
     expect(await service.join(event, "at-close")).toEqual({ status: "ADMISSIBLE" });
-    const afterClose = new Date("2027-05-01T12:00:00.000Z");
-    clock.now = afterClose;
-    expect(await service.join(event, "after-close")).toEqual({ status: "ADMISSIBLE" });
-
     expect(await service.status(event.id, "at-close")).toEqual({
       status: "ADMITTED",
       admission: {
@@ -156,6 +152,11 @@ describe("QueueService.join", () => {
         expiresAt: new Date(event.queueClosesAt.getTime() + ADMISSION_TTL_MS),
       },
     });
+
+    // Within the first admission's 30 minutes, so both slots are still held.
+    const afterClose = new Date("2027-05-01T11:20:00.000Z");
+    clock.now = afterClose;
+    expect(await service.join(event, "after-close")).toEqual({ status: "ADMISSIBLE" });
     expect(await service.status(event.id, "after-close")).toMatchObject({
       status: "ADMITTED",
       admission: { expiresAt: new Date(afterClose.getTime() + ADMISSION_TTL_MS) },
@@ -174,6 +175,24 @@ describe("QueueService.join", () => {
     expect(await service.join(event, "buyer")).toEqual({ status: "ADMISSIBLE" });
 
     expect(await service.status(event.id, "buyer")).toEqual(first);
+  });
+});
+
+describe("QueueService admission expiry before the reaper runs", () => {
+  test("after queueClosesAt, a re-join after the admission expired gets a fresh admission", async () => {
+    const event = schedule();
+    const clock = { now: event.queueClosesAt };
+    const service = serviceAt(clock);
+    await service.join(event, "buyer");
+    const expired = new Date(event.queueClosesAt.getTime() + ADMISSION_TTL_MS);
+    clock.now = expired;
+
+    expect(await service.status(event.id, "buyer")).toEqual({ status: "NOT_QUEUED" });
+    expect(await service.join(event, "buyer")).toEqual({ status: "ADMISSIBLE" });
+    expect(await service.status(event.id, "buyer")).toMatchObject({
+      status: "ADMITTED",
+      admission: { expiresAt: new Date(expired.getTime() + ADMISSION_TTL_MS) },
+    });
   });
 });
 
@@ -268,6 +287,26 @@ describe("QueueService admission (ticker, slots, reaper)", () => {
     await service.releaseSlot(event.id, "s1");
 
     expect(await service.join(event, "s1")).toMatchObject({ status: "QUEUED", position: 2 });
+  });
+
+  test("status does not report an admission that expired before the reaper ran", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 1);
+    await service.admitTick(event, LIMITS);
+
+    clock.now = atOffset(ADMISSION_TTL_MS);
+
+    expect(await service.status(event.id, "s1")).toEqual({ status: "NOT_QUEUED" });
+  });
+
+  test("a session whose admission expired joins again at the back, before the reaper runs", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 4);
+    const [first] = await service.admitTick(event, LIMITS);
+    clock.now = atOffset(ADMISSION_TTL_MS);
+
+    expect(await service.join(event, "s1")).toMatchObject({ status: "QUEUED", position: 2 });
+    expect(await service.isAdmitted(event.id, first?.jti ?? "")).toBe(false);
   });
 
   test("admits no one before onSaleAt, then admits the pre-queue in its random order", async () => {

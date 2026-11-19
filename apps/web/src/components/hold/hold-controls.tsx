@@ -85,12 +85,15 @@ function ActiveHold({
   const trpc = useTRPC();
   const release = useMutation(trpc.booking.releaseHold.mutationOptions({ onSuccess: onReleased }));
   const remainingMs = useRemainingMs(hold.holdExpiresAt);
+  // An unresolved checkout may already have placed the order, so the deadline waits for the
+  // checkout's answer instead of declaring the seats released (see CheckoutForm).
+  const [checkoutUnresolved, setCheckoutUnresolved] = useState(false);
 
   useEffect(() => {
-    if (remainingMs === 0) {
+    if (remainingMs === 0 && !checkoutUnresolved) {
       onExpired();
     }
-  }, [remainingMs, onExpired]);
+  }, [remainingMs, checkoutUnresolved, onExpired]);
 
   return (
     <section aria-label="Your hold" className="flex flex-col gap-3 rounded-xl border p-4">
@@ -119,7 +122,13 @@ function ActiveHold({
           The seats could not be released. Please try again.
         </p>
       ) : null}
-      <CheckoutForm holdId={hold.id} onPlaced={onPlaced} onHoldExpired={onCheckoutExpired} />
+      <CheckoutForm
+        holdId={hold.id}
+        holdExpired={remainingMs === 0}
+        onPlaced={onPlaced}
+        onHoldExpired={onCheckoutExpired}
+        onUnresolvedChange={setCheckoutUnresolved}
+      />
     </section>
   );
 }

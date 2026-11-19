@@ -26,12 +26,14 @@ export interface QueuedView {
 
 /**
  * `NOT_OPEN` before the queue opens (nothing queued, no one admitted); `ADMISSIBLE` once the queue
- * has closed: the buyer may proceed at once (spec: "join admits immediately").
+ * has closed: the buyer may proceed at once (spec: "join admits immediately"). `ADMITTED` while
+ * the queue is open: the session already holds a slot and keeps it and its admission.
  */
 export type JoinResult =
   | QueuedView
   | { readonly status: "NOT_OPEN"; readonly queueOpensAt: Date }
-  | { readonly status: "ADMISSIBLE" };
+  | { readonly status: "ADMISSIBLE" }
+  | { readonly status: "ADMITTED" };
 
 /** `ADMITTED`: the session holds one of the event's active slots. */
 export type StatusResult =
@@ -98,7 +100,10 @@ export function createQueueService(deps: QueueServiceDeps): QueueService {
         now.getTime() < event.onSaleAt.getTime()
           ? { kind: "PRE_QUEUE", score: deps.random.next() }
           : { kind: "SEQUENCE" };
-      return queued(await deps.store.join(event.id, sessionId, score));
+      // A refresh, second tab or retry by an admitted session must not queue it again: the next
+      // tick would re-admit it with a new jti and revoke the admission it is using.
+      const outcome = await deps.store.join(event.id, sessionId, score);
+      return outcome.status === "ADMITTED" ? outcome : queued(outcome.position);
     },
 
     async status(eventId, sessionId) {

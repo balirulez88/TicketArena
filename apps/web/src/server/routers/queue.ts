@@ -27,6 +27,8 @@ const joinOutput = z.discriminatedUnion("status", [
   // A result, not an error: the page shows when the queue opens.
   z.object({ status: z.literal("NOT_OPEN"), queueOpensAt: z.date() }),
   z.object({ status: z.literal("ADMISSIBLE") }),
+  // The session already holds a slot; the join changed nothing.
+  z.object({ status: z.literal("ADMITTED") }),
 ]);
 
 const statusOutput = z.discriminatedUnion("status", [

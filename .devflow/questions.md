@@ -290,3 +290,19 @@ ADR 0008 says 'outside the queue window the policy admits immediately'. Edit or 
 Assumed: Left the accepted ADR unchanged; it now reads as 'after the queue closes' per the ticket 28 answer. A human may add a clarifying note or a superseding ADR
 
 Answer: (open)
+
+## 2026-11-19 07:26 ticket 62
+
+What does join return for a slot holder, and in which order are phase and slot checked?
+
+Assumed: { status: 'ADMITTED' } (QueueStore.join returns JoinOutcome QUEUED|ADMITTED); the phase is checked first, so NOT_OPEN and ADMISSIBLE answer without looking at slots and write nothing; only an open queue answers ADMITTED
+
+Answer: (open)
+
+## 2026-11-19 07:26 ticket 62
+
+Does a join by a slot holder count as a heartbeat?
+
+Assumed: No: lastSeenAt is unchanged; status polls and admitted calls keep the slot alive
+
+Answer: (open)

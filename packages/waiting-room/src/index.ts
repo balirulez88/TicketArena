@@ -6,6 +6,7 @@ export type {
   AdmitRequest,
   Clock,
   EventSchedule,
+  JoinOutcome,
   JoinScore,
   QueueCounts,
   QueuePhase,

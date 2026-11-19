@@ -25,11 +25,18 @@ export function queueKeys(prefix: string, eventId: string) {
   };
 }
 
+// A member holding a slot is left alone: queuing it again would let the ticker re-admit it and
+// replace the jti the buyer is using. The check shares the script with the queue write, so a tick
+// cannot admit the member between them and leave it both admitted and queued.
 // The ZSCORE guard draws a sequence number only for a new member, so re-joins leave no gaps;
 // ZADD NX is what guarantees an existing score is never overwritten. INCR, ZADD and ZRANK run in
 // one script, so concurrent joins get distinct, increasing scores and an exact position.
-// KEYS: queue, sequence. ARGV: member, pre-queue score ('' for a later join). Returns the rank.
+// KEYS: queue, sequence, active. ARGV: member, pre-queue score ('' for a later join).
+// Returns the rank, or -1 when the member holds a slot.
 export const JOIN_SCRIPT = `
+if redis.call('ZSCORE', KEYS[3], ARGV[1]) then
+  return -1
+end
 if not redis.call('ZSCORE', KEYS[1], ARGV[1]) then
   local score = ARGV[2]
   if score == '' then
@@ -207,12 +214,15 @@ export function createScriptedQueueStore(
   return {
     async join(eventId, member, score) {
       const keys = keysOf(eventId);
-      const rank = await run(
+      const rank = toInteger(
+        await run(
+          "join",
+          [keys.queue, keys.sequence, keys.active],
+          [member, joinScoreArgument(score)],
+        ),
         "join",
-        [keys.queue, keys.sequence],
-        [member, joinScoreArgument(score)],
       );
-      return toInteger(rank, "join") + 1;
+      return rank < 0 ? { status: "ADMITTED" } : { status: "QUEUED", position: rank + 1 };
     },
 
     position,

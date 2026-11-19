@@ -218,6 +218,28 @@ describe("QueueService admission (ticker, slots, reaper)", () => {
     }
   });
 
+  test("a session holding a slot joins again: ADMITTED, still one slot, its jti still valid after more ticks", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 4);
+    const [first] = await service.admitTick(event, LIMITS);
+
+    expect(await service.join(event, "s1")).toEqual({ status: "ADMITTED" });
+
+    clock.now = atOffset(1_000);
+    expect((await service.admitTick(event, LIMITS)).map((next) => next.sessionId)).toEqual(["s4"]);
+    expect(await service.isAdmitted(event.id, first?.jti ?? "")).toBe(true);
+    expect(await service.counts(event.id)).toEqual({ queued: 0, active: 4 });
+  });
+
+  test("a session whose slot was freed joins again at the back of the queue", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 4);
+    await service.admitTick(event, LIMITS);
+    await service.releaseSlot(event.id, "s1");
+
+    expect(await service.join(event, "s1")).toMatchObject({ status: "QUEUED", position: 2 });
+  });
+
   test("admits no one before onSaleAt, then admits the pre-queue in its random order", async () => {
     // Admitting during the pre-queue would serve early arrivals first and make the random
     // pre-queue order (ADR 0008) meaningless.

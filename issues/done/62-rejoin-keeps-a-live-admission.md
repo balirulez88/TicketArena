@@ -4,7 +4,9 @@
 
 **Blocked by:** 30
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-19 on devflow/run-202611182140 (run 202611182140)
 
 - [ ] `join` by a session that holds a slot returns an admitted result, adds nothing to the queue and leaves its `jti` and slot unchanged; the check and the queue write are one atomic script, so a tick running at the same time cannot admit the session twice.
 - [ ] A contract test proves it on both adapters: admit a member, join it again, run more ticks; its original `jti` is still admitted and it holds exactly one slot.

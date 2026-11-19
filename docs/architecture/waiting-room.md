@@ -26,10 +26,16 @@ gating `holdSeats` with it arrive with ticket 31; until then nothing is gated by
 | `createScheduleAdmissionPolicy`            | MVP policy: `NOT_OPEN` before `queueOpensAt`, `ACTIVE` from it (inclusive) to `queueClosesAt` (exclusive), `CLOSED` from then on                    |
 | `Clock`, `Random`, `newId`                 | Injected; the module never reads the system clock, `Math.random` or a UUID source. `Random.next()` returns `[0, 1)`; `newId` makes admission `jti`s |
 
-`join` results: before `queueOpensAt` `{ status: "NOT_OPEN", queueOpensAt }` (nothing is queued
+`QueueStore.join` returns a `JoinOutcome`: `{ status: "QUEUED", position }` or
+`{ status: "ADMITTED" }` when the member holds a slot.
+
+`QueueService.join` results: before `queueOpensAt` `{ status: "NOT_OPEN", queueOpensAt }` (nothing is queued
 and no one is admitted; the page can say when to come back); from `queueClosesAt` on
 `{ status: "ADMISSIBLE" }` (immediate admission eligibility; nothing is queued); in the window
-`[queueOpensAt, queueClosesAt)` `{ status: "QUEUED", position, etaSeconds }`. `status`
+`[queueOpensAt, queueClosesAt)` `{ status: "QUEUED", position, etaSeconds }`, or
+`{ status: "ADMITTED" }` when the session already holds a slot (nothing is queued; its slot and
+`jti` are unchanged). The phase is checked first, so outside the window `NOT_OPEN` and
+`ADMISSIBLE` are answered without looking at slots. `status`
 heartbeats the session's slot and returns `ADMITTED` when it holds one, else `QUEUED` with position
 and ETA, or `NOT_QUEUED`. `leave` leaves the queue and frees the slot in one atomic step; `{ left }` is true if
 either happened. `admitTick` admits no one before the event's `onSaleAt`. ETA = `ceil(position / admitRatePerSecond)`; the web app assumes 10 admissions
@@ -60,8 +66,10 @@ adapters share the scripts, the key layout and the method mapping (`createScript
 `src/queue-scripts.ts`) and differ only in how a script is sent, so they read and write the same
 data. Times come from the injected clock (epoch ms), never Redis `TIME`.
 
-- **join**: if the member has no score, its score is the given pre-queue value, or
-  `1 + INCR seq` for a later join; then `ZADD NX`; returns the member's rank.
+- **join**: if the member holds a slot (`ZSCORE active`), returns `-1` (`ADMITTED`) and writes
+  nothing; otherwise, if the member has no score, its score is the given pre-queue value, or
+  `1 + INCR seq` for a later join; then `ZADD NX`; returns the member's rank. The slot check and
+  the queue write are one script, so a tick cannot admit the member between them.
 - **leave**: `ZREM` from the queue, then frees the slot and revokes its `jti` like
   **releaseSlot**, in one script, so the ticker cannot admit the member between the two; returns
   whether the member was queued or held a slot.
@@ -90,7 +98,9 @@ the server's script cache lacks it. Its errors name the command and the cause, n
 
 `describeQueueStoreContract` (`src/queue-store-contract.ts`, test-only, not exported) is the
 `QueueStore` contract (ADR 0010, AT-42): positions, pre-queue ahead of later joins, FIFO later
-joins, `ZADD NX` re-joins, leave, prefix isolation and a race of concurrent joins on separate
+joins, `ZADD NX` re-joins, a re-join by an admitted member (`ADMITTED`, same `jti`, one slot,
+also racing a ticker on another connection) and by a member whose slot was freed (back of the
+queue), leave, prefix isolation and a race of concurrent joins on separate
 connections; admission order and `jti`s, bucket burst and refill, the `maxActive` cap, heartbeat,
 slot release and reaping with revocation, admission expiry, and a race of concurrent admit
 ticks on separate connections that never exceeds the bucket or `maxActive` (AT-38). `redis-queue-store.test.ts` runs it against real Redis and
@@ -107,6 +117,10 @@ CI start. Adapter-specific tests cover the stored key layout and scores, and for
   FIFO (AT-36).
 - **Refresh keeps the position:** `ZADD NX` never overwrites a score, and a re-join draws no new
   sequence number (AT-37). A second tab of the same session is the same member.
+- **Re-joining keeps a live admission:** `join` by a session that holds a slot (a refresh, a
+  second tab, a client retry) answers `ADMITTED` and adds nothing to the queue. Queuing it again
+  would let the next tick re-admit it, replacing the `jti` the buyer is using. A session whose
+  slot was freed (leave, order placed, reaping) holds none, so it joins at the back like anyone.
 - **One member per session:** the member is `principal.sessionId`, the future admission token's
   `sub`. A guest who clears cookies is a new session and joins at the back.
 - **Admission is bounded (AT-38):** admissions never exceed `admitRate` per second (burst
@@ -129,7 +143,7 @@ CI start. Adapter-specific tests cover the stored key layout and scores, and for
 `queue.join`, `queue.status` and `queue.leave` take `{ eventId }` (zod `uuid`; a malformed id is
 `BAD_REQUEST` naming `eventId`). `join` reads the event schedule from Postgres (`NOT_FOUND` for an
 unknown event) and hands it to the policy; `NOT_OPEN` is returned to the client as a result
-(with `queueOpensAt`), not as an error. The service is built per request from the context:
+(with `queueOpensAt`), not as an error, and so is `ADMITTED` for a session that holds a slot. The service is built per request from the context:
 `ctx.now`, `ctx.random` (`Math.random` at the app boundary), `randomUUID` for `newId` and
 `ctx.queueStore()`. `booking.holdSeats` and `booking.placeOrder` build the same service for the
 heartbeat and the slot release.

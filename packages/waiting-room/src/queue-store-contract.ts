@@ -23,14 +23,15 @@ export function describeQueueStoreContract(
   harness: QueueStoreContractHarness,
 ): void {
   const storeWith = (namespace: string) => harness.store(`${filePrefix}${namespace}`);
+  const queuedAt = (position: number) => ({ status: "QUEUED", position });
 
   describe(`QueueStore contract: ${adapter}`, () => {
     test("join returns the 1-based position and position reads it back", async () => {
       const store = storeWith("position:");
       const eventId = randomUUID();
 
-      expect(await store.join(eventId, "a", { kind: "SEQUENCE" })).toBe(1);
-      expect(await store.join(eventId, "b", { kind: "SEQUENCE" })).toBe(2);
+      expect(await store.join(eventId, "a", { kind: "SEQUENCE" })).toEqual(queuedAt(1));
+      expect(await store.join(eventId, "b", { kind: "SEQUENCE" })).toEqual(queuedAt(2));
 
       expect(await store.position(eventId, "b")).toBe(2);
       expect(await store.position(eventId, "nobody")).toBeNull();
@@ -57,8 +58,10 @@ export function describeQueueStoreContract(
       await store.join(eventId, "a", { kind: "PRE_QUEUE", score: 0.9 });
       await store.join(eventId, "b", { kind: "PRE_QUEUE", score: 0.5 });
 
-      expect(await store.join(eventId, "a", { kind: "PRE_QUEUE", score: 0.1 })).toBe(2);
-      expect(await store.join(eventId, "a", { kind: "SEQUENCE" })).toBe(2);
+      expect(await store.join(eventId, "a", { kind: "PRE_QUEUE", score: 0.1 })).toEqual(
+        queuedAt(2),
+      );
+      expect(await store.join(eventId, "a", { kind: "SEQUENCE" })).toEqual(queuedAt(2));
     });
 
     test("leave removes the member and reports whether it was queued", async () => {
@@ -78,7 +81,7 @@ export function describeQueueStoreContract(
       await storeWith("one:").join(eventId, "a", { kind: "SEQUENCE" });
 
       expect(await storeWith("two:").position(eventId, "a")).toBeNull();
-      expect(await storeWith("two:").join(eventId, "b", { kind: "SEQUENCE" })).toBe(1);
+      expect(await storeWith("two:").join(eventId, "b", { kind: "SEQUENCE" })).toEqual(queuedAt(1));
     });
 
     test("concurrent joins on separate connections get distinct consecutive positions", async () => {
@@ -86,9 +89,10 @@ export function describeQueueStoreContract(
       const { stores, close } = await harness.independentStores(`${filePrefix}race:`, 8);
       try {
         const positions = await Promise.all(
-          Array.from({ length: 40 }, (_, index) => {
+          Array.from({ length: 40 }, async (_, index) => {
             const store = stores[index % stores.length] ?? storeWith("race:");
-            return store.join(eventId, `buyer-${index}`, { kind: "SEQUENCE" });
+            const joined = await store.join(eventId, `buyer-${index}`, { kind: "SEQUENCE" });
+            return joined.status === "QUEUED" ? joined.position : 0;
           }),
         );
 
@@ -239,6 +243,79 @@ export function describeQueueStoreContract(
           for (const admission of admitted) {
             expect(await leaver.isAdmitted(eventId, admission.jti, T0)).toBe(false);
           }
+        }
+      } finally {
+        close();
+      }
+    });
+
+    test("join by a member that holds a slot answers ADMITTED and keeps its jti and its one slot", async () => {
+      const store = storeWith("rejoin-admitted:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 2);
+      const [admission] = await store.admit(eventId, request(T0, 1, 10));
+      const jti = admission?.jti ?? "";
+
+      expect(await store.join(eventId, "m1", { kind: "SEQUENCE" })).toEqual({ status: "ADMITTED" });
+      expect(await store.join(eventId, "m1", { kind: "PRE_QUEUE", score: 0.1 })).toEqual({
+        status: "ADMITTED",
+      });
+
+      expect(await store.position(eventId, "m1")).toBeNull();
+      expect(await store.counts(eventId)).toEqual({ queued: 1, active: 1 });
+      // More ticks admit m2 and then find an empty queue: m1 is never re-admitted with a new jti.
+      const later = [
+        ...(await store.admit(eventId, request(at(1_000), 1, 10))),
+        ...(await store.admit(eventId, request(at(2_000), 1, 10))),
+      ];
+      expect(later.map((next) => next.sessionId)).toEqual(["m2"]);
+      expect(await store.isAdmitted(eventId, jti, at(2_000))).toBe(true);
+      expect(await store.counts(eventId)).toEqual({ queued: 0, active: 2 });
+      expect(await store.releaseSlot(eventId, "m1")).toBe(true);
+      expect(await store.releaseSlot(eventId, "m1")).toBe(false);
+    });
+
+    test("a member whose slot was freed (leave, release, reap) joins again at the back", async () => {
+      const store = storeWith("rejoin-freed:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 4);
+      await store.admit(eventId, request(T0, 3, 10));
+      await store.leave(eventId, "m1");
+      await store.releaseSlot(eventId, "m2");
+      await store.heartbeat(eventId, "m3", at(TTL));
+      expect(await store.reap(eventId, { now: at(TTL), idleBefore: at(TTL - 5_000) })).toEqual([
+        "m3",
+      ]);
+
+      expect(await store.join(eventId, "m2", { kind: "SEQUENCE" })).toEqual(queuedAt(2));
+      expect(await store.join(eventId, "m1", { kind: "SEQUENCE" })).toEqual(queuedAt(3));
+      expect(await store.join(eventId, "m3", { kind: "SEQUENCE" })).toEqual(queuedAt(4));
+      expect(await store.counts(eventId)).toEqual({ queued: 4, active: 0 });
+    });
+
+    test("a join racing a ticker on another connection never queues an admitted member again", async () => {
+      // The slot check and the queue write are one script: whichever runs first, the member ends
+      // admitted once and not queued. Separate commands would let the ticker admit in between.
+      const { stores, close } = await harness.independentStores(`${filePrefix}join-race:`, 2);
+      const [joiner, ticker] = stores;
+      if (joiner === undefined || ticker === undefined) {
+        throw new Error("independentStores returned fewer than two stores");
+      }
+      try {
+        for (let round = 0; round < 25; round += 1) {
+          const eventId = randomUUID();
+          await joiner.join(eventId, "m", { kind: "SEQUENCE" });
+
+          const [, admitted] = await Promise.all([
+            joiner.join(eventId, "m", { kind: "SEQUENCE" }),
+            ticker.admit(eventId, request(T0, 1, 10)),
+          ]);
+
+          expect(admitted).toHaveLength(1);
+          expect(await joiner.counts(eventId)).toEqual({ queued: 0, active: 1 });
+          expect(await joiner.join(eventId, "m", { kind: "SEQUENCE" })).toEqual({
+            status: "ADMITTED",
+          });
         }
       } finally {
         close();

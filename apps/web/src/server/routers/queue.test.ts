@@ -220,6 +220,31 @@ describe("admission slots", () => {
     expect(await ticker.counts(eventId)).toEqual({ queued: 0, active: 1 });
   });
 
+  test("join by an admitted session returns ADMITTED and keeps its admission", async () => {
+    const { eventId, afterOnSale } = await scheduledEvent();
+    const alice = guest();
+    const { ticker, jti } = await admitted(eventId, afterOnSale, alice);
+
+    expect(await caller(alice, afterOnSale).queue.join({ eventId })).toEqual({
+      status: "ADMITTED",
+    });
+
+    expect(await ticker.isAdmitted(eventId, jti)).toBe(true);
+    expect(await ticker.counts(eventId)).toEqual({ queued: 0, active: 1 });
+  });
+
+  test("after leaving, an admitted session joins again and is queued", async () => {
+    const { eventId, afterOnSale } = await scheduledEvent();
+    const alice = guest();
+    await admitted(eventId, afterOnSale, alice);
+    await caller(alice, afterOnSale).queue.leave({ eventId });
+
+    expect(await caller(alice, afterOnSale).queue.join({ eventId })).toMatchObject({
+      status: "QUEUED",
+      position: 1,
+    });
+  });
+
   test("AT-39: leave frees the slot and revokes the admission", async () => {
     const { eventId, afterOnSale } = await scheduledEvent();
     const alice = guest();

@@ -412,6 +412,8 @@ Principle: **replaying processed messages is acceptable; silently skipping unpro
     error), queues nothing and admits no one: an early admission would still be valid at
     `onSaleAt` and skip the randomized pre-queue.
   - While it is active, `join` queues the buyer (in the pre-queue before `onSaleAt`).
+    A session that already holds a slot is not queued again: `join` answers `ADMITTED` and its
+    slot and `jti` stay as they are (re-queuing would let the ticker replace the `jti`).
   - Only after the queue closes does `join` admit immediately (a token is still issued).
 - Redis per event (all mutations are Lua scripts, all keys carry a configurable prefix):
   - queue ZSET: score is a random value in `[0, 1)` for joins before `onSaleAt` (injected

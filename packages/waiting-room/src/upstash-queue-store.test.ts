@@ -51,11 +51,17 @@ describe("UpstashQueueStore", () => {
   test("scripts still run after the server's script cache is flushed (EVALSHA falls back to EVAL)", async () => {
     const store = storeWith(`${upstash.prefix}flush:`);
     const eventId = randomUUID();
-    expect(await store.join(eventId, "a", { kind: "SEQUENCE" })).toBe(1);
+    expect(await store.join(eventId, "a", { kind: "SEQUENCE" })).toEqual({
+      status: "QUEUED",
+      position: 1,
+    });
 
     await upstash.command(["SCRIPT", "FLUSH"]);
 
-    expect(await store.join(eventId, "b", { kind: "SEQUENCE" })).toBe(2);
+    expect(await store.join(eventId, "b", { kind: "SEQUENCE" })).toEqual({
+      status: "QUEUED",
+      position: 2,
+    });
     expect(await store.leave(eventId, "a")).toBe(true);
   });
 

@@ -25,12 +25,24 @@ export type JoinScore =
   | { readonly kind: "SEQUENCE" };
 
 /**
+ * What a store join did: queued the member (or found it queued) at a 1-based `position`, or
+ * found it holding a slot and left everything as it was (`ADMITTED`).
+ */
+export type JoinOutcome =
+  | { readonly status: "QUEUED"; readonly position: number }
+  | { readonly status: "ADMITTED" };
+
+/**
  * Per-event queue storage. Every mutation is atomic, so concurrent joins never share a sequence
  * number and a re-join never moves a member (`ZADD NX`). Positions are 1-based.
  */
 export interface QueueStore {
-  /** Adds the member unless already queued and returns its current position. */
-  join(eventId: string, member: string, score: JoinScore): Promise<number>;
+  /**
+   * Answers `ADMITTED` without touching the queue, the slot or the `jti` when the member holds a
+   * slot; otherwise adds the member unless already queued and returns its current position. The
+   * slot check and the queue write are one atomic step.
+   */
+  join(eventId: string, member: string, score: JoinScore): Promise<JoinOutcome>;
   /** The member's position, or `null` when it is not queued. */
   position(eventId: string, member: string): Promise<number | null>;
   /**

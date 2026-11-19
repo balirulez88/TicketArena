@@ -162,7 +162,7 @@ describe("admin.snapshot", () => {
     await counters.increment("race_lost", event.id);
     // Three in the queue, one admitted: two queued, and with the holder two active shoppers.
     for (const member of ["q1", "q2", "q3"]) {
-      await queueStore().join(event.id, member, { kind: "SEQUENCE" });
+      await queueStore().join(event.id, member, { kind: "SEQUENCE" }, NOW);
     }
     await queueStore().admit(event.id, {
       now: NOW,

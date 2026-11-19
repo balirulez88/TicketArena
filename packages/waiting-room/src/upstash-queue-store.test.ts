@@ -4,6 +4,8 @@ import { describe, expect, test } from "vitest";
 import { createUpstashQueueStore } from "./index";
 import { describeQueueStoreContract } from "./queue-store-contract";
 
+const T0 = new Date("2027-05-01T10:00:00.000Z");
+
 const upstash = setupTestUpstash();
 
 function storeWith(prefix: string, token = upstash.token) {
@@ -27,10 +29,10 @@ describe("UpstashQueueStore", () => {
     const store = storeWith(namespace);
     const eventId = randomUUID();
 
-    await store.join(eventId, "early", { kind: "PRE_QUEUE", score: 0.25 });
-    await store.join(eventId, "late-1", { kind: "SEQUENCE" });
-    await store.join(eventId, "late-1", { kind: "SEQUENCE" });
-    await store.join(eventId, "late-2", { kind: "SEQUENCE" });
+    await store.join(eventId, "early", { kind: "PRE_QUEUE", score: 0.25 }, T0);
+    await store.join(eventId, "late-1", { kind: "SEQUENCE" }, T0);
+    await store.join(eventId, "late-1", { kind: "SEQUENCE" }, T0);
+    await store.join(eventId, "late-2", { kind: "SEQUENCE" }, T0);
 
     const queueKey = `${namespace}waiting-room:{${eventId}}:queue`;
     expect(await upstash.command(["ZRANGE", queueKey, 0, -1, "WITHSCORES"])).toEqual([
@@ -51,14 +53,14 @@ describe("UpstashQueueStore", () => {
   test("scripts still run after the server's script cache is flushed (EVALSHA falls back to EVAL)", async () => {
     const store = storeWith(`${upstash.prefix}flush:`);
     const eventId = randomUUID();
-    expect(await store.join(eventId, "a", { kind: "SEQUENCE" })).toEqual({
+    expect(await store.join(eventId, "a", { kind: "SEQUENCE" }, T0)).toEqual({
       status: "QUEUED",
       position: 1,
     });
 
     await upstash.command(["SCRIPT", "FLUSH"]);
 
-    expect(await store.join(eventId, "b", { kind: "SEQUENCE" })).toEqual({
+    expect(await store.join(eventId, "b", { kind: "SEQUENCE" }, T0)).toEqual({
       status: "QUEUED",
       position: 2,
     });

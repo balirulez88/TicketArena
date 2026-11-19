@@ -25,17 +25,30 @@ export function queueKeys(prefix: string, eventId: string) {
   };
 }
 
-// A member holding a slot is left alone: queuing it again would let the ticker re-admit it and
-// replace the jti the buyer is using. The check shares the script with the queue write, so a tick
-// cannot admit the member between them and leave it both admitted and queued.
+// A member holding a slot with a valid admission is left alone: queuing it again would let the
+// ticker re-admit it and replace the jti the buyer is using. A slot whose admission expired (the
+// reaper has not run yet) is freed and its jti revoked, so the member queues at the back like any
+// freed session. The expiry check, the removal and the queue write share one script: a tick cannot
+// admit the member between them and leave it both admitted and queued, and a delayed join cannot
+// free a slot the ticker granted after that join read the old one (the PR #12 review race).
 // The ZSCORE guard draws a sequence number only for a new member, so re-joins leave no gaps;
 // ZADD NX is what guarantees an existing score is never overwritten. INCR, ZADD and ZRANK run in
 // one script, so concurrent joins get distinct, increasing scores and an exact position.
-// KEYS: queue, sequence, active. ARGV: member, pre-queue score ('' for a later join).
-// Returns the rank, or -1 when the member holds a slot.
+// KEYS: queue, sequence, active, admission, admitted.
+// ARGV: member, pre-queue score ('' for a later join), now ms.
+// Returns the rank, or -1 when the member holds a slot with a valid admission.
 export const JOIN_SCRIPT = `
 if redis.call('ZSCORE', KEYS[3], ARGV[1]) then
-  return -1
+  local jti = redis.call('HGET', KEYS[4], ARGV[1])
+  local expires = jti and redis.call('ZSCORE', KEYS[5], jti)
+  if expires and tonumber(expires) > tonumber(ARGV[3]) then
+    return -1
+  end
+  redis.call('ZREM', KEYS[3], ARGV[1])
+  if jti then
+    redis.call('HDEL', KEYS[4], ARGV[1])
+    redis.call('ZREM', KEYS[5], jti)
+  end
 end
 if not redis.call('ZSCORE', KEYS[1], ARGV[1]) then
   local score = ARGV[2]
@@ -258,13 +271,13 @@ export function createScriptedQueueStore(
   };
 
   return {
-    async join(eventId, member, score) {
+    async join(eventId, member, score, now) {
       const keys = keysOf(eventId);
       const rank = toInteger(
         await run(
           "join",
-          [keys.queue, keys.sequence, keys.active],
-          [member, joinScoreArgument(score)],
+          [keys.queue, keys.sequence, ...slotKeys(eventId)],
+          [member, joinScoreArgument(score), String(now.getTime())],
         ),
         "join",
       );

@@ -113,19 +113,11 @@ export function createQueueService(deps: QueueServiceDeps): QueueService {
           ? { kind: "PRE_QUEUE", score: deps.random.next() }
           : { kind: "SEQUENCE" };
       // A refresh, second tab or retry by an admitted session must not queue it again: the next
-      // tick would re-admit it with a new jti and revoke the admission it is using.
-      const outcome = await deps.store.join(event.id, sessionId, score);
-      if (outcome.status === "QUEUED") {
-        return queued(outcome.position);
-      }
-      if ((await deps.store.admission(event.id, sessionId, now)) !== null) {
-        return outcome;
-      }
-      // The slot's admission expired and the reaper has not freed it yet: free it now, so the
-      // session rejoins at the back like any freed session instead of waiting for the next reap.
-      await deps.store.releaseSlot(event.id, sessionId);
-      const rejoined = await deps.store.join(event.id, sessionId, score);
-      return rejoined.status === "QUEUED" ? queued(rejoined.position) : rejoined;
+      // tick would re-admit it with a new jti and revoke the admission it is using. A slot whose
+      // admission expired is freed inside the same atomic join (see QueueStore.join), never by a
+      // separate release that could free a slot granted in between.
+      const outcome = await deps.store.join(event.id, sessionId, score, now);
+      return outcome.status === "QUEUED" ? queued(outcome.position) : outcome;
     },
 
     async status(eventId, sessionId) {

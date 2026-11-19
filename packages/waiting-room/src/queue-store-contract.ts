@@ -24,14 +24,16 @@ export function describeQueueStoreContract(
 ): void {
   const storeWith = (namespace: string) => harness.store(`${filePrefix}${namespace}`);
   const queuedAt = (position: number) => ({ status: "QUEUED", position });
+  const T0 = new Date("2027-05-01T10:00:00.000Z");
+  const at = (ms: number) => new Date(T0.getTime() + ms);
 
   describe(`QueueStore contract: ${adapter}`, () => {
     test("join returns the 1-based position and position reads it back", async () => {
       const store = storeWith("position:");
       const eventId = randomUUID();
 
-      expect(await store.join(eventId, "a", { kind: "SEQUENCE" })).toEqual(queuedAt(1));
-      expect(await store.join(eventId, "b", { kind: "SEQUENCE" })).toEqual(queuedAt(2));
+      expect(await store.join(eventId, "a", { kind: "SEQUENCE" }, T0)).toEqual(queuedAt(1));
+      expect(await store.join(eventId, "b", { kind: "SEQUENCE" }, T0)).toEqual(queuedAt(2));
 
       expect(await store.position(eventId, "b")).toBe(2);
       expect(await store.position(eventId, "nobody")).toBeNull();
@@ -41,10 +43,10 @@ export function describeQueueStoreContract(
       const store = storeWith("order:");
       const eventId = randomUUID();
 
-      await store.join(eventId, "early-high", { kind: "PRE_QUEUE", score: 0.9 });
-      await store.join(eventId, "late-1", { kind: "SEQUENCE" });
-      await store.join(eventId, "early-low", { kind: "PRE_QUEUE", score: 0.25 });
-      await store.join(eventId, "late-2", { kind: "SEQUENCE" });
+      await store.join(eventId, "early-high", { kind: "PRE_QUEUE", score: 0.9 }, T0);
+      await store.join(eventId, "late-1", { kind: "SEQUENCE" }, T0);
+      await store.join(eventId, "early-low", { kind: "PRE_QUEUE", score: 0.25 }, T0);
+      await store.join(eventId, "late-2", { kind: "SEQUENCE" }, T0);
 
       expect(await store.position(eventId, "early-low")).toBe(1);
       expect(await store.position(eventId, "early-high")).toBe(2);
@@ -55,20 +57,20 @@ export function describeQueueStoreContract(
     test("a second join keeps the first score (ZADD NX)", async () => {
       const store = storeWith("nx:");
       const eventId = randomUUID();
-      await store.join(eventId, "a", { kind: "PRE_QUEUE", score: 0.9 });
-      await store.join(eventId, "b", { kind: "PRE_QUEUE", score: 0.5 });
+      await store.join(eventId, "a", { kind: "PRE_QUEUE", score: 0.9 }, T0);
+      await store.join(eventId, "b", { kind: "PRE_QUEUE", score: 0.5 }, T0);
 
-      expect(await store.join(eventId, "a", { kind: "PRE_QUEUE", score: 0.1 })).toEqual(
+      expect(await store.join(eventId, "a", { kind: "PRE_QUEUE", score: 0.1 }, T0)).toEqual(
         queuedAt(2),
       );
-      expect(await store.join(eventId, "a", { kind: "SEQUENCE" })).toEqual(queuedAt(2));
+      expect(await store.join(eventId, "a", { kind: "SEQUENCE" }, T0)).toEqual(queuedAt(2));
     });
 
     test("leave removes the member and reports whether it was queued", async () => {
       const store = storeWith("leave:");
       const eventId = randomUUID();
-      await store.join(eventId, "a", { kind: "SEQUENCE" });
-      await store.join(eventId, "b", { kind: "SEQUENCE" });
+      await store.join(eventId, "a", { kind: "SEQUENCE" }, T0);
+      await store.join(eventId, "b", { kind: "SEQUENCE" }, T0);
 
       expect(await store.leave(eventId, "a")).toBe(true);
       expect(await store.leave(eventId, "a")).toBe(false);
@@ -78,10 +80,12 @@ export function describeQueueStoreContract(
 
     test("stores with different prefixes do not share a queue", async () => {
       const eventId = randomUUID();
-      await storeWith("one:").join(eventId, "a", { kind: "SEQUENCE" });
+      await storeWith("one:").join(eventId, "a", { kind: "SEQUENCE" }, T0);
 
       expect(await storeWith("two:").position(eventId, "a")).toBeNull();
-      expect(await storeWith("two:").join(eventId, "b", { kind: "SEQUENCE" })).toEqual(queuedAt(1));
+      expect(await storeWith("two:").join(eventId, "b", { kind: "SEQUENCE" }, T0)).toEqual(
+        queuedAt(1),
+      );
     });
 
     test("concurrent joins on separate connections get distinct consecutive positions", async () => {
@@ -91,7 +95,7 @@ export function describeQueueStoreContract(
         const positions = await Promise.all(
           Array.from({ length: 40 }, async (_, index) => {
             const store = stores[index % stores.length] ?? storeWith("race:");
-            const joined = await store.join(eventId, `buyer-${index}`, { kind: "SEQUENCE" });
+            const joined = await store.join(eventId, `buyer-${index}`, { kind: "SEQUENCE" }, T0);
             return joined.status === "QUEUED" ? joined.position : 0;
           }),
         );
@@ -106,8 +110,6 @@ export function describeQueueStoreContract(
   });
 
   describe(`QueueStore contract (admission and slots): ${adapter}`, () => {
-    const T0 = new Date("2027-05-01T10:00:00.000Z");
-    const at = (ms: number) => new Date(T0.getTime() + ms);
     const TTL = 30 * 60_000;
     const request = (
       now: Date,
@@ -124,7 +126,7 @@ export function describeQueueStoreContract(
 
     async function queueOf(store: QueueStore, eventId: string, count: number) {
       for (let index = 1; index <= count; index += 1) {
-        await store.join(eventId, `m${index}`, { kind: "SEQUENCE" });
+        await store.join(eventId, `m${index}`, { kind: "SEQUENCE" }, T0);
       }
     }
 
@@ -232,7 +234,7 @@ export function describeQueueStoreContract(
       try {
         for (let round = 0; round < 25; round += 1) {
           const eventId = randomUUID();
-          await leaver.join(eventId, "m", { kind: "SEQUENCE" });
+          await leaver.join(eventId, "m", { kind: "SEQUENCE" }, T0);
 
           const [, admitted] = await Promise.all([
             leaver.leave(eventId, "m"),
@@ -256,8 +258,10 @@ export function describeQueueStoreContract(
       const [admission] = await store.admit(eventId, request(T0, 1, 10));
       const jti = admission?.jti ?? "";
 
-      expect(await store.join(eventId, "m1", { kind: "SEQUENCE" })).toEqual({ status: "ADMITTED" });
-      expect(await store.join(eventId, "m1", { kind: "PRE_QUEUE", score: 0.1 })).toEqual({
+      expect(await store.join(eventId, "m1", { kind: "SEQUENCE" }, T0)).toEqual({
+        status: "ADMITTED",
+      });
+      expect(await store.join(eventId, "m1", { kind: "PRE_QUEUE", score: 0.1 }, T0)).toEqual({
         status: "ADMITTED",
       });
 
@@ -287,9 +291,9 @@ export function describeQueueStoreContract(
         "m3",
       ]);
 
-      expect(await store.join(eventId, "m2", { kind: "SEQUENCE" })).toEqual(queuedAt(2));
-      expect(await store.join(eventId, "m1", { kind: "SEQUENCE" })).toEqual(queuedAt(3));
-      expect(await store.join(eventId, "m3", { kind: "SEQUENCE" })).toEqual(queuedAt(4));
+      expect(await store.join(eventId, "m2", { kind: "SEQUENCE" }, T0)).toEqual(queuedAt(2));
+      expect(await store.join(eventId, "m1", { kind: "SEQUENCE" }, T0)).toEqual(queuedAt(3));
+      expect(await store.join(eventId, "m3", { kind: "SEQUENCE" }, T0)).toEqual(queuedAt(4));
       expect(await store.counts(eventId)).toEqual({ queued: 4, active: 0 });
     });
 
@@ -304,18 +308,99 @@ export function describeQueueStoreContract(
       try {
         for (let round = 0; round < 25; round += 1) {
           const eventId = randomUUID();
-          await joiner.join(eventId, "m", { kind: "SEQUENCE" });
+          await joiner.join(eventId, "m", { kind: "SEQUENCE" }, T0);
 
           const [, admitted] = await Promise.all([
-            joiner.join(eventId, "m", { kind: "SEQUENCE" }),
+            joiner.join(eventId, "m", { kind: "SEQUENCE" }, T0),
             ticker.admit(eventId, request(T0, 1, 10)),
           ]);
 
           expect(admitted).toHaveLength(1);
           expect(await joiner.counts(eventId)).toEqual({ queued: 0, active: 1 });
-          expect(await joiner.join(eventId, "m", { kind: "SEQUENCE" })).toEqual({
+          expect(await joiner.join(eventId, "m", { kind: "SEQUENCE" }, T0)).toEqual({
             status: "ADMITTED",
           });
+        }
+      } finally {
+        close();
+      }
+    });
+
+    test("join by a member whose admission expired frees its slot, revokes its jti and queues it at the back", async () => {
+      const store = storeWith("rejoin-expired:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 2);
+      const [admission] = await store.admit(eventId, request(T0, 1, 10));
+      // The reaper has not run: m1 still holds its slot, but its admission expired at TTL.
+      expect(await store.join(eventId, "m1", { kind: "SEQUENCE" }, at(TTL))).toEqual(queuedAt(2));
+
+      expect(await store.isAdmitted(eventId, admission?.jti ?? "", at(TTL - 1))).toBe(false);
+      expect(await store.admission(eventId, "m1", at(TTL - 1))).toBeNull();
+      expect(await store.counts(eventId)).toEqual({ queued: 2, active: 0 });
+    });
+
+    test("join leaves a slot alone until the instant its admission expires", async () => {
+      const store = storeWith("rejoin-boundary:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 1);
+      const [admission] = await store.admit(eventId, request(T0, 1, 10));
+
+      expect(await store.join(eventId, "m1", { kind: "SEQUENCE" }, at(TTL - 1))).toEqual({
+        status: "ADMITTED",
+      });
+      expect(await store.isAdmitted(eventId, admission?.jti ?? "", at(TTL - 1))).toBe(true);
+    });
+
+    test("a delayed join after an expired slot was replaced keeps the fresh admission", async () => {
+      // The interleaving from the PR #12 review: join A clears the expired slot and queues m, the
+      // ticker admits m with a fresh jti, then join B (sent at the same time as A) arrives. B must
+      // see the fresh admission and leave it alone, because the check and the removal are one step.
+      const store = storeWith("rejoin-delayed:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 1);
+      await store.admit(eventId, request(T0, 1, 10));
+
+      expect(await store.join(eventId, "m1", { kind: "SEQUENCE" }, at(TTL))).toEqual(queuedAt(1));
+      const [fresh] = await store.admit(eventId, request(at(TTL), 1, 10));
+      expect(await store.join(eventId, "m1", { kind: "SEQUENCE" }, at(TTL))).toEqual({
+        status: "ADMITTED",
+      });
+
+      expect(await store.isAdmitted(eventId, fresh?.jti ?? "", at(TTL))).toBe(true);
+      expect(await store.counts(eventId)).toEqual({ queued: 0, active: 1 });
+    });
+
+    test("concurrent rejoins of an expired slot racing a ticker never revoke a fresh admission", async () => {
+      // Two rejoins (a refresh and a second tab) and a tick run on separate connections after m's
+      // admission expired. Whatever the order, m ends either queued or holding the jti the ticker
+      // granted, never both and never with that jti revoked; a later delayed join changes nothing.
+      const { stores, close } = await harness.independentStores(`${filePrefix}rejoin-race:`, 3);
+      const [first, second, ticker] = stores;
+      if (first === undefined || second === undefined || ticker === undefined) {
+        throw new Error("independentStores returned fewer than three stores");
+      }
+      const rejoinRound = async () => {
+        const eventId = randomUUID();
+        await first.join(eventId, "m", { kind: "SEQUENCE" }, T0);
+        await ticker.admit(eventId, request(T0, 1, 10));
+
+        const [, , admitted] = await Promise.all([
+          first.join(eventId, "m", { kind: "SEQUENCE" }, at(TTL)),
+          second.join(eventId, "m", { kind: "SEQUENCE" }, at(TTL)),
+          ticker.admit(eventId, request(at(TTL), 1, 10)),
+        ]);
+        const delayed = await second.join(eventId, "m", { kind: "SEQUENCE" }, at(TTL));
+
+        const counts = await first.counts(eventId);
+        expect(counts.queued + counts.active).toBe(1);
+        for (const admission of admitted) {
+          expect(await first.isAdmitted(eventId, admission.jti, at(TTL))).toBe(true);
+        }
+        expect(delayed).toEqual(admitted.length === 1 ? { status: "ADMITTED" } : queuedAt(1));
+      };
+      try {
+        for (let round = 0; round < 25; round += 1) {
+          await rejoinRound();
         }
       } finally {
         close();

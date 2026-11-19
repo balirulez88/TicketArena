@@ -16,7 +16,7 @@ describe("createLazyQueueStore", () => {
     const eventId = randomUUID();
 
     const store = await queueStore();
-    await store.join(eventId, "a", { kind: "SEQUENCE" });
+    await store.join(eventId, "a", { kind: "SEQUENCE" }, new Date());
 
     expect(await queueStore()).toBe(store);
     expect(await (await queueStore()).position(eventId, "a")).toBe(1);

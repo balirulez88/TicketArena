@@ -39,10 +39,12 @@ export type JoinOutcome =
 export interface QueueStore {
   /**
    * Answers `ADMITTED` without touching the queue, the slot or the `jti` when the member holds a
-   * slot; otherwise adds the member unless already queued and returns its current position. The
-   * slot check and the queue write are one atomic step.
+   * slot whose admission is still valid at `now`. A slot whose admission expired (the reaper has
+   * not freed it yet) is freed and its `jti` revoked. Otherwise, or after that, adds the member
+   * unless already queued and returns its current position. The check, the removal and the queue
+   * write are one atomic step, so a delayed join never frees a slot granted after it was sent.
    */
-  join(eventId: string, member: string, score: JoinScore): Promise<JoinOutcome>;
+  join(eventId: string, member: string, score: JoinScore, now: Date): Promise<JoinOutcome>;
   /** The member's position, or `null` when it is not queued. */
   position(eventId: string, member: string): Promise<number | null>;
   /**

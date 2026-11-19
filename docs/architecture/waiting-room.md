@@ -72,10 +72,13 @@ adapters share the scripts, the key layout and the method mapping (`createScript
 `src/queue-scripts.ts`) and differ only in how a script is sent, so they read and write the same
 data. Times come from the injected clock (epoch ms), never Redis `TIME`.
 
-- **join**: if the member holds a slot (`ZSCORE active`), returns `-1` (`ADMITTED`) and writes
-  nothing; otherwise, if the member has no score, its score is the given pre-queue value, or
-  `1 + INCR seq` for a later join; then `ZADD NX`; returns the member's rank. The slot check and
-  the queue write are one script, so a tick cannot admit the member between them.
+- **join**: if the member holds a slot (`ZSCORE active`) whose admission is still valid at `now`,
+  returns `-1` (`ADMITTED`) and writes nothing; a slot whose admission expired before the reaper
+  ran is freed and its `jti` revoked (as in **releaseSlot**). Then, if the member has no score, its
+  score is the given pre-queue value, or `1 + INCR seq` for a later join; then `ZADD NX`; returns
+  the member's rank. The expiry check, the removal and the queue write are one script, so a tick
+  cannot admit the member between them, and a delayed join (a refresh and a second tab sent
+  together) cannot free a slot the ticker granted after the first of them requeued the member.
 - **leave**: `ZREM` from the queue, then frees the slot and revokes its `jti` like
   **releaseSlot**, in one script, so the ticker cannot admit the member between the two; returns
   whether the member was queued or held a slot.
@@ -87,13 +90,13 @@ data. Times come from the injected clock (epoch ms), never Redis `TIME`.
   Re-admitting a member that still holds a slot replaces its old `jti`.
 - **admitImmediately** (queue closed): if the member holds a slot whose admission is still valid,
   nothing changes (a new `jti` would revoke the token in use); a slot whose admission expired
-  before the reaper ran has its old `jti` removed and is replaced; otherwise `ZREM` from the queue, then the slot, the `admission`
+  before the reaper ran has its old `jti` removed and is replaced; otherwise `ZREM` from the
+  queue, then the slot, the `admission`
   entry and the `jti` with expiry `now + 30 min`, like one admission of **admit** but without the
   bucket or `maxActive`.
 - **admission** (read-only): the member's `jti` and its expiry, only while it holds a slot and
   the admission has not expired by `now`, so an expired admission is never reported or minted
-  into a token while it waits for the reaper; `QueueService.status` uses it for the token, and
-  `QueueService.join` uses it to free an expired slot at once and requeue the session at the back.
+  into a token while it waits for the reaper; `QueueService.status` uses it for the token.
 - **heartbeat**: `ZADD XX` of `now`, only if the member holds a slot.
 - **releaseSlot**: removes the slot, the member's `admission` entry and its `jti` from
   `admitted`, in one step.

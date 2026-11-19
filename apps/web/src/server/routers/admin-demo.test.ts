@@ -134,8 +134,8 @@ describe("admin.resetDemo", () => {
     const counters = createRedisBookingMetrics(redisClient, metricsPrefix);
     await counters.increment("hold_ok", demo.id);
     await counters.increment("hold_ok", other.id);
-    await queueStore().join(demo.id, "q1", { kind: "SEQUENCE" });
-    await queueStore().join(other.id, "q1", { kind: "SEQUENCE" });
+    await queueStore().join(demo.id, "q1", { kind: "SEQUENCE" }, NOW);
+    await queueStore().join(other.id, "q1", { kind: "SEQUENCE" }, NOW);
 
     const reset = await caller().admin.resetDemo();
 

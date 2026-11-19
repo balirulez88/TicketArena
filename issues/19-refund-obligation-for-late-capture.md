@@ -4,9 +4,7 @@
 
 **Blocked by:** 17, 15
 
-**Status:** deferred
-
-**Status reason:** frontend chain first (61, 62, 31, 33, 34); restore to ready-for-agent after run
+**Status:** ready-for-agent
 
 - [ ] `+late@` makes Payment capture after the deadline.
 - [ ] `PENDING_PAYMENT` + `succeeded` with `capturedAt > paymentDeadline` → `EXPIRED`, seats freed, `order.expired`, ledger row `REFUND_REQUESTED` with `refundRequestedAt`, outbox `payment.refund_requested` (with contact), one transaction.

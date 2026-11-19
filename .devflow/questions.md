@@ -273,7 +273,7 @@ Which tRPC code does NOT_ON_SALE map to, and is a hold at exactly onSaleAt allow
 
 Assumed: PRECONDITION_FAILED (time precondition, like HOLD_EXPIRED); 'before' is strict, so a hold at exactly onSaleAt succeeds, matching the ticker's now < onSaleAt rule
 
-Answer: (open)
+Answer: Accepted (2026-11-19): matches the ticker rule now < onSaleAt.
 
 ## 2026-11-18 22:20 ticket 61
 
@@ -281,7 +281,7 @@ How do the demo event and admin.runRace keep working once holds before onSaleAt 
 
 Assumed: Seed puts the demo event on sale 1 day before seeding (queue already closed, join stays ADMISSIBLE); existing databases keep the old future onSaleAt and need a reset and re-seed (noted in docs/database/index.md)
 
-Answer: (open)
+Answer: Accepted (2026-11-19).
 
 ## 2026-11-18 22:20 ticket 61
 
@@ -289,7 +289,7 @@ ADR 0008 says 'outside the queue window the policy admits immediately'. Edit or 
 
 Assumed: Left the accepted ADR unchanged; it now reads as 'after the queue closes' per the ticket 28 answer. A human may add a clarifying note or a superseding ADR
 
-Answer: (open)
+Answer: Accepted (2026-11-19), with a clarifying amendment to ADR 0008 (the queue phases: NOT_OPEN before queueOpensAt, immediate admission only after queueClosesAt, no hold before onSaleAt).
 
 ## 2026-11-19 07:26 ticket 62
 
@@ -297,7 +297,7 @@ What does join return for a slot holder, and in which order are phase and slot c
 
 Assumed: { status: 'ADMITTED' } (QueueStore.join returns JoinOutcome QUEUED|ADMITTED); the phase is checked first, so NOT_OPEN and ADMISSIBLE answer without looking at slots and write nothing; only an open queue answers ADMITTED
 
-Answer: (open)
+Answer: Accepted (2026-11-19).
 
 ## 2026-11-19 07:26 ticket 62
 
@@ -305,7 +305,7 @@ Does a join by a slot holder count as a heartbeat?
 
 Assumed: No: lastSeenAt is unchanged; status polls and admitted calls keep the slot alive
 
-Answer: (open)
+Answer: Accepted (2026-11-19): status polls keep the slot alive.
 
 ## 2026-11-19 08:15 ticket 31
 
@@ -313,7 +313,7 @@ Where does admittedProcedure get the eventId for the eid check?
 
 Assumed: From holdSeats' existing explicit eventId input; the booking core already refuses seats of another event, so an admission to A can never hold B's seats
 
-Answer: (open)
+Answer: Accepted (2026-11-19): the booking core refuses another event's seats anyway.
 
 ## 2026-11-19 08:15 ticket 31
 
@@ -321,7 +321,7 @@ How do buyers hold seats when the queue is CLOSED (join answers ADMISSIBLE, e.g.
 
 Assumed: join after close now admits at once via an atomic QueueStore.admitImmediately (slot + jti, 30 min, bypasses token bucket and maxActive; keeps an existing jti); the next status poll mints the token, so every buyer path goes join -> status -> token. admin.runRace stays a deliberate adminProcedure bypass. This changes ticket 61's 'ADMISSIBLE writes nothing'
 
-Answer: (open)
+Answer: Accepted (2026-11-19): immediate admission after the queue closes is the spec's rule; the ADR 0008 amendment records it.
 
 ## 2026-11-19 08:15 ticket 31
 
@@ -329,7 +329,7 @@ What happens to holds when Redis is down?
 
 Assumed: The admitted-set check fails closed: holds fail with Redis down; placeOrder does not need Redis
 
-Answer: (open)
+Answer: Overridden (2026-11-19): fail open on revocation only. Signature, the HS256 algorithm, exp, sessionId and eventId are always checked. Only when Redis is unreachable may the jti revocation check be skipped; when Redis is reachable, a missing or revoked jti is FORBIDDEN. During an outage a revoked token can stay usable until its fixed expiry, and no new admission is issued. Fix: ticket 63, with tests and an ADR 0008 amendment.
 
 ## 2026-11-19 08:15 ticket 31
 
@@ -337,7 +337,7 @@ Which JWT library?
 
 Assumed: jose 6.2.17 added to apps/web, pinned exactly; the repo had none
 
-Answer: (open)
+Answer: Accepted (2026-11-19).
 
 ## 2026-11-19 08:30 ticket 33
 
@@ -345,7 +345,7 @@ Where does the queue room live and when does it poll?
 
 Assumed: A step on /events/[eventId]; status every 3 s only while QUEUED or ADMITTED (also during a hold, as the heartbeat, with seats.map); no checkout page yet, so the active hold is the checkout step; no leave-queue button
 
-Answer: (open)
+Answer: Accepted (2026-11-19).
 
 ## 2026-11-19 08:30 ticket 33
 
@@ -353,7 +353,7 @@ How does the client tell SEAT_UNAVAILABLE from LIMIT_EXCEEDED, both tRPC CONFLIC
 
 Assumed: It reads the domain-code prefix and taken seat ids from the error message; a typed server error formatter would be sturdier (follow-up)
 
-Answer: (open)
+Answer: Accepted (2026-11-19) for now; parsing messages is fragile. Fix: ticket 67 (typed domain error codes).
 
 ## 2026-11-19 08:30 ticket 33
 
@@ -361,7 +361,7 @@ Countdown skew and expiry?
 
 Assumed: Server holdExpiresAt measured on the client clock; at 0:00 the hold leaves the page, an alert shows and the seat map refreshes; the server alone decides expiry. The hold lives only in the mutation result, so a reload loses it
 
-Answer: (open)
+Answer: Accepted (2026-11-19) for now; a reload must not hide a live hold that still counts against the buyer limit. Fix: ticket 68.
 
 ## 2026-11-19 08:40 ticket 34
 
@@ -369,7 +369,7 @@ booking.getOrder exposes no payment or refund data; what 'refund information' do
 
 Assumed: A fixed note per final state stating the system's refund promise (overpayment on CONFIRMED, any charge on CANCELLED/EXPIRED is refunded automatically, with emails); the server contract is unchanged. Showing a real refund's progress needs getOrder to expose the payment ledger: a follow-up ticket for a human to decide
 
-Answer: (open)
+Answer: Accepted (2026-11-19); showing real refund progress waits for tickets 19 to 22.
 
 ## 2026-11-19 08:40 ticket 34
 
@@ -377,7 +377,7 @@ What is a checkout attempt for the idempotencyKey?
 
 Assumed: One hold plus the trimmed contact submitted; crypto.randomUUID on first submit, reused on resubmit of the same contact; a changed contact or new hold gets a new key; dropped after IDEMPOTENCY_KEY_REUSED. A lost response then changed email yields HOLD_NOT_ACTIVE (generic message)
 
-Answer: (open)
+Answer: Accepted (2026-11-19).
 
 ## 2026-11-19 08:40 ticket 34
 
@@ -385,4 +385,4 @@ Where do checkout and order status live?
 
 Assumed: Checkout inline in the hold area on /events/[eventId] (heartbeat keeps running); order status at /orders/[orderId], also shown in place of the hold after placeOrder; polling every 2 s only while PENDING_PAYMENT
 
-Answer: (open)
+Answer: Accepted (2026-11-19).

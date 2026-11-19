@@ -4,9 +4,7 @@
 
 **Blocked by:** 13, 14
 
-**Status:** deferred
-
-**Status reason:** frontend chain first (61, 62, 31, 33, 34); restore to ready-for-agent after run
+**Status:** ready-for-agent
 
 - [ ] Releasing a `HELD` hold whose `holdExpiresAt <= T` (not yet swept) gives `HOLD_EXPIRED` and changes nothing: the hold stays `HELD` for the sweeper, no `hold.released` event is written.
 - [ ] Releasing a hold the sweeper already moved to `EXPIRED` gives `HOLD_EXPIRED`.

@@ -338,3 +338,27 @@ Which JWT library?
 Assumed: jose 6.2.17 added to apps/web, pinned exactly; the repo had none
 
 Answer: (open)
+
+## 2026-11-19 08:30 ticket 33
+
+Where does the queue room live and when does it poll?
+
+Assumed: A step on /events/[eventId]; status every 3 s only while QUEUED or ADMITTED (also during a hold, as the heartbeat, with seats.map); no checkout page yet, so the active hold is the checkout step; no leave-queue button
+
+Answer: (open)
+
+## 2026-11-19 08:30 ticket 33
+
+How does the client tell SEAT_UNAVAILABLE from LIMIT_EXCEEDED, both tRPC CONFLICT?
+
+Assumed: It reads the domain-code prefix and taken seat ids from the error message; a typed server error formatter would be sturdier (follow-up)
+
+Answer: (open)
+
+## 2026-11-19 08:30 ticket 33
+
+Countdown skew and expiry?
+
+Assumed: Server holdExpiresAt measured on the client clock; at 0:00 the hold leaves the page, an alert shows and the seat map refreshes; the server alone decides expiry. The hold lives only in the mutation result, so a reload loses it
+
+Answer: (open)

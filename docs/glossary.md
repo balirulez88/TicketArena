@@ -48,6 +48,7 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Admin snapshot**     | `admin.snapshot`: live seat, order, payment, queue and counter figures; `/admin` polls it each 1s.     |
 | **Seat map**           | The event page's grid of seat buttons by section; shows each seat's price and status.                  |
 | **Seat selection**     | Up to 6 available seats a visitor picked on the seat map before a hold; client-only state.             |
+| **Queue room**         | The event page's view while queued: position and ETA, polling `queue.status` until admitted.           |
 | **Slice**              | One tracer-bullet ticket: a thin, complete path through every layer, green on its own.                 |
 | **Seam**               | A public interface where tests observe behaviour without reaching inside.                              |
 | **Debt gate**          | The host check that holds a ticket on unresolved or untriaged technical debt it relies on (ADR 0016).  |

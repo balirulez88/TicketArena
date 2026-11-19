@@ -13,6 +13,8 @@ export type SeatSelectionState = {
   /** True after an attempt to add a seat beyond the limit, until the selection shrinks. */
   readonly limitReached: boolean;
   toggleSeat(seat: { readonly id: string; readonly status: SeatStatus }): void;
+  /** Empties the selection, e.g. once its seats are held. */
+  clear(): void;
 };
 
 function createSeatSelectionStore(): StoreApi<SeatSelectionState> {
@@ -35,6 +37,7 @@ function createSeatSelectionStore(): StoreApi<SeatSelectionState> {
         }
         return { selectedSeatIds: [...state.selectedSeatIds, seat.id], limitReached: false };
       }),
+    clear: () => set({ selectedSeatIds: [], limitReached: false }),
   }));
 }
 

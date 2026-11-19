@@ -132,10 +132,35 @@ event is a `NOT_FOUND` tRPC error. Integration tests run against real Postgres. 
 Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client components).
 
 - **Pages:** `/events` lists events (venue, on-sale date, on-sale status) and links to
-  `/events/[eventId]`, which shows the event (venue, on-sale status, a "Prices per section" table)
-  and its seat map. `/admin/login` is a plain HTML form posting to `/api/admin/login`; `/admin`
-  (behind the proxy guard) shows the admin dashboard. The queue room, checkout and order status
-  pages are not built yet.
+  `/events/[eventId]`, which shows the event (venue, on-sale status, a "Prices per section" table),
+  the queue step and its seat map. `/admin/login` is a plain HTML form posting to
+  `/api/admin/login`; `/admin` (behind the proxy guard) shows the admin dashboard. Checkout and
+  order status pages are not built yet.
+- **Queue room** (`components/queue/queue-room.tsx`): a step on `/events/[eventId]`, not its own
+  route. `useQueueStatus` reads `queue.status` on load and polls it every 3 s (`QUEUE_POLL_MS`,
+  also in a background tab) while the session is `QUEUED` or `ADMITTED`; a visitor who has not
+  joined is not polled. "Join the queue" calls `queue.join`: `NOT_OPEN` shows when the queue
+  opens; any other result re-reads `queue.status` at once, so an immediate admission
+  (`ADMISSIBLE`, `ADMITTED`) gets its admission cookie minted before the buyer can hold. While
+  `QUEUED` a "Queue room" region shows position and ETA; the first `ADMITTED` poll replaces it with
+  an "It's your turn" status and turns on holding. `NOT_QUEUED` (never joined, left or reaped)
+  shows the join button again.
+- **Holding** (`components/hold/hold-controls.tsx`): under the seat map; the "Hold n seats"
+  button shows only while admitted, but a live hold and a refusal stay on screen if the admission
+  lapses (30 min, fixed) meanwhile. "Hold n seats" sends the selection to `booking.holdSeats`; on success the selection is
+  emptied and the hold (the mutation's result) shows as a "Your hold" region: its seats, a
+  `role="timer"` countdown to the server's `holdExpiresAt` measured on the visitor's clock (the
+  server alone decides expiry), and "Release seats" (`booking.releaseHold`). When the countdown
+  reaches zero the hold is dropped from the page with a "Your hold expired" alert; nothing is
+  sent, as the server already treats it as expired. Refusals are told apart by
+  `hold-failure.ts`: `SEAT_UNAVAILABLE` (listing the taken seats by section, row and number) and
+  `LIMIT_EXCEEDED` both arrive as `CONFLICT` and are split by the domain code that starts the
+  error message; `BOOKING_BUSY` is `TOO_MANY_REQUESTS`, `FORBIDDEN` asks the buyer to join the queue
+  again (and re-reads `queue.status`), and `NOT_ON_SALE` is `PRECONDITION_FAILED`. Each has its own
+  `role="alert"` message. The hold is not kept across a page reload.
+- **Heartbeat:** once admitted, the seat map (`seats.map`) and `queue.status` both poll every 3 s,
+  through the hold too, so the slot is never idle long enough to be reaped and seats taken by
+  others appear while the buyer chooses.
 - **Admin dashboard** (`components/admin/admin-dashboard.tsx`): polls `admin.snapshot` every 1 s
   (`refetchInterval`, `SNAPSHOT_POLL_MS`) and shows pending payments, an "Orders by status" table
   and a "Seats, queue and metrics per event" table. Polling stops once a poll returns
@@ -144,7 +169,7 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
   result": successes, seat unavailable, booking busy, duration, winner's correlation id; "Reset
   result": holds, orders and ledger rows deleted, seats freed) and a failure, such as the rate
   limit, in a `role="alert"` line. The next poll shows the new seat state.
-- **Server state:** components read `events.list`, `events.get`, `seats.map` and `admin.snapshot` through TanStack
+- **Server state:** components read `events.list`, `events.get`, `seats.map`, `queue.status` and `admin.snapshot` through TanStack
   Query (`useTRPC().….queryOptions`) under `TRPCReactProvider`; no server data is copied into
   client stores. The on-sale badge compares `onSaleAt` with the visitor's clock and is only a
   hint. The catalog has no performance date, so the date shown is the on-sale time.
@@ -157,12 +182,13 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
 - **Seat selection** (`components/seat-map/seat-selection.tsx`): a Zustand store created per
   `SeatSelectionProvider` (keyed by event, so it never leaks across events or server requests);
   `toggleSeat` adds only `AVAILABLE` seats, at most `MAX_SELECTED_SEATS` (6), and always allows
-  deselecting. It is a UI rule only: the buyer limit is enforced by `holdSeats`.
+  deselecting; `clear` empties it once its seats are held. It is a UI rule only: the buyer limit is
+  enforced by `holdSeats`. The provider wraps the queue step, seat map and hold controls.
 - **shadcn/ui:** `components/ui/` holds the copied `Card`, `Badge` and `Table` sources (Badge
   without `asChild`).
 - **Component tests** run in jsdom (`// @vitest-environment jsdom` per file) with Testing Library;
-  the event and admin tests fake only `fetch` behind a real tRPC client (and the clock, with
-  `vi.useFakeTimers({ shouldAdvanceTime: true })`, for the 1 s poll).
+  the event, queue-and-hold and admin tests fake only `fetch` behind a real tRPC client (and the
+  clock, with `vi.useFakeTimers({ shouldAdvanceTime: true })`, for the polls and the countdown).
 
 ## Worker
 

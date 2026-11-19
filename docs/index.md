@@ -56,7 +56,10 @@ below shows what is built.
   server env (`parseServerEnv`), shadcn/ui tokens on Tailwind v4.
 - Web UI: `/events` and `/events/[eventId]` (venue, on-sale status, prices per section, seat map
   of native buttons with accessible names; up to 6 seats selectable in a Zustand store, server
-  data via TanStack Query). See [architecture/](architecture/index.md#web-ui).
+  data via TanStack Query). The event page is also the queue room (join, position and ETA,
+  `queue.status` polled every 3 s) and, once admitted, holds the selection with a countdown to
+  `holdExpiresAt`, a release button and a distinct message per hold refusal; the seat map and
+  `queue.status` keep polling as the heartbeat. See [architecture/](architecture/index.md#web-ui).
 - Admin: `/admin/login` checks `ADMIN_PASSWORD` and sets a signed `ta_admin` cookie (8 h);
   `proxy.ts` guards `/admin` and `adminProcedure` guards admin procedures (`UNAUTHORIZED`).
   `/admin` polls `admin.snapshot` every second: seats by status per event, orders by status,

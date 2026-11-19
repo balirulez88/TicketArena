@@ -18,6 +18,7 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Principal**          | Who is calling: a guest session now, a user later. Resolved by `IdentityService`.                      |
 | **BuyerKey**           | a user's `userId`, else the guest `sessionId`; the key for ticket limits and ownership.                |
 | **Order**              | A checkout of one hold: `PENDING_PAYMENT` → `CONFIRMED`, `CANCELLED` or `EXPIRED`.                     |
+| **Checkout attempt**   | One hold plus the contact submitted for it; owns one `idempotencyKey`, reused on retries.              |
 | **Lead driver**        | The opt-in execution driver (`RALPH_DRIVER=lead`): one Lead session per ticket; Ralph stays default.   |
 | **Recovery hold**      | Harness, not a seat Hold: `refs/ralph/recovery/<slug>`; no Ralph run until a human releases it.        |
 | **Payment deadline**   | Fixed `placeOrder` time + 5 min; a payment is on time iff `capturedAt` ≤ it.                           |

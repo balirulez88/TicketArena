@@ -2,7 +2,10 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { inferRouterOutputs } from "@trpc/server";
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { CheckoutForm } from "@/components/checkout/checkout-form";
+import { OrderStatus } from "@/components/checkout/order-status";
 import type { SeatMapSeat } from "@/components/seat-map/seat-map";
 import { MAX_SELECTED_SEATS, useSeatSelection } from "@/components/seat-map/seat-selection";
 import type { AppRouter } from "@/server/routers/_app";
@@ -10,6 +13,9 @@ import { useTRPC } from "@/trpc/react";
 import { type HoldFailure, holdFailure } from "./hold-failure";
 
 type Hold = inferRouterOutputs<AppRouter>["booking"]["holdSeats"];
+
+/** Why the last hold ended; `CHECKOUT_EXPIRED` is the server refusing the order with `HOLD_EXPIRED`. */
+type Notice = "RELEASED" | "EXPIRED" | "CHECKOUT_EXPIRED";
 
 const buttonClass =
   "w-fit rounded-md bg-primary px-4 py-2 font-medium text-primary-foreground disabled:opacity-50";
@@ -66,11 +72,15 @@ function ActiveHold({
   seats,
   onReleased,
   onExpired,
+  onPlaced,
+  onCheckoutExpired,
 }: {
   readonly hold: Hold;
   readonly seats: readonly SeatMapSeat[];
   readonly onReleased: () => void;
   readonly onExpired: () => void;
+  readonly onPlaced: (orderId: string) => void;
+  readonly onCheckoutExpired: () => void;
 }) {
   const trpc = useTRPC();
   const release = useMutation(trpc.booking.releaseHold.mutationOptions({ onSuccess: onReleased }));
@@ -109,6 +119,7 @@ function ActiveHold({
           The seats could not be released. Please try again.
         </p>
       ) : null}
+      <CheckoutForm holdId={hold.id} onPlaced={onPlaced} onHoldExpired={onCheckoutExpired} />
     </section>
   );
 }
@@ -119,6 +130,8 @@ function ActiveHold({
  * result (server state), not in the selection store, which is emptied once its seats are held.
  * Mounted whether or not the session is admitted: the admission can lapse (30 min, fixed) while a
  * hold is still live, and the hold and a `FORBIDDEN` refusal must stay on screen when it does.
+ * The live hold carries the checkout form; once the order is placed the order's status replaces
+ * the hold, since `placeOrder` frees the admission slot and the hold no longer expires.
  */
 export function HoldControls({
   eventId,
@@ -133,7 +146,8 @@ export function HoldControls({
   const queryClient = useQueryClient();
   const selectedSeatIds = useSeatSelection((state) => state.selectedSeatIds);
   const clearSelection = useSeatSelection((state) => state.clear);
-  const [notice, setNotice] = useState<"RELEASED" | "EXPIRED" | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [orderId, setOrderId] = useState<string | null>(null);
 
   const refreshSeats = useCallback(
     () => queryClient.invalidateQueries({ queryKey: trpc.seats.map.queryKey({ eventId }) }),
@@ -159,7 +173,7 @@ export function HoldControls({
   );
   const resetHold = hold.reset;
   const endHold = useCallback(
-    (reason: "RELEASED" | "EXPIRED") => {
+    (reason: Notice) => {
       resetHold();
       setNotice(reason);
       void refreshSeats();
@@ -168,10 +182,36 @@ export function HoldControls({
   );
   const onReleased = useCallback(() => endHold("RELEASED"), [endHold]);
   const onExpired = useCallback(() => endHold("EXPIRED"), [endHold]);
+  const onCheckoutExpired = useCallback(() => endHold("CHECKOUT_EXPIRED"), [endHold]);
+  const onPlaced = useCallback(
+    (placedOrderId: string) => {
+      // The hold is now ORDERED: its countdown no longer applies, so the order takes its place.
+      resetHold();
+      setOrderId(placedOrderId);
+      void refreshSeats();
+    },
+    [resetHold, refreshSeats],
+  );
 
+  if (orderId !== null) {
+    return (
+      <OrderStatus orderId={orderId}>
+        <Link href={`/orders/${orderId}`} className="text-sm underline">
+          Open the order status page
+        </Link>
+      </OrderStatus>
+    );
+  }
   if (hold.data !== undefined) {
     return (
-      <ActiveHold hold={hold.data} seats={seats} onReleased={onReleased} onExpired={onExpired} />
+      <ActiveHold
+        hold={hold.data}
+        seats={seats}
+        onReleased={onReleased}
+        onExpired={onExpired}
+        onPlaced={onPlaced}
+        onCheckoutExpired={onCheckoutExpired}
+      />
     );
   }
 
@@ -204,6 +244,12 @@ export function HoldControls({
       {notice === "EXPIRED" ? (
         <p role="alert" className="text-destructive text-sm">
           Your hold expired and its seats were released. Please choose seats again.
+        </p>
+      ) : null}
+      {notice === "CHECKOUT_EXPIRED" ? (
+        <p role="alert" className="text-destructive text-sm">
+          Your hold expired before your order was placed, and its seats were released. Please choose
+          seats again.
         </p>
       ) : null}
     </div>

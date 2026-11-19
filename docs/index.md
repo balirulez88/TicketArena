@@ -59,7 +59,11 @@ below shows what is built.
   data via TanStack Query). The event page is also the queue room (join, position and ETA,
   `queue.status` polled every 3 s) and, once admitted, holds the selection with a countdown to
   `holdExpiresAt`, a release button and a distinct message per hold refusal; the seat map and
-  `queue.status` keep polling as the heartbeat. See [architecture/](architecture/index.md#web-ui).
+  `queue.status` keep polling as the heartbeat. The live hold carries the checkout form (zod
+  validated email and optional phone; one `idempotencyKey` per checkout attempt, reused on
+  retries; distinct `HOLD_EXPIRED` and `IDEMPOTENCY_KEY_REUSED` messages), and a placed order is
+  followed on the event page and at `/orders/[orderId]`, polling `booking.getOrder` every 2 s until
+  it is final. See [architecture/](architecture/index.md#web-ui).
 - Admin: `/admin/login` checks `ADMIN_PASSWORD` and sets a signed `ta_admin` cookie (8 h);
   `proxy.ts` guards `/admin` and `adminProcedure` guards admin procedures (`UNAUTHORIZED`).
   `/admin` polls `admin.snapshot` every second: seats by status per event, orders by status,

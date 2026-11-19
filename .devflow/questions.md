@@ -362,3 +362,27 @@ Countdown skew and expiry?
 Assumed: Server holdExpiresAt measured on the client clock; at 0:00 the hold leaves the page, an alert shows and the seat map refreshes; the server alone decides expiry. The hold lives only in the mutation result, so a reload loses it
 
 Answer: (open)
+
+## 2026-11-19 08:40 ticket 34
+
+booking.getOrder exposes no payment or refund data; what 'refund information' does the order status page show?
+
+Assumed: A fixed note per final state stating the system's refund promise (overpayment on CONFIRMED, any charge on CANCELLED/EXPIRED is refunded automatically, with emails); the server contract is unchanged. Showing a real refund's progress needs getOrder to expose the payment ledger: a follow-up ticket for a human to decide
+
+Answer: (open)
+
+## 2026-11-19 08:40 ticket 34
+
+What is a checkout attempt for the idempotencyKey?
+
+Assumed: One hold plus the trimmed contact submitted; crypto.randomUUID on first submit, reused on resubmit of the same contact; a changed contact or new hold gets a new key; dropped after IDEMPOTENCY_KEY_REUSED. A lost response then changed email yields HOLD_NOT_ACTIVE (generic message)
+
+Answer: (open)
+
+## 2026-11-19 08:40 ticket 34
+
+Where do checkout and order status live?
+
+Assumed: Checkout inline in the hold area on /events/[eventId] (heartbeat keeps running); order status at /orders/[orderId], also shown in place of the hold after placeOrder; polling every 2 s only while PENDING_PAYMENT
+
+Answer: (open)

@@ -134,8 +134,9 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
 - **Pages:** `/events` lists events (venue, on-sale date, on-sale status) and links to
   `/events/[eventId]`, which shows the event (venue, on-sale status, a "Prices per section" table),
   the queue step and its seat map. `/admin/login` is a plain HTML form posting to
-  `/api/admin/login`; `/admin` (behind the proxy guard) shows the admin dashboard. Checkout and
-  order status pages are not built yet.
+  `/api/admin/login`; `/admin` (behind the proxy guard) shows the admin dashboard.
+  `/orders/[orderId]` shows one order's status (owner only; another buyer's or a malformed id
+  reads "Order not found."). Checkout is not its own route: it is the live hold on the event page.
 - **Queue room** (`components/queue/queue-room.tsx`): a step on `/events/[eventId]`, not its own
   route. `useQueueStatus` reads `queue.status` on load and polls it every 3 s (`QUEUE_POLL_MS`,
   also in a background tab) while the session is `QUEUED` or `ADMITTED`; a visitor who has not
@@ -158,8 +159,36 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
   error message; `BOOKING_BUSY` is `TOO_MANY_REQUESTS`, `FORBIDDEN` asks the buyer to join the queue
   again (and re-reads `queue.status`), and `NOT_ON_SALE` is `PRECONDITION_FAILED`. Each has its own
   `role="alert"` message. The hold is not kept across a page reload.
+- **Checkout** (`components/checkout/checkout-form.tsx`): a "Checkout" form inside the "Your hold"
+  region, so the countdown, the release button and the heartbeat stay on while the buyer types.
+  `checkoutFormSchema` (zod) trims and validates the email and an optional phone (7 to 15 digits,
+  an optional leading `+`, spaces, hyphens and parentheses, at most 32 characters); an empty phone
+  is left out of the contact. Field errors show under the input (`aria-invalid`,
+  `aria-describedby`) and nothing is sent. A **checkout attempt** is the hold plus the contact it is
+  submitted with: its `idempotencyKey` (`crypto.randomUUID()`) is made on the first submit and
+  reused for every resubmission of the same contact, so a retry after a network error or lost
+  response replays the server's order rather than placing another (ADR 0007). Changing the
+  contact, or a new hold (which mounts a new form), starts a new attempt with a new key, so the UI
+  itself never sends one key with two different requests. Refusals are told apart by
+  `checkout-failure.ts`: `HOLD_EXPIRED` (`PRECONDITION_FAILED`) drops the hold with a "Your hold
+  expired before your order was placed" alert; `IDEMPOTENCY_KEY_REUSED` (`CONFLICT`, recognised by
+  the domain code starting the message) says the checkout was already submitted with different
+  details and discards the key, so the next submit is a new attempt; anything else, network
+  failures included, asks to try again.
+- **Order status** (`components/checkout/order-status.tsx`): once `placeOrder` succeeds the hold
+  is dropped and an "Order status" region takes its place on the event page, with a link to
+  `/orders/[orderId]`, which renders the same component. It polls `booking.getOrder` every 2 s
+  (`ORDER_POLL_MS`) while the order is `PENDING_PAYMENT` and stops at a final state (`CONFIRMED`,
+  `CANCELLED`, `EXPIRED`) or a `NOT_FOUND`. It shows the outcome (pending with the payment
+  deadline; confirmed with the contact email; cancelled because the payment failed; expired
+  because no payment arrived by the deadline), the ticket count and total, and for a final order a
+  "Refunds" note. `getOrder` exposes no payment or refund data, so the note states the system's
+  guarantee for that state (an extra charge on a confirmed order, or any charge on a cancelled or
+  expired one, is refunded automatically with an email when the refund starts and completes),
+  not the progress of a particular refund. After an order the hold button does not return until
+  the page is reloaded.
 - **Heartbeat:** once admitted, the seat map (`seats.map`) and `queue.status` both poll every 3 s,
-  through the hold too, so the slot is never idle long enough to be reaped and seats taken by
+  through the hold and its checkout too, so the slot is never idle long enough to be reaped and seats taken by
   others appear while the buyer chooses.
 - **Admin dashboard** (`components/admin/admin-dashboard.tsx`): polls `admin.snapshot` every 1 s
   (`refetchInterval`, `SNAPSHOT_POLL_MS`) and shows pending payments, an "Orders by status" table
@@ -169,7 +198,7 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
   result": successes, seat unavailable, booking busy, duration, winner's correlation id; "Reset
   result": holds, orders and ledger rows deleted, seats freed) and a failure, such as the rate
   limit, in a `role="alert"` line. The next poll shows the new seat state.
-- **Server state:** components read `events.list`, `events.get`, `seats.map`, `queue.status` and `admin.snapshot` through TanStack
+- **Server state:** components read `events.list`, `events.get`, `seats.map`, `queue.status`, `booking.getOrder` and `admin.snapshot` through TanStack
   Query (`useTRPC().….queryOptions`) under `TRPCReactProvider`; no server data is copied into
   client stores. The on-sale badge compares `onSaleAt` with the visitor's clock and is only a
   hint. The catalog has no performance date, so the date shown is the on-sale time.

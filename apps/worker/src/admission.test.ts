@@ -100,7 +100,7 @@ describe("worker admission ticker", () => {
       // The clock stands still, so the bucket stays empty however often the ticker runs.
       await new Promise((resolve) => setTimeout(resolve, 200));
       expect(await queue.counts(eventId)).toEqual({ queued: 8, active: 2 });
-      expect(await queue.status(eventId, "buyer-1")).toEqual({ status: "ADMITTED" });
+      expect(await queue.status(eventId, "buyer-1")).toMatchObject({ status: "ADMITTED" });
 
       later(clock, 1000);
       await expect
@@ -194,7 +194,7 @@ describe("worker reaper", () => {
           active: 1,
         });
       expect(await queue.status(eventId, "buyer-1")).toEqual({ status: "NOT_QUEUED" });
-      expect(await queue.status(eventId, "buyer-2")).toEqual({ status: "ADMITTED" });
+      expect(await queue.status(eventId, "buyer-2")).toMatchObject({ status: "ADMITTED" });
       const jtiOf = (sessionId: string) =>
         admitted.find((admission) => admission.sessionId === sessionId)?.jti ?? "";
       expect(await queue.isAdmitted(eventId, jtiOf("buyer-1"))).toBe(false);

@@ -8,7 +8,9 @@ import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
 import type { QueueStore, Random } from "@ticketarena/waiting-room";
 import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
-import { parseDatabaseEnv, parseSessionEnv } from "./env";
+import { z } from "zod";
+import { type AdmissionTokens, admissionSetCookie, createAdmissionTokens } from "./admission-token";
+import { parseAdmissionEnv, parseDatabaseEnv, parseSessionEnv } from "./env";
 import { ADMIN_COOKIE, verifyAdminCookieValue } from "./identity/admin-session";
 import { type CookieReader, createIdentityService, type Principal } from "./identity/identity";
 import { createWebLogger } from "./logger";
@@ -56,6 +58,11 @@ export interface TRPCContext {
   readonly queueStore: () => Promise<QueueStore>;
   /** Randomness for pre-queue positions; injected so tests can script it. */
   readonly random: Random;
+  /**
+   * Signs admission tokens into per-event cookies on the response and reads verified ones from
+   * the request; `ADMISSION_SECRET` is read on first use, so other procedures never need it.
+   */
+  readonly admissionTokens: AdmissionTokens;
 }
 
 // One client per server process: the Neon driver pools internally, and a fresh client per
@@ -84,7 +91,14 @@ const queueStore = createLazyQueueStore({ readEnv: () => process.env, logger, pr
 
 const random: Random = { next: () => Math.random() };
 
-export async function createTRPCContext({ req }: { req: Request }): Promise<TRPCContext> {
+export async function createTRPCContext({
+  req,
+  resHeaders,
+}: {
+  req: Request;
+  /** The response's headers; admission cookies are appended to them. */
+  resHeaders: Headers;
+}): Promise<TRPCContext> {
   const { SESSION_SECRET } = parseSessionEnv(process.env);
   const identity = createIdentityService({ sessionSecret: SESSION_SECRET });
   const cookies = cookieReader(req.headers.get("cookie"));
@@ -94,8 +108,9 @@ export async function createTRPCContext({ req }: { req: Request }): Promise<TRPC
     cookies.get(ADMIN_COOKIE)?.value,
     new Date(),
   );
+  const now = () => new Date();
   return {
-    now: () => new Date(),
+    now,
     principal,
     isAdmin,
     db: database(),
@@ -106,6 +121,12 @@ export async function createTRPCContext({ req }: { req: Request }): Promise<TRPC
     rateLimiter,
     queueStore,
     random,
+    admissionTokens: createAdmissionTokens({
+      secret: () => parseAdmissionEnv(process.env).ADMISSION_SECRET,
+      cookies,
+      setCookie: (cookie) => resHeaders.append("set-cookie", admissionSetCookie(cookie)),
+      now,
+    }),
   };
 }
 
@@ -143,3 +164,28 @@ export const adminProcedure = t.procedure.use(({ ctx, next }) => {
   }
   return next();
 });
+
+/**
+ * Procedures only an admitted buyer may call (ADR 0008; only `booking.holdSeats`). The input must
+ * carry `eventId`. The token's signature and `exp` are checked by `admissionTokens.read`; here
+ * `sub` must be this session, `eid` the requested event, and the `jti` still in the event's
+ * admitted set, so an admission revoked by a freed slot stops working at once. Redis is consulted
+ * last and its failure fails the call: seats are never held on an unverified admission.
+ */
+export const admittedProcedure = t.procedure
+  .input(z.object({ eventId: z.uuid() }))
+  .use(async ({ ctx, input, next }) => {
+    const claims = await ctx.admissionTokens.read(input.eventId);
+    const admitted =
+      claims !== undefined &&
+      claims.sessionId === ctx.principal.sessionId &&
+      claims.eventId === input.eventId &&
+      (await (await ctx.queueStore()).isAdmitted(input.eventId, claims.jti, ctx.now()));
+    if (!admitted) {
+      throw new TRPCError({
+        code: "FORBIDDEN",
+        message: `No valid admission for event ${input.eventId}; join its queue first`,
+      });
+    }
+    return next();
+  });

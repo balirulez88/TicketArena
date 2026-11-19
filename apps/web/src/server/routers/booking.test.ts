@@ -2,12 +2,18 @@ import { randomUUID } from "node:crypto";
 import { type OccupyOptions, occupy } from "@ticketarena/booking/testing";
 import { silentLogger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
-import { setupTestDatabase } from "@ticketarena/test-infra";
+import { setupTestDatabase, setupTestRedis } from "@ticketarena/test-infra";
+import { createRedisQueueStore } from "@ticketarena/waiting-room";
+import { SignJWT } from "jose";
+import { createClient } from "redis";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import type { Principal } from "../identity/identity";
+import { createBrowserCookies } from "../testing/browser-cookies";
 import { createCaller } from "./_app";
 
 const database = setupTestDatabase();
+const redis = setupTestRedis();
+const redisClient = createClient({ url: redis.url });
 let prisma: PrismaClient | undefined;
 
 function db(): PrismaClient {
@@ -20,9 +26,18 @@ const NOW = new Date("2027-03-01T12:00:00.000Z");
 let alice: Principal = { kind: "guest", sessionId: "a".repeat(32) };
 const bob: Principal = { kind: "guest", sessionId: "b".repeat(32) };
 
-function caller(principal: Principal) {
+const ADMISSION_SECRET = "k".repeat(32);
+
+const browser = createBrowserCookies(ADMISSION_SECRET);
+const jarOf = (principal: Principal) => browser.jarOf(principal.sessionId);
+const admissionTokensFor = (principal: Principal, now: Date) =>
+  browser.admissionTokens(principal.sessionId, now);
+
+const queueStore = async () => createRedisQueueStore(redisClient, { prefix: redis.prefix });
+
+function caller(principal: Principal, now: Date = NOW) {
   return createCaller({
-    now: () => NOW,
+    now: () => now,
     principal,
     isAdmin: false,
     db: db(),
@@ -37,9 +52,23 @@ function caller(principal: Principal) {
     rateLimiter: () => {
       throw new Error("nothing is rate-limited here");
     },
-    queueStore: () => Promise.reject(new Error("the queue is not used here")),
+    queueStore,
     random: { next: () => 0 },
+    admissionTokens: admissionTokensFor(principal, now),
   });
+}
+
+/**
+ * Admits the session the way a browser is: join (the seeded demo event's queue has closed, so
+ * join admits at once), then the status poll that stores the admission token in its cookies.
+ */
+async function admit(principal: Principal, eventId: string, now: Date = NOW): Promise<void> {
+  await caller(principal, now).queue.join({ eventId });
+  await caller(principal, now).queue.status({ eventId });
+}
+
+async function demoEventId(): Promise<string> {
+  return (await db().event.findFirstOrThrow({ where: { demo: true } })).id;
 }
 
 async function availableSeat() {
@@ -50,15 +79,19 @@ async function availableSeat() {
   return { eventId: event.id, seatId: seat.id };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   alice = { kind: "guest", sessionId: randomUUID().replaceAll("-", "") };
+  await admit(alice, await demoEventId());
 });
 
 beforeAll(async () => {
+  await redisClient.connect();
   await seedCatalog(db(), NOW);
+  await admit(bob, await demoEventId());
 });
 
 afterAll(async () => {
+  redisClient.destroy();
   await prisma?.$disconnect();
 });
 
@@ -89,6 +122,26 @@ describe("booking.holdSeats", () => {
       code: "CONFLICT",
       message: expect.stringContaining(`SEAT_UNAVAILABLE: ${seatId}`),
     });
+  });
+
+  test("before the event's on-sale is PRECONDITION_FAILED naming NOT_ON_SALE, and nothing is held", async () => {
+    const upcoming = await db().event.findFirstOrThrow({ where: { demo: false } });
+    const seat = await db().seat.findFirstOrThrow({
+      where: { eventId: upcoming.id, status: "AVAILABLE" },
+    });
+    // No real path admits before the on-sale; an admission from a clock past the queue close,
+    // presented earlier, shows the refusal holds whatever admission the buyer has.
+    await admit(alice, upcoming.id, upcoming.queueClosesAt);
+
+    await expect(
+      caller(alice).booking.holdSeats({ eventId: upcoming.id, seatIds: [seat.id] }),
+    ).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+      message: expect.stringContaining("NOT_ON_SALE"),
+    });
+    expect((await db().seat.findUniqueOrThrow({ where: { id: seat.id } })).status).toBe(
+      "AVAILABLE",
+    );
   });
 
   test("rejects a malformed seat id naming the field", async () => {
@@ -293,25 +346,7 @@ describe("booking.placeOrder / getOrder", () => {
 
   test("HOLD_EXPIRED is a PRECONDITION_FAILED", async () => {
     const hold = await heldHold();
-    const late = createCaller({
-      now: () => new Date("2027-03-01T12:10:00.000Z"),
-      principal: alice,
-      isAdmin: false,
-      db: db(),
-      logger: silentLogger,
-      metrics: () => ({ increment: async () => undefined }),
-      metricsReader: () => {
-        throw new Error("metrics are not read here");
-      },
-      metricsReset: () => {
-        throw new Error("metrics are not reset here");
-      },
-      rateLimiter: () => {
-        throw new Error("nothing is rate-limited here");
-      },
-      queueStore: () => Promise.reject(new Error("the queue is not used here")),
-      random: { next: () => 0 },
-    });
+    const late = caller(alice, new Date("2027-03-01T12:10:00.000Z"));
 
     await expect(
       late.booking.placeOrder({ holdId: hold.id, contact, idempotencyKey: randomUUID() }),
@@ -362,8 +397,9 @@ describe("booking.holdSeats saturation", () => {
           rateLimiter: () => {
             throw new Error("nothing is rate-limited here");
           },
-          queueStore: () => Promise.reject(new Error("the queue is not used here")),
+          queueStore,
           random: { next: () => 0 },
+          admissionTokens: admissionTokensFor(alice, NOW),
         }).booking.holdSeats({ eventId, seatIds: [seatId] }),
       ).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS", message: /BOOKING_BUSY/ });
     } finally {
@@ -380,5 +416,129 @@ describe("booking.holdSeats saturation", () => {
     await expectHoldRefusedAsBusy({
       beforeStart: () => new Promise((resolve) => setTimeout(resolve, 150)),
     });
+  });
+});
+
+describe("booking.holdSeats admission (AT-40)", () => {
+  function guest(): Principal {
+    return { kind: "guest", sessionId: randomUUID().replaceAll("-", "") };
+  }
+
+  async function expectForbidden(principal: Principal, now: Date = NOW): Promise<void> {
+    const { eventId, seatId } = await availableSeat();
+    await expect(
+      caller(principal, now).booking.holdSeats({ eventId, seatIds: [seatId] }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect((await db().seat.findUniqueOrThrow({ where: { id: seatId } })).status).toBe("AVAILABLE");
+  }
+
+  test("without an admission token is FORBIDDEN and nothing is held", async () => {
+    await expectForbidden(guest());
+  });
+
+  test("with an expired admission token is FORBIDDEN", async () => {
+    const carol = guest();
+    await admit(carol, await demoEventId());
+
+    await expectForbidden(carol, new Date(NOW.getTime() + 30 * 60_000));
+  });
+
+  test("with another session's admission token is FORBIDDEN", async () => {
+    const eventId = await demoEventId();
+    const [carol, mallory] = [guest(), guest()];
+    await admit(carol, eventId);
+    jarOf(mallory).set(`ta_adm_${eventId}`, jarOf(carol).get(`ta_adm_${eventId}`) ?? "");
+
+    await expectForbidden(mallory);
+  });
+
+  test("with another event's admission token is FORBIDDEN", async () => {
+    const demoId = await demoEventId();
+    const other = await db().event.findFirstOrThrow({ where: { demo: false } });
+    const carol = guest();
+    // Admitted to the other event (its queue has closed by then), never to the demo event.
+    await admit(carol, other.id, other.queueClosesAt);
+    jarOf(carol).set(`ta_adm_${demoId}`, jarOf(carol).get(`ta_adm_${other.id}`) ?? "");
+
+    await expectForbidden(carol);
+  });
+
+  test("with a revoked admission (the slot was freed by leaving) is FORBIDDEN", async () => {
+    const eventId = await demoEventId();
+    const carol = guest();
+    await admit(carol, eventId);
+    await caller(carol).queue.leave({ eventId });
+
+    expect(jarOf(carol).has(`ta_adm_${eventId}`)).toBe(true);
+    await expectForbidden(carol);
+  });
+
+  test("with a token signed under another secret is FORBIDDEN", async () => {
+    const eventId = await demoEventId();
+    const carol = guest();
+    await admit(carol, eventId);
+    const { jti } = JSON.parse(
+      Buffer.from(
+        jarOf(carol).get(`ta_adm_${eventId}`)?.split(".")[1] ?? "",
+        "base64url",
+      ).toString(),
+    ) as { jti: string };
+    const forged = await new SignJWT({ eid: eventId })
+      .setProtectedHeader({ alg: "HS256" })
+      .setSubject(carol.sessionId)
+      .setJti(jti)
+      .setExpirationTime(Math.floor(NOW.getTime() / 1000) + 600)
+      .sign(new TextEncoder().encode("f".repeat(32)));
+    jarOf(carol).set(`ta_adm_${eventId}`, forged);
+
+    await expectForbidden(carol);
+  });
+
+  test("with a valid admission holds the seats", async () => {
+    const carol = guest();
+    await admit(carol, await demoEventId());
+    const { eventId, seatId } = await availableSeat();
+
+    await expect(
+      caller(carol).booking.holdSeats({ eventId, seatIds: [seatId] }),
+    ).resolves.toMatchObject({ status: "HELD" });
+  });
+});
+
+describe("booking.placeOrder without admission (AT-41)", () => {
+  const minutes = (count: number) => new Date(NOW.getTime() + count * 60_000);
+
+  test("succeeds after the admission expired while the hold is valid", async () => {
+    const { eventId, seatId } = await availableSeat();
+    // Admitted at NOW (beforeEach), held at +25 min: the hold runs to +35, the admission to +30.
+    const hold = await caller(alice, minutes(25)).booking.holdSeats({
+      eventId,
+      seatIds: [seatId],
+    });
+    await expect(
+      caller(alice, minutes(31)).booking.holdSeats({ eventId, seatIds: [seatId] }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    const order = await caller(alice, minutes(31)).booking.placeOrder({
+      holdId: hold.id,
+      contact: { email: "alice@example.com" },
+      idempotencyKey: randomUUID(),
+    });
+
+    expect(order).toMatchObject({ holdId: hold.id, status: "PENDING_PAYMENT" });
+  });
+
+  test("fails for a hold owned by another buyer, even an admitted one", async () => {
+    const { eventId, seatId } = await availableSeat();
+    const hold = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatId] });
+
+    await expect(
+      caller(bob).booking.placeOrder({
+        holdId: hold.id,
+        contact: { email: "bob@example.com" },
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect((await db().hold.findUniqueOrThrow({ where: { id: hold.id } })).status).toBe("HELD");
   });
 });

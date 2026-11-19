@@ -46,3 +46,13 @@ the queue must be enforced by the backend, not by the UI.
 
 - Redis loss degrades fairness, never correctness (seat state is in Postgres, ADR 0005).
 - Guest identity is a cookie, so a buyer can rejoin as a new session; bot mitigation is phase 2.
+
+## Amendments
+
+- **2026-11-19, queue phases (tickets 28, 31 and 61):** "outside the queue window the policy
+  admits immediately" means only _after_ the window. The `AdmissionPolicy` has three phases.
+  Before `queueOpensAt`, `join` answers `NOT_OPEN` and issues no admission, so an early arrival
+  cannot hold an admission that skips the randomized pre-queue. Between `queueOpensAt` and
+  `queueClosesAt` the queue applies. From `queueClosesAt`, `join` admits at once, without the
+  token bucket and `maxActive`. Independently, `holdSeats` refuses every hold before the event's
+  `onSaleAt`, and the ticker admits no one before it. Recorded in `.devflow/questions.md`.

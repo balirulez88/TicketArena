@@ -2,6 +2,8 @@
 
 import { useQuery } from "@tanstack/react-query";
 import type { inferRouterOutputs } from "@trpc/server";
+import { HoldControls } from "@/components/hold/hold-controls";
+import { QUEUE_POLL_MS, QueuePanel, useQueueStatus } from "@/components/queue/queue-room";
 import { SeatMap } from "@/components/seat-map/seat-map";
 import { SeatSelectionProvider } from "@/components/seat-map/seat-selection";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -54,14 +56,32 @@ function EventDetails({ event }: { readonly event: EventDetail }) {
   );
 }
 
-function EventSeats({ eventId }: { readonly eventId: string }) {
+/**
+ * The seat map and the hold controls under it. Once admitted the map polls
+ * every 3 s like `queue.status`, so seats taken by others show up while the buyer chooses.
+ * A failed background refresh keeps the last seats on screen: the hold controls own the live
+ * hold, the checkout and its idempotency key, so unmounting them on a transient error would lose
+ * purchase state the server still has.
+ */
+function EventSeats({
+  eventId,
+  admitted,
+}: {
+  readonly eventId: string;
+  readonly admitted: boolean;
+}) {
   const trpc = useTRPC();
-  const seatMap = useQuery(trpc.seats.map.queryOptions({ eventId }));
+  const seatMap = useQuery(
+    trpc.seats.map.queryOptions(
+      { eventId },
+      admitted ? { staleTime: 0, refetchInterval: QUEUE_POLL_MS } : {},
+    ),
+  );
 
   if (seatMap.isPending) {
     return <p className="text-muted-foreground">Loading seats…</p>;
   }
-  if (seatMap.isError) {
+  if (seatMap.data === undefined) {
     return (
       <p role="alert" className="text-destructive">
         Seats could not be loaded.
@@ -69,10 +89,31 @@ function EventSeats({ eventId }: { readonly eventId: string }) {
     );
   }
   return (
-    // Keyed by event so moving to another event starts with an empty selection.
-    <SeatSelectionProvider key={eventId}>
+    <>
+      {seatMap.isError ? (
+        <p role="status" className="text-muted-foreground text-sm">
+          The seat map could not be refreshed; it shows the last known seats.
+        </p>
+      ) : null}
       <SeatMap seats={seatMap.data.seats} />
-    </SeatSelectionProvider>
+      <HoldControls eventId={eventId} seats={seatMap.data.seats} admitted={admitted} />
+    </>
+  );
+}
+
+/** Joining the queue, the queue room, and the seat map with holding once admitted. */
+function BuyingFlow({ eventId }: { readonly eventId: string }) {
+  const queue = useQueueStatus(eventId);
+  return (
+    <>
+      <QueuePanel eventId={eventId} queue={queue} />
+      <section aria-labelledby="seat-map-heading" className="flex flex-col gap-4">
+        <h2 id="seat-map-heading" className="font-semibold text-xl">
+          Seat map
+        </h2>
+        <EventSeats eventId={eventId} admitted={queue.phase === "ADMITTED"} />
+      </section>
+    </>
   );
 }
 
@@ -88,22 +129,22 @@ export function EventPage({ eventId }: { readonly eventId: string }) {
   if (event.isPending) {
     return <p className="text-muted-foreground">Loading event…</p>;
   }
-  if (event.isError) {
+  // Only a first load without data replaces the page: a failed refetch keeps the event, and the
+  // buying flow under it, on screen.
+  if (event.data === undefined) {
     return (
       <p role="alert" className="text-destructive">
-        {isMissing(event.error.data?.code) ? "Event not found." : "Event could not be loaded."}
+        {isMissing(event.error?.data?.code) ? "Event not found." : "Event could not be loaded."}
       </p>
     );
   }
   return (
     <div className="flex flex-col gap-8">
       <EventDetails event={event.data} />
-      <section aria-labelledby="seat-map-heading" className="flex flex-col gap-4">
-        <h2 id="seat-map-heading" className="font-semibold text-xl">
-          Seat map
-        </h2>
-        <EventSeats eventId={eventId} />
-      </section>
+      {/* Keyed by event so moving to another event starts with an empty selection. */}
+      <SeatSelectionProvider key={eventId}>
+        <BuyingFlow eventId={eventId} />
+      </SeatSelectionProvider>
     </div>
   );
 }

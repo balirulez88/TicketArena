@@ -1,11 +1,17 @@
 import type { AdmissionPolicy } from "./ports";
 
-/** MVP policy: the queue is active from `queueOpensAt` (inclusive) to `queueClosesAt` (exclusive). */
+/**
+ * MVP policy: `NOT_OPEN` before `queueOpensAt`, `ACTIVE` from `queueOpensAt` (inclusive) to
+ * `queueClosesAt` (exclusive), `CLOSED` from then on.
+ */
 export function createScheduleAdmissionPolicy(): AdmissionPolicy {
   return {
-    isQueueActive(event, now) {
+    phase(event, now) {
       const time = now.getTime();
-      return time >= event.queueOpensAt.getTime() && time < event.queueClosesAt.getTime();
+      if (time < event.queueOpensAt.getTime()) {
+        return "NOT_OPEN";
+      }
+      return time < event.queueClosesAt.getTime() ? "ACTIVE" : "CLOSED";
     },
   };
 }

@@ -4,7 +4,9 @@
 
 **Blocked by:** 30, 05, 61, 62
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-19 on devflow/run-202611182140 (run 202611182140)
 
 - [ ] On the admitted session's next `queue.status` poll, the web app mints a JWT (HS256, `ADMISSION_SECRET`) with `sub`, `eid`, `jti` and `exp = admittedAt + 30 min`, in the httpOnly cookie `ta_adm_<eventId>`.
 - [ ] `admittedProcedure` checks the signature, `exp`, `sub = principal.sessionId`, `eid = input.eventId`, and that the `jti` is in the admitted set; otherwise `FORBIDDEN`. Only `holdSeats` uses it.

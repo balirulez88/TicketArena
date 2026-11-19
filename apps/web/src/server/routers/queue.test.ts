@@ -8,9 +8,11 @@ import {
   createScheduleAdmissionPolicy,
   type Random,
 } from "@ticketarena/waiting-room";
+import { jwtVerify } from "jose";
 import { createClient } from "redis";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import type { Principal } from "../identity/identity";
+import { createBrowserCookies } from "../testing/browser-cookies";
 import { createCaller } from "./_app";
 
 const database = setupTestDatabase();
@@ -42,6 +44,13 @@ function guest(): Principal {
   return { kind: "guest", sessionId: randomUUID().replaceAll("-", "") };
 }
 
+const ADMISSION_SECRET = "q".repeat(32);
+
+const browser = createBrowserCookies(ADMISSION_SECRET);
+const jarOf = (principal: Principal) => browser.jarOf(principal.sessionId);
+const admissionTokensFor = (principal: Principal, now: Date) =>
+  browser.admissionTokens(principal.sessionId, now);
+
 function caller(principal: Principal, now: Date, random: Random = { next: () => 0.5 }) {
   return createCaller({
     now: () => now,
@@ -62,6 +71,7 @@ function caller(principal: Principal, now: Date, random: Random = { next: () => 
     queueStore: async () =>
       createRedisQueueStore(redisClient, { prefix: `${redis.prefix}${queuePrefix}` }),
     random,
+    admissionTokens: admissionTokensFor(principal, now),
   });
 }
 
@@ -72,7 +82,9 @@ async function scheduledEvent() {
     eventId: event.id,
     beforeOnSale: new Date(event.onSaleAt.getTime() - 60_000),
     afterOnSale: new Date(event.onSaleAt.getTime() + 60_000),
-    outsideWindow: new Date(event.queueOpensAt.getTime() - 60_000),
+    queueOpensAt: event.queueOpensAt,
+    beforeQueueOpens: new Date(event.queueOpensAt.getTime() - 1),
+    afterQueueCloses: new Date(event.queueClosesAt.getTime() + 60_000),
   };
 }
 
@@ -113,10 +125,23 @@ describe("queue.join", () => {
     });
   });
 
-  test("outside the queue window reports immediate admission eligibility", async () => {
-    const { eventId, outsideWindow } = await scheduledEvent();
+  test("before the queue opens returns NOT_OPEN with the opening time and queues nothing", async () => {
+    const { eventId, queueOpensAt, beforeQueueOpens } = await scheduledEvent();
+    const early = guest();
 
-    expect(await caller(guest(), outsideWindow).queue.join({ eventId })).toEqual({
+    expect(await caller(early, beforeQueueOpens).queue.join({ eventId })).toEqual({
+      status: "NOT_OPEN",
+      queueOpensAt,
+    });
+    expect(await caller(early, beforeQueueOpens).queue.status({ eventId })).toEqual({
+      status: "NOT_QUEUED",
+    });
+  });
+
+  test("after the queue closes reports immediate admission eligibility", async () => {
+    const { eventId, afterQueueCloses } = await scheduledEvent();
+
+    expect(await caller(guest(), afterQueueCloses).queue.join({ eventId })).toEqual({
       status: "ADMISSIBLE",
     });
   });
@@ -179,17 +204,55 @@ describe("admission slots", () => {
     });
   }
 
-  async function admitted(eventId: string, now: Date, principal: Principal) {
+  /** Joins, is admitted by a tick, and (with `poll`) receives the admission token. */
+  async function admitted(eventId: string, now: Date, principal: Principal, poll = true) {
     await caller(principal, now).queue.join({ eventId });
     const ticker = queueServiceAt(now);
     const event = await db().event.findUniqueOrThrow({ where: { id: eventId } });
     const [admission] = await ticker.admitTick(event, { admitRate: 1, maxActive: 10 });
+    if (poll) {
+      await caller(principal, now).queue.status({ eventId });
+    }
     return { ticker, jti: admission?.jti ?? "" };
   }
 
   function later(now: Date, ms: number) {
     return new Date(now.getTime() + ms);
   }
+
+  test("the admitted session's next status poll mints the admission token into ta_adm_<eventId>", async () => {
+    const { eventId, afterOnSale } = await scheduledEvent();
+    const alice = guest();
+    const { jti } = await admitted(eventId, afterOnSale, alice, false);
+    expect(jarOf(alice).has(`ta_adm_${eventId}`)).toBe(false);
+
+    await caller(alice, later(afterOnSale, 5_000)).queue.status({ eventId });
+
+    const token = jarOf(alice).get(`ta_adm_${eventId}`) ?? "";
+    const { payload, protectedHeader } = await jwtVerify(
+      token,
+      new TextEncoder().encode(ADMISSION_SECRET),
+      { currentDate: afterOnSale },
+    );
+    expect(protectedHeader.alg).toBe("HS256");
+    expect(payload).toMatchObject({
+      sub: alice.sessionId,
+      eid: eventId,
+      jti,
+      // admittedAt + 30 min, not the poll time.
+      exp: Math.floor(later(afterOnSale, 30 * 60_000).getTime() / 1000),
+    });
+  });
+
+  test("a queued session's status poll mints no token", async () => {
+    const { eventId, afterOnSale } = await scheduledEvent();
+    const alice = guest();
+    await caller(alice, afterOnSale).queue.join({ eventId });
+
+    await caller(alice, afterOnSale).queue.status({ eventId });
+
+    expect(jarOf(alice).size).toBe(0);
+  });
 
   test("an admitted session's status poll reports ADMITTED and heartbeats its slot", async () => {
     const { eventId, afterOnSale } = await scheduledEvent();
@@ -203,6 +266,31 @@ describe("admission slots", () => {
     // Last seen at +60 s, so a reap at +120 s (cutoff +30 s) keeps the slot.
     expect(await queueServiceAt(later(afterOnSale, 120_000)).reap(eventId)).toEqual([]);
     expect(await ticker.counts(eventId)).toEqual({ queued: 0, active: 1 });
+  });
+
+  test("join by an admitted session returns ADMITTED and keeps its admission", async () => {
+    const { eventId, afterOnSale } = await scheduledEvent();
+    const alice = guest();
+    const { ticker, jti } = await admitted(eventId, afterOnSale, alice);
+
+    expect(await caller(alice, afterOnSale).queue.join({ eventId })).toEqual({
+      status: "ADMITTED",
+    });
+
+    expect(await ticker.isAdmitted(eventId, jti)).toBe(true);
+    expect(await ticker.counts(eventId)).toEqual({ queued: 0, active: 1 });
+  });
+
+  test("after leaving, an admitted session joins again and is queued", async () => {
+    const { eventId, afterOnSale } = await scheduledEvent();
+    const alice = guest();
+    await admitted(eventId, afterOnSale, alice);
+    await caller(alice, afterOnSale).queue.leave({ eventId });
+
+    expect(await caller(alice, afterOnSale).queue.join({ eventId })).toMatchObject({
+      status: "QUEUED",
+      position: 1,
+    });
   });
 
   test("AT-39: leave frees the slot and revokes the admission", async () => {
@@ -274,8 +362,11 @@ describe("admission slots", () => {
         },
         queueStore: () => Promise.reject(new Error("redis is down")),
         random: { next: () => 0.5 },
+        admissionTokens: admissionTokensFor(alice, now),
       });
-    const hold = await unavailable(afterOnSale).booking.holdSeats({
+    await admitted(eventId, afterOnSale, alice);
+    // The hold needs the admitted set in Redis; the order must not.
+    const hold = await caller(alice, afterOnSale).booking.holdSeats({
       eventId,
       seatIds: [seat.id],
     });

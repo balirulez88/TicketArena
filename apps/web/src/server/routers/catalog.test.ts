@@ -32,6 +32,10 @@ function caller() {
     },
     queueStore: () => Promise.reject(new Error("the queue is not used here")),
     random: { next: () => 0 },
+    admissionTokens: {
+      issue: () => Promise.reject(new Error("admission is not used here")),
+      read: () => Promise.reject(new Error("admission is not used here")),
+    },
   });
 }
 

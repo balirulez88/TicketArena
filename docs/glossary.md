@@ -10,7 +10,7 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **On-sale**            | The moment an Event's tickets become purchasable; the traffic spike begins.                            |
 | **Waiting room**       | The queue buyers enter before an on-sale or under load, before they may reach checkout.                |
 | **Admission**          | Moving a buyer from the waiting room to checkout by granting a time-limited token.                     |
-| **Admission token**    | Proof a buyer was admitted; required by booking procedures; expires.                                   |
+| **Admission token**    | Proof a buyer was admitted to one event; required only to hold seats; expires 30 min after admission.  |
 | **Hold**               | A temporary, exclusive reservation of seat(s) for one buyer during checkout; expires.                  |
 | **Booking**            | A confirmed purchase of held seats. The point at which a seat is sold.                                 |
 | **Pre-queue**          | Buyers who joined before `onSaleAt`; they get random positions ahead of later joiners.                 |
@@ -18,6 +18,7 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Principal**          | Who is calling: a guest session now, a user later. Resolved by `IdentityService`.                      |
 | **BuyerKey**           | a user's `userId`, else the guest `sessionId`; the key for ticket limits and ownership.                |
 | **Order**              | A checkout of one hold: `PENDING_PAYMENT` → `CONFIRMED`, `CANCELLED` or `EXPIRED`.                     |
+| **Checkout attempt**   | One hold plus the contact submitted for it; owns one `idempotencyKey`, reused on retries.              |
 | **Lead driver**        | The opt-in execution driver (`RALPH_DRIVER=lead`): one Lead session per ticket; Ralph stays default.   |
 | **Recovery hold**      | Harness, not a seat Hold: `refs/ralph/recovery/<slug>`; no Ralph run until a human releases it.        |
 | **Payment deadline**   | Fixed `placeOrder` time + 5 min; a payment is on time iff `capturedAt` ≤ it.                           |
@@ -48,6 +49,7 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Admin snapshot**     | `admin.snapshot`: live seat, order, payment, queue and counter figures; `/admin` polls it each 1s.     |
 | **Seat map**           | The event page's grid of seat buttons by section; shows each seat's price and status.                  |
 | **Seat selection**     | Up to 6 available seats a visitor picked on the seat map before a hold; client-only state.             |
+| **Queue room**         | The event page's view while queued: position and ETA, polling `queue.status` until admitted.           |
 | **Slice**              | One tracer-bullet ticket: a thin, complete path through every layer, green on its own.                 |
 | **Seam**               | A public interface where tests observe behaviour without reaching inside.                              |
 | **Debt gate**          | The host check that holds a ticket on unresolved or untriaged technical debt it relies on (ADR 0016).  |

@@ -80,7 +80,10 @@ describe("proxy and tRPC context agree on the first-visit session", () => {
     const response = await proxy(original);
     const issued = response.cookies.get(SESSION_COOKIE)?.value;
 
-    const { principal } = await createTRPCContext({ req: downstreamRequest(original, response) });
+    const { principal } = await createTRPCContext({
+      req: downstreamRequest(original, response),
+      resHeaders: new Headers(),
+    });
 
     expect(issued).toBeTruthy();
     expect(principal.sessionId).toBe(issued?.split(".")[0]);
@@ -94,7 +97,10 @@ describe("proxy and tRPC context agree on the first-visit session", () => {
     const response = await proxy(original);
     const issued = response.cookies.get(SESSION_COOKIE)?.value;
 
-    const { principal } = await createTRPCContext({ req: downstreamRequest(original, response) });
+    const { principal } = await createTRPCContext({
+      req: downstreamRequest(original, response),
+      resHeaders: new Headers(),
+    });
 
     expect(issued).toBeTruthy();
     expect(principal.sessionId).toBe(issued?.split(".")[0]);

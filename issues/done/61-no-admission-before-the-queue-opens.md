@@ -4,7 +4,9 @@
 
 **Blocked by:** 28
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-18 on devflow/run-202611182140 (run 202611182140)
 
 - [ ] `join` before `queueOpensAt` answers `NOT_OPEN` with the time the queue opens, adds nothing to the queue and admits no one; `AdmissionPolicy` exposes the three phases (not open, active, closed) instead of one boolean.
 - [ ] `join` at exactly `queueOpensAt` queues the buyer in the pre-queue; `join` at or after `queueClosesAt` still answers `ADMISSIBLE`.

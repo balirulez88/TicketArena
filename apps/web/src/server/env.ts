@@ -19,6 +19,10 @@ function isHttpsOrLocalHttp(value: string): boolean {
   );
 }
 
+const atLeast32Bytes = z
+  .string()
+  .refine((secret) => new TextEncoder().encode(secret).length >= 32, "must be at least 32 bytes");
+
 const serverEnvSchema = z.object({
   DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
   /** `neon` (serverless driver, the default) for Neon; `pg` for a local or plain Postgres. */
@@ -29,14 +33,19 @@ const serverEnvSchema = z.object({
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
   /** node-redis connection for the waiting-room queue (`redis://` locally, `rediss://` hosted). */
   REDIS_URL: z.url({ protocol: /^rediss?$/ }),
-  SESSION_SECRET: z
-    .string()
-    .refine((secret) => new TextEncoder().encode(secret).length >= 32, "must be at least 32 bytes"),
+  SESSION_SECRET: atLeast32Bytes,
+  /**
+   * HS256 key of the admission token (ADR 0008). Separate from SESSION_SECRET so rotating it
+   * revokes every admission token without logging out any session.
+   */
+  ADMISSION_SECRET: atLeast32Bytes,
   /** The operator password for `/admin` (ADR 0012); only the login route reads it. */
   ADMIN_PASSWORD: z.string().min(12, "must be at least 12 characters"),
 });
 
 const sessionEnvSchema = serverEnvSchema.pick({ SESSION_SECRET: true });
+
+const admissionEnvSchema = serverEnvSchema.pick({ ADMISSION_SECRET: true });
 
 const adminEnvSchema = serverEnvSchema.pick({ ADMIN_PASSWORD: true, SESSION_SECRET: true });
 
@@ -77,6 +86,14 @@ export function parseServerEnv(source: EnvSource): ServerEnv {
  */
 export function parseSessionEnv(source: EnvSource): Pick<ServerEnv, "SESSION_SECRET"> {
   return parseEnv(sessionEnvSchema, source, "session");
+}
+
+/**
+ * Validates only the admission-token secret, resolved when a procedure first signs or verifies an
+ * admission token, so a missing value never breaks requests that do not use admission.
+ */
+export function parseAdmissionEnv(source: EnvSource): Pick<ServerEnv, "ADMISSION_SECRET"> {
+  return parseEnv(admissionEnvSchema, source, "admission");
 }
 
 /**

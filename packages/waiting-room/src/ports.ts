@@ -25,12 +25,26 @@ export type JoinScore =
   | { readonly kind: "SEQUENCE" };
 
 /**
+ * What a store join did: queued the member (or found it queued) at a 1-based `position`, or
+ * found it holding a slot and left everything as it was (`ADMITTED`).
+ */
+export type JoinOutcome =
+  | { readonly status: "QUEUED"; readonly position: number }
+  | { readonly status: "ADMITTED" };
+
+/**
  * Per-event queue storage. Every mutation is atomic, so concurrent joins never share a sequence
  * number and a re-join never moves a member (`ZADD NX`). Positions are 1-based.
  */
 export interface QueueStore {
-  /** Adds the member unless already queued and returns its current position. */
-  join(eventId: string, member: string, score: JoinScore): Promise<number>;
+  /**
+   * Answers `ADMITTED` without touching the queue, the slot or the `jti` when the member holds a
+   * slot whose admission is still valid at `now`. A slot whose admission expired (the reaper has
+   * not freed it yet) is freed and its `jti` revoked. Otherwise, or after that, adds the member
+   * unless already queued and returns its current position. The check, the removal and the queue
+   * write are one atomic step, so a delayed join never frees a slot granted after it was sent.
+   */
+  join(eventId: string, member: string, score: JoinScore, now: Date): Promise<JoinOutcome>;
   /** The member's position, or `null` when it is not queued. */
   position(eventId: string, member: string): Promise<number | null>;
   /**
@@ -52,6 +66,18 @@ export interface QueueStore {
    * their `jti`s, and drops expired `jti`s; returns the freed members.
    */
   reap(eventId: string, cutoffs: ReapCutoffs): Promise<readonly string[]>;
+  /**
+   * Gives the member a slot and the admission `jti` valid until `now + admissionTtlMs`, outside
+   * the queue and the token bucket (the queue has closed: admission is immediate), and removes it
+   * from the queue; one atomic step. A member that already holds a slot keeps it and its `jti`.
+   * `true` when a slot was created.
+   */
+  admitImmediately(eventId: string, member: string, grant: ImmediateAdmission): Promise<boolean>;
+  /**
+   * The admission of the member's slot, or `null` when it holds none or its admission expired by
+   * `now` (whether or not the reaper has freed the slot yet).
+   */
+  admission(eventId: string, member: string, now: Date): Promise<SlotAdmission | null>;
   /** `true` while the `jti` is in the event's admitted set and has not expired by `now`. */
   isAdmitted(eventId: string, jti: string, now: Date): Promise<boolean>;
   /** Queue length and active-slot count, read in one atomic step. */
@@ -77,6 +103,18 @@ export interface AdmitRequest {
   readonly jtis: readonly string[];
 }
 
+export interface ImmediateAdmission {
+  readonly now: Date;
+  readonly admissionTtlMs: number;
+  readonly jti: string;
+}
+
+/** A held slot's admission: its `jti` and when it expires (`admittedAt + 30 min`). */
+export interface SlotAdmission {
+  readonly jti: string;
+  readonly expiresAt: Date;
+}
+
 export interface Admission {
   readonly sessionId: string;
   readonly jti: string;
@@ -100,7 +138,13 @@ export interface AdmissionLimits {
   readonly maxActive: number;
 }
 
-/** Decides whether an event's waiting room is in force; load-based activation is phase 2. */
+/**
+ * Where an event's waiting room stands: `NOT_OPEN` (nobody may join or be admitted yet), `ACTIVE`
+ * (joins queue) or `CLOSED` (joins are admissible at once).
+ */
+export type QueuePhase = "NOT_OPEN" | "ACTIVE" | "CLOSED";
+
+/** Decides an event's queue phase; load-based activation is phase 2. */
 export interface AdmissionPolicy {
-  isQueueActive(event: EventSchedule, now: Date): boolean;
+  phase(event: EventSchedule, now: Date): QueuePhase;
 }

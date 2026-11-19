@@ -5,6 +5,8 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { createRedisQueueStore } from "./index";
 import { describeQueueStoreContract } from "./queue-store-contract";
 
+const T0 = new Date("2027-05-01T10:00:00.000Z");
+
 const redis = setupTestRedis();
 const client = createClient({ url: redis.url });
 
@@ -39,10 +41,10 @@ describe("RedisQueueStore", () => {
     const store = createRedisQueueStore(client, { prefix: namespace });
     const eventId = randomUUID();
 
-    await store.join(eventId, "early", { kind: "PRE_QUEUE", score: 0.25 });
-    await store.join(eventId, "late-1", { kind: "SEQUENCE" });
-    await store.join(eventId, "late-1", { kind: "SEQUENCE" });
-    await store.join(eventId, "late-2", { kind: "SEQUENCE" });
+    await store.join(eventId, "early", { kind: "PRE_QUEUE", score: 0.25 }, T0);
+    await store.join(eventId, "late-1", { kind: "SEQUENCE" }, T0);
+    await store.join(eventId, "late-1", { kind: "SEQUENCE" }, T0);
+    await store.join(eventId, "late-2", { kind: "SEQUENCE" }, T0);
 
     const queueKey = `${namespace}waiting-room:{${eventId}}:queue`;
     expect(await client.zRangeWithScores(queueKey, 0, -1)).toEqual([

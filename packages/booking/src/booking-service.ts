@@ -188,6 +188,19 @@ export class BookingBusyError extends Error {
   }
 }
 
+/** The event's on-sale has not begun: no seat of it can be held yet (ADR 0008, defence in depth). */
+export class NotOnSaleError extends Error {
+  readonly code = "NOT_ON_SALE";
+
+  constructor(
+    readonly eventId: string,
+    readonly onSaleAt: Date,
+  ) {
+    super(`NOT_ON_SALE: event ${eventId} goes on sale at ${onSaleAt.toISOString()}`);
+    this.name = "NotOnSaleError";
+  }
+}
+
 export class InvalidSeatSelectionError extends Error {
   readonly code = "INVALID_SEAT_SELECTION";
 
@@ -814,6 +827,13 @@ export function createBookingService({
     }
     if (new Set(seatIds).size !== seatIds.length) {
       throw new InvalidSeatSelectionError("seatIds contains duplicates");
+    }
+    // Defence in depth behind the waiting room: whatever admission a buyer holds, no seat is held
+    // before the on-sale, so arriving early can never beat the randomized pre-queue (ADR 0008).
+    // An unknown event passes here and is refused below: none of its seats exist.
+    const event = await db.event.findUnique({ where: { id: eventId }, select: { onSaleAt: true } });
+    if (event !== null && clock.now().getTime() < event.onSaleAt.getTime()) {
+      throw new NotOnSaleError(eventId, event.onSaleAt);
     }
     // Optimization only: the locked step below alone decides success (ADR 0005).
     const { taken, seen } = await snapshot(eventId, seatIds, clock.now());

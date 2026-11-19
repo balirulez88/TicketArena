@@ -112,17 +112,87 @@ describe("QueueService.join", () => {
     expect(await service.join(event, "c")).toMatchObject({ status: "QUEUED", position: 3 });
   });
 
-  test("outside the queue window, join reports immediate admission eligibility and queues nothing", async () => {
+  test("before queueOpensAt, join answers NOT_OPEN with the opening time, queues nothing and admits no one", async () => {
     const event = schedule();
-    const clock = { now: new Date("2027-05-01T09:00:00.000Z") };
+    const clock = { now: new Date("2027-05-01T09:54:59.999Z") };
     const service = serviceAt(clock);
 
-    expect(await service.join(event, "too-early")).toEqual({ status: "ADMISSIBLE" });
-    clock.now = new Date("2027-05-01T11:00:00.000Z");
-    expect(await service.join(event, "after-close")).toEqual({ status: "ADMISSIBLE" });
+    expect(await service.join(event, "too-early")).toEqual({
+      status: "NOT_OPEN",
+      queueOpensAt: event.queueOpensAt,
+    });
 
     expect(await service.status(event.id, "too-early")).toEqual({ status: "NOT_QUEUED" });
-    expect(await service.status(event.id, "after-close")).toEqual({ status: "NOT_QUEUED" });
+    expect(await service.counts(event.id)).toEqual({ queued: 0, active: 0 });
+  });
+
+  test("at exactly queueOpensAt, join queues the buyer in the pre-queue", async () => {
+    const event = schedule();
+    const clock = { now: event.queueOpensAt };
+    const service = serviceAt(clock, scriptedRandom([0.9]));
+
+    expect(await service.join(event, "first")).toMatchObject({ status: "QUEUED", position: 1 });
+
+    clock.now = AFTER_ON_SALE;
+    await service.join(event, "later");
+    // A later join scores at least 2, so "first" holds a pre-queue score in [0, 1).
+    expect(await service.status(event.id, "first")).toMatchObject({ position: 1 });
+  });
+
+  test("at or after queueClosesAt, join admits at once without queuing: ADMISSIBLE, then status reports the admission", async () => {
+    const event = schedule();
+    const clock = { now: event.queueClosesAt };
+    const service = serviceAt(clock);
+
+    expect(await service.join(event, "at-close")).toEqual({ status: "ADMISSIBLE" });
+    expect(await service.status(event.id, "at-close")).toEqual({
+      status: "ADMITTED",
+      admission: {
+        jti: expect.any(String),
+        expiresAt: new Date(event.queueClosesAt.getTime() + ADMISSION_TTL_MS),
+      },
+    });
+
+    // Within the first admission's 30 minutes, so both slots are still held.
+    const afterClose = new Date("2027-05-01T11:20:00.000Z");
+    clock.now = afterClose;
+    expect(await service.join(event, "after-close")).toEqual({ status: "ADMISSIBLE" });
+    expect(await service.status(event.id, "after-close")).toMatchObject({
+      status: "ADMITTED",
+      admission: { expiresAt: new Date(afterClose.getTime() + ADMISSION_TTL_MS) },
+    });
+    expect(await service.counts(event.id)).toEqual({ queued: 0, active: 2 });
+  });
+
+  test("after queueClosesAt, a re-join keeps the session's admission", async () => {
+    const event = schedule();
+    const clock = { now: event.queueClosesAt };
+    const service = serviceAt(clock);
+    await service.join(event, "buyer");
+    const first = await service.status(event.id, "buyer");
+
+    clock.now = new Date(event.queueClosesAt.getTime() + 60_000);
+    expect(await service.join(event, "buyer")).toEqual({ status: "ADMISSIBLE" });
+
+    expect(await service.status(event.id, "buyer")).toEqual(first);
+  });
+});
+
+describe("QueueService admission expiry before the reaper runs", () => {
+  test("after queueClosesAt, a re-join after the admission expired gets a fresh admission", async () => {
+    const event = schedule();
+    const clock = { now: event.queueClosesAt };
+    const service = serviceAt(clock);
+    await service.join(event, "buyer");
+    const expired = new Date(event.queueClosesAt.getTime() + ADMISSION_TTL_MS);
+    clock.now = expired;
+
+    expect(await service.status(event.id, "buyer")).toEqual({ status: "NOT_QUEUED" });
+    expect(await service.join(event, "buyer")).toEqual({ status: "ADMISSIBLE" });
+    expect(await service.status(event.id, "buyer")).toMatchObject({
+      status: "ADMITTED",
+      admission: { expiresAt: new Date(expired.getTime() + ADMISSION_TTL_MS) },
+    });
   });
 });
 
@@ -183,12 +253,60 @@ describe("QueueService admission (ticker, slots, reaper)", () => {
     const admitted = await service.admitTick(event, LIMITS);
 
     expect(admitted.map((admission) => admission.sessionId)).toEqual(["s1", "s2", "s3"]);
-    expect(await service.status(event.id, "s1")).toEqual({ status: "ADMITTED" });
+    expect(await service.status(event.id, "s1")).toEqual({
+      status: "ADMITTED",
+      admission: {
+        jti: admitted[0]?.jti,
+        expiresAt: new Date(AFTER_ON_SALE.getTime() + ADMISSION_TTL_MS),
+      },
+    });
     expect(await service.status(event.id, "s4")).toMatchObject({ status: "QUEUED", position: 1 });
     expect(await service.counts(event.id)).toEqual({ queued: 1, active: 3 });
     for (const admission of admitted) {
       expect(await service.isAdmitted(event.id, admission.jti)).toBe(true);
     }
+  });
+
+  test("a session holding a slot joins again: ADMITTED, still one slot, its jti still valid after more ticks", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 4);
+    const [first] = await service.admitTick(event, LIMITS);
+
+    expect(await service.join(event, "s1")).toEqual({ status: "ADMITTED" });
+
+    clock.now = atOffset(1_000);
+    expect((await service.admitTick(event, LIMITS)).map((next) => next.sessionId)).toEqual(["s4"]);
+    expect(await service.isAdmitted(event.id, first?.jti ?? "")).toBe(true);
+    expect(await service.counts(event.id)).toEqual({ queued: 0, active: 4 });
+  });
+
+  test("a session whose slot was freed joins again at the back of the queue", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 4);
+    await service.admitTick(event, LIMITS);
+    await service.releaseSlot(event.id, "s1");
+
+    expect(await service.join(event, "s1")).toMatchObject({ status: "QUEUED", position: 2 });
+  });
+
+  test("status does not report an admission that expired before the reaper ran", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 1);
+    await service.admitTick(event, LIMITS);
+
+    clock.now = atOffset(ADMISSION_TTL_MS);
+
+    expect(await service.status(event.id, "s1")).toEqual({ status: "NOT_QUEUED" });
+  });
+
+  test("a session whose admission expired joins again at the back, before the reaper runs", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const { event, service } = await queued(clock, 4);
+    const [first] = await service.admitTick(event, LIMITS);
+    clock.now = atOffset(ADMISSION_TTL_MS);
+
+    expect(await service.join(event, "s1")).toMatchObject({ status: "QUEUED", position: 2 });
+    expect(await service.isAdmitted(event.id, first?.jti ?? "")).toBe(false);
   });
 
   test("admits no one before onSaleAt, then admits the pre-queue in its random order", async () => {
@@ -307,10 +425,11 @@ describe("AdmissionPolicy (schedule)", () => {
   const policy = createScheduleAdmissionPolicy();
   const event = schedule();
 
-  test("the queue is active from queueOpensAt up to, not including, queueClosesAt", () => {
-    expect(policy.isQueueActive(event, new Date("2027-05-01T09:54:59.999Z"))).toBe(false);
-    expect(policy.isQueueActive(event, event.queueOpensAt)).toBe(true);
-    expect(policy.isQueueActive(event, AFTER_ON_SALE)).toBe(true);
-    expect(policy.isQueueActive(event, event.queueClosesAt)).toBe(false);
+  test("the queue is NOT_OPEN before queueOpensAt, ACTIVE from it up to queueClosesAt, CLOSED from then on", () => {
+    expect(policy.phase(event, new Date("2027-05-01T09:54:59.999Z"))).toBe("NOT_OPEN");
+    expect(policy.phase(event, event.queueOpensAt)).toBe("ACTIVE");
+    expect(policy.phase(event, AFTER_ON_SALE)).toBe("ACTIVE");
+    expect(policy.phase(event, new Date("2027-05-01T10:59:59.999Z"))).toBe("ACTIVE");
+    expect(policy.phase(event, event.queueClosesAt)).toBe("CLOSED");
   });
 });

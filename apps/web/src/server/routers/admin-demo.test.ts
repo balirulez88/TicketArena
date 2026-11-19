@@ -12,6 +12,7 @@ import { createClient } from "redis";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import type { Principal } from "../identity/identity";
 import { createAdminRateLimiter } from "../rate-limiter";
+import { createBrowserCookies } from "../testing/browser-cookies";
 import type { TRPCContext } from "../trpc";
 import { createUpstashMetricsClient } from "../upstash-metrics";
 import { createCaller } from "./_app";
@@ -52,10 +53,14 @@ function freshLimiter(): void {
 }
 beforeEach(freshLimiter);
 
+const browser = createBrowserCookies("d".repeat(32));
+
 function caller(overrides: Partial<TRPCContext> = {}) {
+  const principal = overrides.principal ?? guest();
+  const now = overrides.now ?? (() => NOW);
   return createCaller({
-    now: () => NOW,
-    principal: guest(),
+    now,
+    principal,
     isAdmin: true,
     db: db(),
     logger: silentLogger,
@@ -65,6 +70,7 @@ function caller(overrides: Partial<TRPCContext> = {}) {
     rateLimiter: () => createAdminRateLimiter(upstashClient, limiterPrefix),
     queueStore: async () => queueStore(),
     random: { next: () => 0 },
+    admissionTokens: browser.admissionTokens(principal.sessionId, now()),
     ...overrides,
   });
 }
@@ -128,8 +134,8 @@ describe("admin.resetDemo", () => {
     const counters = createRedisBookingMetrics(redisClient, metricsPrefix);
     await counters.increment("hold_ok", demo.id);
     await counters.increment("hold_ok", other.id);
-    await queueStore().join(demo.id, "q1", { kind: "SEQUENCE" });
-    await queueStore().join(other.id, "q1", { kind: "SEQUENCE" });
+    await queueStore().join(demo.id, "q1", { kind: "SEQUENCE" }, NOW);
+    await queueStore().join(other.id, "q1", { kind: "SEQUENCE" }, NOW);
 
     const reset = await caller().admin.resetDemo();
 
@@ -153,6 +159,8 @@ describe("admin.resetDemo", () => {
       where: { eventId: demo.id, status: "AVAILABLE" },
       take: 1,
     });
+    await caller({ principal: buyer }).queue.join({ eventId: demo.id });
+    await caller({ principal: buyer }).queue.status({ eventId: demo.id });
     const hold = await caller({ principal: buyer }).booking.holdSeats({
       eventId: demo.id,
       seatIds: [seat?.id ?? ""],
@@ -181,7 +189,19 @@ describe("AT-44: race and reset only touch the demo event and are rate-limited",
     const otherIds = others.map((event) => event.id);
     const other = others[0];
     const [seat] = await db().seat.findMany({ where: { eventId: other?.id ?? "" }, take: 1 });
-    await caller().booking.holdSeats({ eventId: other?.id ?? "", seatIds: [seat?.id ?? ""] });
+    // Non-demo events are upcoming at NOW, so the hold is made at the event's on-sale.
+    const onSaleAt = other?.onSaleAt ?? NOW;
+    // Admitted as when its queue has closed; the admission is still valid at the on-sale.
+    const buyer = guest();
+    const closed = other?.queueClosesAt ?? NOW;
+    await caller({ principal: buyer, now: () => closed }).queue.join({ eventId: other?.id ?? "" });
+    await caller({ principal: buyer, now: () => closed }).queue.status({
+      eventId: other?.id ?? "",
+    });
+    await caller({ principal: buyer, now: () => onSaleAt }).booking.holdSeats({
+      eventId: other?.id ?? "",
+      seatIds: [seat?.id ?? ""],
+    });
     const before = await otherEventsState(otherIds);
 
     await caller().admin.runRace();

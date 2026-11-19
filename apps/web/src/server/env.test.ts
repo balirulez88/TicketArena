@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   parseAdminEnv,
+  parseAdmissionEnv,
   parseDatabaseEnv,
   parseMetricsEnv,
   parseQueueEnv,
@@ -14,6 +15,7 @@ const validEnv = {
   UPSTASH_REDIS_REST_TOKEN: "token",
   REDIS_URL: "rediss://default:secret@example.upstash.io:6379",
   SESSION_SECRET: "s".repeat(32),
+  ADMISSION_SECRET: "a".repeat(32),
   ADMIN_PASSWORD: "correct horse battery",
 };
 
@@ -42,6 +44,38 @@ describe("parseServerEnv", () => {
     expect(() => parseServerEnv({ ...validEnv, SESSION_SECRET: "short" })).toThrow(
       /SESSION_SECRET/,
     );
+  });
+});
+
+describe("parseServerEnv ADMISSION_SECRET", () => {
+  test("names ADMISSION_SECRET when it is missing", () => {
+    const { ADMISSION_SECRET: _omitted, ...incomplete } = validEnv;
+    expect(() => parseServerEnv(incomplete)).toThrow(/ADMISSION_SECRET/);
+  });
+
+  test("names ADMISSION_SECRET when it is shorter than 32 bytes", () => {
+    expect(() => parseServerEnv({ ...validEnv, ADMISSION_SECRET: "a".repeat(31) })).toThrow(
+      /ADMISSION_SECRET/,
+    );
+  });
+
+  test("counts bytes, not characters", () => {
+    // 16 two-byte characters are 32 bytes.
+    expect(parseServerEnv({ ...validEnv, ADMISSION_SECRET: "é".repeat(16) }).ADMISSION_SECRET).toBe(
+      "é".repeat(16),
+    );
+  });
+});
+
+describe("parseAdmissionEnv", () => {
+  test("returns the admission secret, ignoring unrelated variables", () => {
+    expect(parseAdmissionEnv({ ADMISSION_SECRET: "a".repeat(32), REDIS_URL: "" })).toEqual({
+      ADMISSION_SECRET: "a".repeat(32),
+    });
+  });
+
+  test("names ADMISSION_SECRET when it is missing", () => {
+    expect(() => parseAdmissionEnv({})).toThrow(/ADMISSION_SECRET/);
   });
 });
 

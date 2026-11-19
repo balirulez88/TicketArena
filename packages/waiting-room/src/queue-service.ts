@@ -8,6 +8,7 @@ import type {
   QueueCounts,
   QueueStore,
   Random,
+  SlotAdmission,
 } from "./ports";
 
 /** A slot not seen (no status poll, no admitted call) for longer than this is reaped (spec). */
@@ -24,13 +25,25 @@ export interface QueuedView {
   readonly etaSeconds: number;
 }
 
-/** Outside the queue window the buyer may proceed at once (spec: "join admits immediately"). */
-export type JoinResult = QueuedView | { readonly status: "ADMISSIBLE" };
+/**
+ * `NOT_OPEN` before the queue opens (nothing queued, no one admitted); `ADMISSIBLE` once the queue
+ * has closed: the session is admitted at once, outside the queue (spec: "join admits
+ * immediately"), and keeps an admission it already holds. `ADMITTED` while the queue is open: the
+ * session already holds a slot and keeps it and its admission.
+ */
+export type JoinResult =
+  | QueuedView
+  | { readonly status: "NOT_OPEN"; readonly queueOpensAt: Date }
+  | { readonly status: "ADMISSIBLE" }
+  | { readonly status: "ADMITTED" };
 
-/** `ADMITTED`: the session holds one of the event's active slots. */
+/**
+ * `ADMITTED`: the session holds one of the event's active slots, with that slot's admission (the
+ * web app signs it into the admission token).
+ */
 export type StatusResult =
   | QueuedView
-  | { readonly status: "ADMITTED" }
+  | { readonly status: "ADMITTED"; readonly admission: SlotAdmission }
   | { readonly status: "NOT_QUEUED" };
 
 export interface QueueService {
@@ -77,7 +90,20 @@ export function createQueueService(deps: QueueServiceDeps): QueueService {
   return {
     async join(event, sessionId) {
       const now = deps.clock.now();
-      if (!deps.policy.isQueueActive(event, now)) {
+      const phase = deps.policy.phase(event, now);
+      // Admitting before the queue opens would hand an early arrival an admission still valid at
+      // onSaleAt, skipping the randomized pre-queue (ADR 0008); so it only says when to come back.
+      if (phase === "NOT_OPEN") {
+        return { status: "NOT_OPEN", queueOpensAt: event.queueOpensAt };
+      }
+      if (phase === "CLOSED") {
+        // holdSeats always requires an admission (ADR 0008), so a closed queue admits at once
+        // rather than letting buyers through without one.
+        await deps.store.admitImmediately(event.id, sessionId, {
+          now,
+          admissionTtlMs: ADMISSION_TTL_MS,
+          jti: deps.newId(),
+        });
         return { status: "ADMISSIBLE" };
       }
       // A random score below every later score is equivalent to shuffling the whole pre-queue at
@@ -86,12 +112,23 @@ export function createQueueService(deps: QueueServiceDeps): QueueService {
         now.getTime() < event.onSaleAt.getTime()
           ? { kind: "PRE_QUEUE", score: deps.random.next() }
           : { kind: "SEQUENCE" };
-      return queued(await deps.store.join(event.id, sessionId, score));
+      // A refresh, second tab or retry by an admitted session must not queue it again: the next
+      // tick would re-admit it with a new jti and revoke the admission it is using. A slot whose
+      // admission expired is freed inside the same atomic join (see QueueStore.join), never by a
+      // separate release that could free a slot granted in between.
+      const outcome = await deps.store.join(event.id, sessionId, score, now);
+      return outcome.status === "QUEUED" ? queued(outcome.position) : outcome;
     },
 
     async status(eventId, sessionId) {
-      if (await deps.store.heartbeat(eventId, sessionId, deps.clock.now())) {
-        return { status: "ADMITTED" };
+      const now = deps.clock.now();
+      if (await deps.store.heartbeat(eventId, sessionId, now)) {
+        const admission = await deps.store.admission(eventId, sessionId, now);
+        // null when the slot was freed since the heartbeat or its admission expired before the
+        // reaper ran: either way the session is not admitted.
+        if (admission !== null) {
+          return { status: "ADMITTED", admission };
+        }
       }
       const position = await deps.store.position(eventId, sessionId);
       return position === null ? { status: "NOT_QUEUED" } : queued(position);

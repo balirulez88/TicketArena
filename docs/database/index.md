@@ -70,7 +70,9 @@ pick it up.
 | `outbox_events_aggregateType_aggregateId_idx` | `outbox_events(aggregateType, aggregateId)` | Aggregate lookup                                 |
 
 Booking: `booking.holdSeats` (1–6 seats of one event, all or nothing) and `booking.getHold` (owner only, else
-`NOT_FOUND`) delegate to `BookingService` (`packages/booking`). `holdSeats` rejects an empty, duplicated or longer-than-6 `seatIds` list with `INVALID_SEAT_SELECTION` (tRPC
+`NOT_FOUND`) delegate to `BookingService` (`packages/booking`). `holdSeats` first requires a valid
+admission token for the session and the input `eventId` (`admittedProcedure`, else tRPC
+`FORBIDDEN` with nothing written; see [waiting room](../architecture/waiting-room.md#admission-token)). `holdSeats` rejects an empty, duplicated or longer-than-6 `seatIds` list with `INVALID_SEAT_SELECTION` (tRPC
 `BAD_REQUEST`) before writing. Before the event's `onSaleAt` it refuses with `NOT_ON_SALE` (tRPC
 `PRECONDITION_FAILED`, naming the on-sale time) and writes nothing, whatever admission the buyer
 holds (defence in depth behind the waiting room, ADR 0008); an unknown event passes this check and

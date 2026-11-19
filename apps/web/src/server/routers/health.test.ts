@@ -10,7 +10,10 @@ test("health check reports ok with the time it was checked, without Upstash conf
   vi.stubEnv("UPSTASH_REDIS_REST_URL", "");
   vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "");
   const fixedNow = new Date("2026-01-01T12:00:00.000Z");
-  const ctx = await createTRPCContext({ req: new Request("https://ticketarena.example/") });
+  const ctx = await createTRPCContext({
+    req: new Request("https://ticketarena.example/"),
+    resHeaders: new Headers(),
+  });
   const caller = createCaller({ ...ctx, now: () => fixedNow });
 
   const result = await caller.health.check();

@@ -6,6 +6,7 @@ export type {
   AdmitRequest,
   Clock,
   EventSchedule,
+  ImmediateAdmission,
   JoinOutcome,
   JoinScore,
   QueueCounts,
@@ -13,6 +14,7 @@ export type {
   QueueStore,
   Random,
   ReapCutoffs,
+  SlotAdmission,
 } from "./ports";
 export {
   ADMISSION_TTL_MS,

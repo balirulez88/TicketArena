@@ -155,6 +155,38 @@ redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', now)
 return freed
 `;
 
+// After the queue closes admission is immediate (ADR 0008), so the bucket and maxActive do not
+// apply. A member that holds a slot keeps it: a new jti would revoke the token it is using. The
+// queue entry goes in the same step, so a ticker never admits the member a second time.
+// KEYS: queue, active, admission, admitted. ARGV: member, now ms, ttl ms, jti.
+// Returns 1 when a slot was created, 0 when the member already held one.
+export const ADMIT_IMMEDIATELY_SCRIPT = `
+if redis.call('ZSCORE', KEYS[2], ARGV[1]) then
+  return 0
+end
+local now = tonumber(ARGV[2])
+redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('ZADD', KEYS[2], now, ARGV[1])
+redis.call('HSET', KEYS[3], ARGV[1], ARGV[4])
+redis.call('ZADD', KEYS[4], now + tonumber(ARGV[3]), ARGV[4])
+return 1
+`;
+
+// Read-only: the slot, its jti and the jti's expiry from one snapshot, so a slot freed in
+// between is never reported with a half-removed admission.
+// KEYS: active, admission, admitted. ARGV: member. Returns { jti, expiry ms } or {}.
+export const ADMISSION_SCRIPT = `
+if not redis.call('ZSCORE', KEYS[1], ARGV[1]) then
+  return {}
+end
+local jti = redis.call('HGET', KEYS[2], ARGV[1])
+local expires = jti and redis.call('ZSCORE', KEYS[3], jti)
+if not expires then
+  return {}
+end
+return { jti, expires }
+`;
+
 // KEYS: admitted. ARGV: jti, now ms. Returns 1 while the jti is admitted and unexpired.
 export const IS_ADMITTED_SCRIPT = `
 local expires = redis.call('ZSCORE', KEYS[1], ARGV[1])
@@ -182,6 +214,8 @@ export const QUEUE_SCRIPTS = {
   heartbeat: HEARTBEAT_SCRIPT,
   releaseSlot: RELEASE_SLOT_SCRIPT,
   reap: REAP_SCRIPT,
+  admitImmediately: ADMIT_IMMEDIATELY_SCRIPT,
+  admission: ADMISSION_SCRIPT,
   isAdmitted: IS_ADMITTED_SCRIPT,
   counts: COUNTS_SCRIPT,
   clearEvent: CLEAR_EVENT_SCRIPT,
@@ -262,6 +296,24 @@ export function createScriptedQueueStore(
         String(cutoffs.idleBefore.getTime()),
       ]);
       return toStrings(reply, "reap");
+    },
+
+    async admitImmediately(eventId, member, grant) {
+      const keys = keysOf(eventId);
+      const reply = await run(
+        "admitImmediately",
+        [keys.queue, ...slotKeys(eventId)],
+        [member, String(grant.now.getTime()), String(grant.admissionTtlMs), grant.jti],
+      );
+      return toInteger(reply, "admitImmediately") === 1;
+    },
+
+    async admission(eventId, member) {
+      const reply = toStrings(await run("admission", slotKeys(eventId), [member]), "admission");
+      const [jti, expiresAt] = reply;
+      return jti === undefined || expiresAt === undefined
+        ? null
+        : { jti, expiresAt: new Date(Number(expiresAt)) };
     },
 
     async isAdmitted(eventId, jti, now) {

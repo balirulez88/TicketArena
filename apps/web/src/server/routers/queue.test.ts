@@ -8,9 +8,11 @@ import {
   createScheduleAdmissionPolicy,
   type Random,
 } from "@ticketarena/waiting-room";
+import { jwtVerify } from "jose";
 import { createClient } from "redis";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import type { Principal } from "../identity/identity";
+import { createBrowserCookies } from "../testing/browser-cookies";
 import { createCaller } from "./_app";
 
 const database = setupTestDatabase();
@@ -42,6 +44,13 @@ function guest(): Principal {
   return { kind: "guest", sessionId: randomUUID().replaceAll("-", "") };
 }
 
+const ADMISSION_SECRET = "q".repeat(32);
+
+const browser = createBrowserCookies(ADMISSION_SECRET);
+const jarOf = (principal: Principal) => browser.jarOf(principal.sessionId);
+const admissionTokensFor = (principal: Principal, now: Date) =>
+  browser.admissionTokens(principal.sessionId, now);
+
 function caller(principal: Principal, now: Date, random: Random = { next: () => 0.5 }) {
   return createCaller({
     now: () => now,
@@ -62,6 +71,7 @@ function caller(principal: Principal, now: Date, random: Random = { next: () => 
     queueStore: async () =>
       createRedisQueueStore(redisClient, { prefix: `${redis.prefix}${queuePrefix}` }),
     random,
+    admissionTokens: admissionTokensFor(principal, now),
   });
 }
 
@@ -194,17 +204,55 @@ describe("admission slots", () => {
     });
   }
 
-  async function admitted(eventId: string, now: Date, principal: Principal) {
+  /** Joins, is admitted by a tick, and (with `poll`) receives the admission token. */
+  async function admitted(eventId: string, now: Date, principal: Principal, poll = true) {
     await caller(principal, now).queue.join({ eventId });
     const ticker = queueServiceAt(now);
     const event = await db().event.findUniqueOrThrow({ where: { id: eventId } });
     const [admission] = await ticker.admitTick(event, { admitRate: 1, maxActive: 10 });
+    if (poll) {
+      await caller(principal, now).queue.status({ eventId });
+    }
     return { ticker, jti: admission?.jti ?? "" };
   }
 
   function later(now: Date, ms: number) {
     return new Date(now.getTime() + ms);
   }
+
+  test("the admitted session's next status poll mints the admission token into ta_adm_<eventId>", async () => {
+    const { eventId, afterOnSale } = await scheduledEvent();
+    const alice = guest();
+    const { jti } = await admitted(eventId, afterOnSale, alice, false);
+    expect(jarOf(alice).has(`ta_adm_${eventId}`)).toBe(false);
+
+    await caller(alice, later(afterOnSale, 5_000)).queue.status({ eventId });
+
+    const token = jarOf(alice).get(`ta_adm_${eventId}`) ?? "";
+    const { payload, protectedHeader } = await jwtVerify(
+      token,
+      new TextEncoder().encode(ADMISSION_SECRET),
+      { currentDate: afterOnSale },
+    );
+    expect(protectedHeader.alg).toBe("HS256");
+    expect(payload).toMatchObject({
+      sub: alice.sessionId,
+      eid: eventId,
+      jti,
+      // admittedAt + 30 min, not the poll time.
+      exp: Math.floor(later(afterOnSale, 30 * 60_000).getTime() / 1000),
+    });
+  });
+
+  test("a queued session's status poll mints no token", async () => {
+    const { eventId, afterOnSale } = await scheduledEvent();
+    const alice = guest();
+    await caller(alice, afterOnSale).queue.join({ eventId });
+
+    await caller(alice, afterOnSale).queue.status({ eventId });
+
+    expect(jarOf(alice).size).toBe(0);
+  });
 
   test("an admitted session's status poll reports ADMITTED and heartbeats its slot", async () => {
     const { eventId, afterOnSale } = await scheduledEvent();
@@ -314,8 +362,11 @@ describe("admission slots", () => {
         },
         queueStore: () => Promise.reject(new Error("redis is down")),
         random: { next: () => 0.5 },
+        admissionTokens: admissionTokensFor(alice, now),
       });
-    const hold = await unavailable(afterOnSale).booking.holdSeats({
+    await admitted(eventId, afterOnSale, alice);
+    // The hold needs the admitted set in Redis; the order must not.
+    const hold = await caller(alice, afterOnSale).booking.holdSeats({
       eventId,
       seatIds: [seat.id],
     });

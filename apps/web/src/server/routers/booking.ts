@@ -21,9 +21,11 @@ import type { QueueService } from "@ticketarena/waiting-room";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { buyerKey, type Principal } from "../identity/identity";
-import { createTRPCRouter, publicProcedure, type TRPCContext } from "../trpc";
+import { admittedProcedure, createTRPCRouter, publicProcedure, type TRPCContext } from "../trpc";
 import { queueServiceFor } from "./queue";
 
+// `eventId` is what admission is checked against; the booking core refuses any seat not of that
+// event, so an admission to one event can never hold another event's seats.
 const holdSeatsInput = z.object({
   eventId: z.uuid(),
   seatIds: z.array(z.uuid()).min(1).max(MAX_SEATS_PER_BUYER),
@@ -101,7 +103,7 @@ async function onSlot(
 }
 
 export const bookingRouter = createTRPCRouter({
-  holdSeats: publicProcedure
+  holdSeats: admittedProcedure
     .input(holdSeatsInput)
     .output(holdOutput)
     .mutation(async ({ ctx, input }) => {

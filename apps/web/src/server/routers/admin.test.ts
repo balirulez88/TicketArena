@@ -8,6 +8,7 @@ import { createClient } from "redis";
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { issueAdminCookieValue } from "../identity/admin-session";
 import { issueSessionCookieValue, type Principal } from "../identity/identity";
+import { createBrowserCookies } from "../testing/browser-cookies";
 import { createTRPCContext, type TRPCContext } from "../trpc";
 import { createUpstashMetricsClient } from "../upstash-metrics";
 import { createCaller } from "./_app";
@@ -27,6 +28,7 @@ describe("AT-44 (auth part): admin procedures reject a missing or invalid admin 
       req: new Request("https://ticketarena.example/api/trpc", {
         headers: cookie ? { cookie } : {},
       }),
+      resHeaders: new Headers(),
     });
   }
 
@@ -99,6 +101,8 @@ describe("admin.snapshot", () => {
 
   const queueStore = () => createRedisQueueStore(redisClient, { prefix: redis.prefix });
 
+  const browser = createBrowserCookies("d".repeat(32));
+
   function caller(principal: Principal, overrides: Partial<TRPCContext> = {}) {
     return createCaller({
       now: () => NOW,
@@ -117,6 +121,7 @@ describe("admin.snapshot", () => {
       },
       queueStore: async () => queueStore(),
       random: { next: () => 0 },
+      admissionTokens: browser.admissionTokens(principal.sessionId, NOW),
       ...overrides,
     });
   }
@@ -132,9 +137,16 @@ describe("admin.snapshot", () => {
     });
     const seatIds = seats.map((seat) => seat.id);
     const total = await db().seat.count({ where: { eventId: event.id } });
-    // Two seats held by one buyer, one seat in checkout under a placed order.
-    await caller(guest()).booking.holdSeats({ eventId: event.id, seatIds: seatIds.slice(0, 2) });
+    // Two seats held by one buyer, one seat in checkout under a placed order. Holding takes an
+    // admission (the demo queue has closed, so join admits at once); placing the order frees the
+    // buyer's slot, so only the first holder stays an active shopper.
+    const holder = guest();
     const buyer = guest();
+    for (const principal of [holder, buyer]) {
+      await caller(principal).queue.join({ eventId: event.id });
+      await caller(principal).queue.status({ eventId: event.id });
+    }
+    await caller(holder).booking.holdSeats({ eventId: event.id, seatIds: seatIds.slice(0, 2) });
     const hold = await caller(buyer).booking.holdSeats({
       eventId: event.id,
       seatIds: seatIds.slice(2, 3),
@@ -148,7 +160,7 @@ describe("admin.snapshot", () => {
     await counters.increment("hold_ok", event.id);
     await counters.increment("hold_ok", event.id);
     await counters.increment("race_lost", event.id);
-    // Three in the queue, one admitted: two queued and one active shopper.
+    // Three in the queue, one admitted: two queued, and with the holder two active shoppers.
     for (const member of ["q1", "q2", "q3"]) {
       await queueStore().join(event.id, member, { kind: "SEQUENCE" });
     }
@@ -172,7 +184,7 @@ describe("admin.snapshot", () => {
       demo: true,
       seats: { AVAILABLE: total - 3, HELD: 2, IN_CHECKOUT: 1, SOLD: 0 },
       queueLength: 2,
-      activeShoppers: 1,
+      activeShoppers: 2,
       metrics: {
         hold_ok: 2,
         seat_unavailable: 0,

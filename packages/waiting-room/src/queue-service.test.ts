@@ -139,17 +139,41 @@ describe("QueueService.join", () => {
     expect(await service.status(event.id, "first")).toMatchObject({ position: 1 });
   });
 
-  test("at or after queueClosesAt, join reports immediate admission eligibility and queues nothing", async () => {
+  test("at or after queueClosesAt, join admits at once without queuing: ADMISSIBLE, then status reports the admission", async () => {
     const event = schedule();
     const clock = { now: event.queueClosesAt };
     const service = serviceAt(clock);
 
     expect(await service.join(event, "at-close")).toEqual({ status: "ADMISSIBLE" });
-    clock.now = new Date("2027-05-01T12:00:00.000Z");
+    const afterClose = new Date("2027-05-01T12:00:00.000Z");
+    clock.now = afterClose;
     expect(await service.join(event, "after-close")).toEqual({ status: "ADMISSIBLE" });
 
-    expect(await service.status(event.id, "at-close")).toEqual({ status: "NOT_QUEUED" });
-    expect(await service.status(event.id, "after-close")).toEqual({ status: "NOT_QUEUED" });
+    expect(await service.status(event.id, "at-close")).toEqual({
+      status: "ADMITTED",
+      admission: {
+        jti: expect.any(String),
+        expiresAt: new Date(event.queueClosesAt.getTime() + ADMISSION_TTL_MS),
+      },
+    });
+    expect(await service.status(event.id, "after-close")).toMatchObject({
+      status: "ADMITTED",
+      admission: { expiresAt: new Date(afterClose.getTime() + ADMISSION_TTL_MS) },
+    });
+    expect(await service.counts(event.id)).toEqual({ queued: 0, active: 2 });
+  });
+
+  test("after queueClosesAt, a re-join keeps the session's admission", async () => {
+    const event = schedule();
+    const clock = { now: event.queueClosesAt };
+    const service = serviceAt(clock);
+    await service.join(event, "buyer");
+    const first = await service.status(event.id, "buyer");
+
+    clock.now = new Date(event.queueClosesAt.getTime() + 60_000);
+    expect(await service.join(event, "buyer")).toEqual({ status: "ADMISSIBLE" });
+
+    expect(await service.status(event.id, "buyer")).toEqual(first);
   });
 });
 
@@ -210,7 +234,13 @@ describe("QueueService admission (ticker, slots, reaper)", () => {
     const admitted = await service.admitTick(event, LIMITS);
 
     expect(admitted.map((admission) => admission.sessionId)).toEqual(["s1", "s2", "s3"]);
-    expect(await service.status(event.id, "s1")).toEqual({ status: "ADMITTED" });
+    expect(await service.status(event.id, "s1")).toEqual({
+      status: "ADMITTED",
+      admission: {
+        jti: admitted[0]?.jti,
+        expiresAt: new Date(AFTER_ON_SALE.getTime() + ADMISSION_TTL_MS),
+      },
+    });
     expect(await service.status(event.id, "s4")).toMatchObject({ status: "QUEUED", position: 1 });
     expect(await service.counts(event.id)).toEqual({ queued: 1, active: 3 });
     for (const admission of admitted) {

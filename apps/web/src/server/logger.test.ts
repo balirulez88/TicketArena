@@ -29,7 +29,10 @@ describe("web logger", () => {
     vi.stubEnv("DATABASE_URL", "postgresql://user:pass@db.example.com/ticketarena?sslmode=require");
     const { createTRPCContext } = await import("./trpc");
 
-    const ctx = await createTRPCContext({ req: new Request("https://ticketarena.example/") });
+    const ctx = await createTRPCContext({
+      req: new Request("https://ticketarena.example/"),
+      resHeaders: new Headers(),
+    });
 
     expect(typeof ctx.logger.child).toBe("function");
     vi.unstubAllEnvs();

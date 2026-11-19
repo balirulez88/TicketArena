@@ -69,12 +69,21 @@ export const queueRouter = createTRPCRouter({
       return (await queueServiceFor(ctx)).join(event, ctx.principal.sessionId);
     }),
 
+  // Minting here, on the poll after admission, is what hands the ticker's admission to the
+  // browser (ADR 0008). Every ADMITTED poll re-issues the same claims, so a lost response or a
+  // cleared cookie is repaired by the next poll; exp stays admittedAt + 30 min.
   status: publicProcedure
     .input(queueInput)
     .output(statusOutput)
-    .query(async ({ ctx, input }) =>
-      (await queueServiceFor(ctx)).status(input.eventId, ctx.principal.sessionId),
-    ),
+    .query(async ({ ctx, input }) => {
+      const sessionId = ctx.principal.sessionId;
+      const result = await (await queueServiceFor(ctx)).status(input.eventId, sessionId);
+      if (result.status !== "ADMITTED") {
+        return result;
+      }
+      await ctx.admissionTokens.issue({ sessionId, eventId: input.eventId, ...result.admission });
+      return { status: "ADMITTED" as const };
+    }),
 
   leave: publicProcedure
     .input(queueInput)

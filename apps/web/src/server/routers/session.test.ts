@@ -9,7 +9,10 @@ test("whoami returns the principal on the context, without Upstash configuration
   vi.stubEnv("DATABASE_URL", "postgresql://unused@127.0.0.1:1/unused");
   vi.stubEnv("UPSTASH_REDIS_REST_URL", "");
   vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "");
-  const ctx = await createTRPCContext({ req: new Request("https://ticketarena.example/") });
+  const ctx = await createTRPCContext({
+    req: new Request("https://ticketarena.example/"),
+    resHeaders: new Headers(),
+  });
 
   expect(await createCaller(ctx).session.whoami()).toEqual(ctx.principal);
   vi.unstubAllEnvs();

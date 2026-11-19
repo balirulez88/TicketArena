@@ -4,39 +4,45 @@
 
 Decisions: [ADR 0002](../adr/0002-redis-waiting-room.md), [ADR 0008](../adr/0008-waiting-room-admission.md).
 Code: `packages/waiting-room` (module), `apps/web/src/server/routers/queue.ts` (API),
-`apps/web/src/server/queue-store.ts` (wiring), `apps/worker/src/admission.ts` (ticker and reaper).
+`apps/web/src/server/queue-store.ts` (wiring), `apps/web/src/server/admission-token.ts` and
+`admittedProcedure` in `apps/web/src/server/trpc.ts` (admission token),
+`apps/worker/src/admission.ts` (ticker and reaper).
 
 Built so far: join, status and leave, with fair ordering; admission from the queue head by a
 worker ticker (token bucket plus `maxActive`), active slots with heartbeats, and slot freeing on
-leave, order placed and reaping, which revokes the admission `jti`; all on two interchangeable
-`QueueStore` adapters (node-redis and Upstash REST). The signed admission token (JWT cookie) and
-gating `holdSeats` with it arrive with ticket 31; until then nothing is gated by the queue.
+leave, order placed and reaping, which revokes the admission `jti`; immediate admission once the
+queue has closed; the signed admission token (JWT cookie) minted on the admitted session's
+status poll; and `booking.holdSeats` gated by it (`admittedProcedure`); all on two
+interchangeable `QueueStore` adapters (node-redis and Upstash REST).
 
 ## Module surface
 
-| Export                                     | Role                                                                                                                                                |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QueueService`                             | `join`, `status`, `leave`, `heartbeat`, `admitTick(event, limits)`, `reap`, `releaseSlot`, `isAdmitted(eventId, jti)`, `counts`                     |
-| `QueueStore` (port)                        | `join`, `position` (1-based), `leave`, `admit`, `heartbeat`, `releaseSlot`, `reap`, `isAdmitted`, `counts`, `clearEvent`                            |
-| `AdmissionLimits`                          | `{ admitRate, maxActive }` per tick; the worker supplies them from its configuration                                                                |
-| `SLOT_IDLE_TIMEOUT_MS`, `ADMISSION_TTL_MS` | 90 s idle before reaping; 30 min admission validity from admission (fixed)                                                                          |
-| `createRedisQueueStore`                    | node-redis adapter over the narrow `RedisQueueClient` (`eval`, `zRank`); options: `prefix`                                                          |
-| `createUpstashQueueStore`                  | Upstash REST adapter (`fetch`); options: `url`, `token`, `prefix`, `timeoutMs` (default 2000)                                                       |
-| `AdmissionPolicy` (port)                   | `phase(event, now)`: a `QueuePhase`, `NOT_OPEN`, `ACTIVE` or `CLOSED`                                                                               |
-| `createScheduleAdmissionPolicy`            | MVP policy: `NOT_OPEN` before `queueOpensAt`, `ACTIVE` from it (inclusive) to `queueClosesAt` (exclusive), `CLOSED` from then on                    |
-| `Clock`, `Random`, `newId`                 | Injected; the module never reads the system clock, `Math.random` or a UUID source. `Random.next()` returns `[0, 1)`; `newId` makes admission `jti`s |
+| Export                                     | Role                                                                                                                                                      |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QueueService`                             | `join`, `status`, `leave`, `heartbeat`, `admitTick(event, limits)`, `reap`, `releaseSlot`, `isAdmitted(eventId, jti)`, `counts`                           |
+| `QueueStore` (port)                        | `join`, `position` (1-based), `leave`, `admit`, `admitImmediately`, `admission`, `heartbeat`, `releaseSlot`, `reap`, `isAdmitted`, `counts`, `clearEvent` |
+| `AdmissionLimits`                          | `{ admitRate, maxActive }` per tick; the worker supplies them from its configuration                                                                      |
+| `SLOT_IDLE_TIMEOUT_MS`, `ADMISSION_TTL_MS` | 90 s idle before reaping; 30 min admission validity from admission (fixed)                                                                                |
+| `createRedisQueueStore`                    | node-redis adapter over the narrow `RedisQueueClient` (`eval`, `zRank`); options: `prefix`                                                                |
+| `createUpstashQueueStore`                  | Upstash REST adapter (`fetch`); options: `url`, `token`, `prefix`, `timeoutMs` (default 2000)                                                             |
+| `AdmissionPolicy` (port)                   | `phase(event, now)`: a `QueuePhase`, `NOT_OPEN`, `ACTIVE` or `CLOSED`                                                                                     |
+| `createScheduleAdmissionPolicy`            | MVP policy: `NOT_OPEN` before `queueOpensAt`, `ACTIVE` from it (inclusive) to `queueClosesAt` (exclusive), `CLOSED` from then on                          |
+| `Clock`, `Random`, `newId`                 | Injected; the module never reads the system clock, `Math.random` or a UUID source. `Random.next()` returns `[0, 1)`; `newId` makes admission `jti`s       |
 
 `QueueStore.join` returns a `JoinOutcome`: `{ status: "QUEUED", position }` or
 `{ status: "ADMITTED" }` when the member holds a slot.
 
 `QueueService.join` results: before `queueOpensAt` `{ status: "NOT_OPEN", queueOpensAt }` (nothing is queued
 and no one is admitted; the page can say when to come back); from `queueClosesAt` on
-`{ status: "ADMISSIBLE" }` (immediate admission eligibility; nothing is queued); in the window
+`{ status: "ADMISSIBLE" }` (admitted at once: the session gets a slot and a `jti` outside the
+queue, the token bucket and `maxActive`, or keeps the slot and `jti` it already holds; nothing is
+queued); in the window
 `[queueOpensAt, queueClosesAt)` `{ status: "QUEUED", position, etaSeconds }`, or
 `{ status: "ADMITTED" }` when the session already holds a slot (nothing is queued; its slot and
-`jti` are unchanged). The phase is checked first, so outside the window `NOT_OPEN` and
-`ADMISSIBLE` are answered without looking at slots. `status`
-heartbeats the session's slot and returns `ADMITTED` when it holds one, else `QUEUED` with position
+`jti` are unchanged). The phase is checked first, so before the window `NOT_OPEN` is answered
+without looking at slots. `status` heartbeats the session's slot and returns
+`{ status: "ADMITTED", admission: { jti, expiresAt } }` when it holds one (the web app signs it
+into the admission token and returns only `{ status: "ADMITTED" }`), else `QUEUED` with position
 and ETA, or `NOT_QUEUED`. `leave` leaves the queue and frees the slot in one atomic step; `{ left }` is true if
 either happened. `admitTick` admits no one before the event's `onSaleAt`. ETA = `ceil(position / admitRatePerSecond)`; the web app assumes 10 admissions
 per second (the worker's default `ADMIT_RATE_PER_SECOND`) and does not read the worker's setting.
@@ -79,6 +85,12 @@ data. Times come from the injected clock (epoch ms), never Redis `TIME`.
   `active` at `now` and gets its `jti` in `admission` and in `admitted` with expiry
   `now + 30 min`; one token is spent per admitted member (an empty queue spends none).
   Re-admitting a member that still holds a slot replaces its old `jti`.
+- **admitImmediately** (queue closed): if the member holds a slot, nothing changes (a new `jti`
+  would revoke the token in use); otherwise `ZREM` from the queue, then the slot, the `admission`
+  entry and the `jti` with expiry `now + 30 min`, like one admission of **admit** but without the
+  bucket or `maxActive`.
+- **admission** (read-only): the member's `jti` and its expiry, only while it holds a slot;
+  `QueueService.status` uses it for the token.
 - **heartbeat**: `ZADD XX` of `now`, only if the member holds a slot.
 - **releaseSlot**: removes the slot, the member's `admission` entry and its `jti` from
   `admitted`, in one step.
@@ -121,7 +133,7 @@ CI start. Adapter-specific tests cover the stored key layout and scores, and for
   second tab, a client retry) answers `ADMITTED` and adds nothing to the queue. Queuing it again
   would let the next tick re-admit it, replacing the `jti` the buyer is using. A session whose
   slot was freed (leave, order placed, reaping) holds none, so it joins at the back like anyone.
-- **One member per session:** the member is `principal.sessionId`, the future admission token's
+- **One member per session:** the member is `principal.sessionId`, the admission token's
   `sub`. A guest who clears cookies is a new session and joins at the back.
 - **Admission is bounded (AT-38):** admissions never exceed `admitRate` per second (burst
   `admitRate`) nor `maxActive` active slots, even with several tickers (workers) at once: the
@@ -129,14 +141,21 @@ CI start. Adapter-specific tests cover the stored key layout and scores, and for
 - **No admission before the on-sale:** the ticker admits no one before the event's `onSaleAt`, so
   the randomized pre-queue is admitted in its random order, not in order of arrival.
 - **No admission before the queue opens:** `join` before `queueOpensAt` answers `NOT_OPEN` and
-  issues nothing; only after the queue closes does `join` admit immediately. Otherwise a buyer
+  issues nothing; only after the queue closes does `join` admit immediately (`ADMISSIBLE`). Otherwise a buyer
   arriving just before the queue opens would hold a 30-minute admission still valid at
   `onSaleAt` and skip the pre-queue. As defence in depth, `holdSeats` refuses any hold before the
   event's `onSaleAt` (`NOT_ON_SALE`, see [Database](../database/index.md)).
 - **A freed slot revokes its admission (AT-39):** leave, order placed and reaping remove the slot
   and its `jti` in the same script, so no valid `jti` outlives its slot.
+- **Holding seats requires a live admission (AT-40):** `holdSeats` is refused (`FORBIDDEN`)
+  without a valid token for this session and event whose `jti` is still in the admitted set. A
+  freed slot therefore stops its token at once, before the token's `exp`.
+- **Checkout never needs admission (AT-41):** `placeOrder` and the other booking procedures are
+  authorized by ownership of the hold or order, so an admission that expires mid-checkout breaks
+  nothing.
 - **Redis decides only order:** losing the queue degrades fairness, never seat correctness
-  (seat state lives in Postgres, ADR 0005).
+  (seat state lives in Postgres, ADR 0005). It does stop new holds: the admitted-set check fails
+  closed.
 
 ## API and wiring
 
@@ -169,5 +188,30 @@ retried. Heartbeats come from `queue.status` polls and from `booking.holdSeats` 
 call). `booking.placeOrder` frees the buyer's slot for the hold's event after the order has
 committed. Both are best-effort in the booking router: a Redis failure is logged and never fails
 the hold or the order (seat and order state live in Postgres, ADR 0005); a slot left behind is
-reaped once it goes idle or its admission expires. The admission `jti` is minted by the ticker
-and lives only in Redis for now; ticket 31 puts it into the signed admission token.
+reaped once it goes idle or its admission expires.
+
+## Admission token
+
+- **Minting:** on an `ADMITTED` `queue.status` poll the web app signs a JWT (HS256,
+  `ADMISSION_SECRET`, `jose`) with `sub = sessionId`, `eid = eventId`, the slot's `jti` and
+  `exp = admittedAt + 30 min` (the `jti`'s expiry in the admitted set, in whole seconds), and sets
+  it as the cookie `ta_adm_<eventId>`: `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, `Expires`
+  at `exp`. One cookie per event, so admissions to two events are independent. Every `ADMITTED`
+  poll re-issues the same claims (no renewal); a queued or unknown session gets no cookie.
+- **Context seam:** `ctx.admissionTokens` (`createAdmissionTokens`) hides the cookie and the
+  secret: `issue(claims)` appends the `Set-Cookie` to the tRPC response headers (`resHeaders` of
+  the fetch adapter), `read(eventId)` returns the claims only when the signature (algorithm
+  pinned to HS256) and `exp` (against `ctx.now`) are valid. `ADMISSION_SECRET` (at least 32
+  bytes, `parseServerEnv` / `parseAdmissionEnv`) is read on first use, so a missing secret fails
+  only `queue.status` for an admitted session and `holdSeats`, naming the variable.
+- **`admittedProcedure`** (`apps/web/src/server/trpc.ts`): input must carry `eventId`; it
+  requires `read(eventId)` claims with `sub = principal.sessionId` and `eid = input.eventId`, and
+  then `QueueStore.isAdmitted(eventId, jti, now)`; anything else is `FORBIDDEN`. Only
+  `booking.holdSeats` uses it. `eventId` is trustworthy because the booking core refuses any seat
+  not of that event.
+- **Bypass by design:** `admin.runRace` calls `BookingService.holdSeats` in-process for synthetic
+  buyers and never passes through `admittedProcedure` (the race exercises the booking core;
+  operator-only behind `adminProcedure`).
+- **Tests:** router tests keep each session's cookies across `createCaller` requests
+  (`apps/web/src/server/testing/browser-cookies.ts`), so they obtain tokens through `queue.join`
+  and `queue.status` like a browser.

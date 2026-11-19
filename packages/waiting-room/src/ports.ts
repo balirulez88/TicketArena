@@ -64,6 +64,15 @@ export interface QueueStore {
    * their `jti`s, and drops expired `jti`s; returns the freed members.
    */
   reap(eventId: string, cutoffs: ReapCutoffs): Promise<readonly string[]>;
+  /**
+   * Gives the member a slot and the admission `jti` valid until `now + admissionTtlMs`, outside
+   * the queue and the token bucket (the queue has closed: admission is immediate), and removes it
+   * from the queue; one atomic step. A member that already holds a slot keeps it and its `jti`.
+   * `true` when a slot was created.
+   */
+  admitImmediately(eventId: string, member: string, grant: ImmediateAdmission): Promise<boolean>;
+  /** The admission of the member's slot, or `null` when it holds none. */
+  admission(eventId: string, member: string): Promise<SlotAdmission | null>;
   /** `true` while the `jti` is in the event's admitted set and has not expired by `now`. */
   isAdmitted(eventId: string, jti: string, now: Date): Promise<boolean>;
   /** Queue length and active-slot count, read in one atomic step. */
@@ -87,6 +96,18 @@ export interface AdmitRequest {
   /** How long an admission stays valid from `now` (its `jti` expiry). */
   readonly admissionTtlMs: number;
   readonly jtis: readonly string[];
+}
+
+export interface ImmediateAdmission {
+  readonly now: Date;
+  readonly admissionTtlMs: number;
+  readonly jti: string;
+}
+
+/** A held slot's admission: its `jti` and when it expires (`admittedAt + 30 min`). */
+export interface SlotAdmission {
+  readonly jti: string;
+  readonly expiresAt: Date;
 }
 
 export interface Admission {

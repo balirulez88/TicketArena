@@ -8,6 +8,7 @@ import type {
   QueueCounts,
   QueueStore,
   Random,
+  SlotAdmission,
 } from "./ports";
 
 /** A slot not seen (no status poll, no admitted call) for longer than this is reaped (spec). */
@@ -26,8 +27,9 @@ export interface QueuedView {
 
 /**
  * `NOT_OPEN` before the queue opens (nothing queued, no one admitted); `ADMISSIBLE` once the queue
- * has closed: the buyer may proceed at once (spec: "join admits immediately"). `ADMITTED` while
- * the queue is open: the session already holds a slot and keeps it and its admission.
+ * has closed: the session is admitted at once, outside the queue (spec: "join admits
+ * immediately"), and keeps an admission it already holds. `ADMITTED` while the queue is open: the
+ * session already holds a slot and keeps it and its admission.
  */
 export type JoinResult =
   | QueuedView
@@ -35,10 +37,13 @@ export type JoinResult =
   | { readonly status: "ADMISSIBLE" }
   | { readonly status: "ADMITTED" };
 
-/** `ADMITTED`: the session holds one of the event's active slots. */
+/**
+ * `ADMITTED`: the session holds one of the event's active slots, with that slot's admission (the
+ * web app signs it into the admission token).
+ */
 export type StatusResult =
   | QueuedView
-  | { readonly status: "ADMITTED" }
+  | { readonly status: "ADMITTED"; readonly admission: SlotAdmission }
   | { readonly status: "NOT_QUEUED" };
 
 export interface QueueService {
@@ -92,6 +97,13 @@ export function createQueueService(deps: QueueServiceDeps): QueueService {
         return { status: "NOT_OPEN", queueOpensAt: event.queueOpensAt };
       }
       if (phase === "CLOSED") {
+        // holdSeats always requires an admission (ADR 0008), so a closed queue admits at once
+        // rather than letting buyers through without one.
+        await deps.store.admitImmediately(event.id, sessionId, {
+          now,
+          admissionTtlMs: ADMISSION_TTL_MS,
+          jti: deps.newId(),
+        });
         return { status: "ADMISSIBLE" };
       }
       // A random score below every later score is equivalent to shuffling the whole pre-queue at
@@ -108,7 +120,11 @@ export function createQueueService(deps: QueueServiceDeps): QueueService {
 
     async status(eventId, sessionId) {
       if (await deps.store.heartbeat(eventId, sessionId, deps.clock.now())) {
-        return { status: "ADMITTED" };
+        const admission = await deps.store.admission(eventId, sessionId);
+        // null only when the slot was freed since the heartbeat: report it as no longer held.
+        if (admission !== null) {
+          return { status: "ADMITTED", admission };
+        }
       }
       const position = await deps.store.position(eventId, sessionId);
       return position === null ? { status: "NOT_QUEUED" } : queued(position);

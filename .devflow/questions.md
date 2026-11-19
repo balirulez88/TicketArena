@@ -306,3 +306,35 @@ Does a join by a slot holder count as a heartbeat?
 Assumed: No: lastSeenAt is unchanged; status polls and admitted calls keep the slot alive
 
 Answer: (open)
+
+## 2026-11-19 08:15 ticket 31
+
+Where does admittedProcedure get the eventId for the eid check?
+
+Assumed: From holdSeats' existing explicit eventId input; the booking core already refuses seats of another event, so an admission to A can never hold B's seats
+
+Answer: (open)
+
+## 2026-11-19 08:15 ticket 31
+
+How do buyers hold seats when the queue is CLOSED (join answers ADMISSIBLE, e.g. the demo event)?
+
+Assumed: join after close now admits at once via an atomic QueueStore.admitImmediately (slot + jti, 30 min, bypasses token bucket and maxActive; keeps an existing jti); the next status poll mints the token, so every buyer path goes join -> status -> token. admin.runRace stays a deliberate adminProcedure bypass. This changes ticket 61's 'ADMISSIBLE writes nothing'
+
+Answer: (open)
+
+## 2026-11-19 08:15 ticket 31
+
+What happens to holds when Redis is down?
+
+Assumed: The admitted-set check fails closed: holds fail with Redis down; placeOrder does not need Redis
+
+Answer: (open)
+
+## 2026-11-19 08:15 ticket 31
+
+Which JWT library?
+
+Assumed: jose 6.2.17 added to apps/web, pinned exactly; the repo had none
+
+Answer: (open)

@@ -375,6 +375,57 @@ export function describeQueueStoreContract(
       expect(await store.isAdmitted(eventId, "unknown", T0)).toBe(false);
     });
 
+    test("admission reads back the member's jti and expiry; null without a slot", async () => {
+      const store = storeWith("admission:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 2);
+      const [admission] = await store.admit(eventId, request(T0, 1, 10));
+
+      expect(await store.admission(eventId, "m1")).toEqual({
+        jti: admission?.jti,
+        expiresAt: at(TTL),
+      });
+      expect(await store.admission(eventId, "m2")).toBeNull();
+      expect(await store.admission(eventId, "nobody")).toBeNull();
+      await store.releaseSlot(eventId, "m1");
+      expect(await store.admission(eventId, "m1")).toBeNull();
+    });
+
+    test("admitImmediately gives the member a slot and a jti valid for the ttl, bypassing the queue", async () => {
+      const store = storeWith("admit-now:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 2);
+      const jti = randomUUID();
+
+      expect(
+        await store.admitImmediately(eventId, "m2", { now: T0, admissionTtlMs: TTL, jti }),
+      ).toBe(true);
+
+      expect(await store.admission(eventId, "m2")).toEqual({ jti, expiresAt: at(TTL) });
+      expect(await store.isAdmitted(eventId, jti, at(TTL - 1))).toBe(true);
+      expect(await store.position(eventId, "m2")).toBeNull();
+      expect(await store.counts(eventId)).toEqual({ queued: 1, active: 1 });
+      expect(await store.heartbeat(eventId, "m2", T0)).toBe(true);
+    });
+
+    test("admitImmediately keeps a member's existing slot and jti", async () => {
+      const store = storeWith("admit-now-again:");
+      const eventId = randomUUID();
+      const first = randomUUID();
+      await store.admitImmediately(eventId, "m1", { now: T0, admissionTtlMs: TTL, jti: first });
+
+      expect(
+        await store.admitImmediately(eventId, "m1", {
+          now: at(60_000),
+          admissionTtlMs: TTL,
+          jti: randomUUID(),
+        }),
+      ).toBe(false);
+
+      expect(await store.admission(eventId, "m1")).toEqual({ jti: first, expiresAt: at(TTL) });
+      expect(await store.counts(eventId)).toEqual({ queued: 0, active: 1 });
+    });
+
     test("AT-38: concurrent admit ticks on separate connections never exceed the bucket or maxActive", async () => {
       const eventId = randomUUID();
       await queueOf(storeWith("admit-race:"), eventId, 50);

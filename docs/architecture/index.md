@@ -50,8 +50,12 @@ Decision: [ADR 0012](../adr/0012-identity-service-seam.md). Code: `apps/web/src/
   `TRPCContext`. Procedures read `ctx.principal`, never cookies. `Principal` is a discriminated
   union (`guest` has no `userId`; `user` always has one). `buyerKey(principal)` is the `userId`
   for a user and the `sessionId` for a guest, so phase-2 authentication will not change booking procedures.
-- **Config:** `SESSION_SECRET` (at least 32 bytes) is validated in `parseServerEnv`; the error
-  names the field. The proxy and `createTRPCContext` use `parseSessionEnv`, which validates only
+  The admission token cookie (`ta_adm_<eventId>`) is likewise read and written only behind
+  `ctx.admissionTokens`, which hands out verified claims; `admittedProcedure` gates
+  `booking.holdSeats` with it (see [waiting room](waiting-room.md#admission-token)).
+- **Config:** `SESSION_SECRET` and `ADMISSION_SECRET` (each at least 32 bytes) are validated in
+  `parseServerEnv`; the error names the field. `ADMISSION_SECRET` is read lazily
+  (`parseAdmissionEnv`) only when an admission token is signed or verified. The proxy and `createTRPCContext` use `parseSessionEnv`, which validates only
   that variable, so an unrelated missing setting (e.g. the Redis token) cannot break page requests.
 - **Metrics config:** `UPSTASH_REDIS_REST_URL` (https; plain http only to `localhost`, `127.0.0.1`
   or `[::1]`, so the token never crosses a network in clear text) and `UPSTASH_REDIS_REST_TOKEN` are read only

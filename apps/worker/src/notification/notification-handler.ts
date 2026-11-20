@@ -1,6 +1,7 @@
 import {
   envelopeSchema,
   type Logger,
+  orderCancelledPayloadSchema,
   orderConfirmedPayloadSchema,
   orderExpiredPayloadSchema,
   silentLogger,
@@ -25,10 +26,12 @@ const notifiedEnvelope = z.discriminatedUnion("type", [
     type: z.literal("order.confirmed"),
   }),
   envelopeSchema(orderExpiredPayloadSchema).extend({ type: z.literal("order.expired") }),
+  envelopeSchema(orderCancelledPayloadSchema).extend({ type: z.literal("order.cancelled") }),
 ]);
 const TEMPLATES = {
   "order.confirmed": "order-confirmation",
   "order.expired": "order-expiry",
+  "order.cancelled": "order-cancellation",
 } as const;
 
 /** One email always; an SMS only when the buyer gave a phone number. */
@@ -43,8 +46,8 @@ function deliveryTargets(contact: {
 }
 
 /**
- * The mock Notification service. It learns everything from `order.confirmed` and
- * `order.expired` (ADR 0009). The
+ * The mock Notification service. It learns everything from `order.confirmed`,
+ * `order.cancelled` and `order.expired` (ADR 0009). The
  * PENDING record is committed before the provider is called; the SENT update rides the handler's
  * transaction. If the send or that commit fails, redelivery resumes the PENDING record and calls
  * the provider again with the same key (the notification id), so external delivery is at-least-once

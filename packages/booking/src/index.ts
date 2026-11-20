@@ -33,6 +33,8 @@ export {
   type PaymentSagaDeps,
   type SagaContext,
   type SagaMessage,
+  type SagaMetric,
+  type SagaMetrics,
   type SagaOutcome,
 } from "./payment-saga";
 export {

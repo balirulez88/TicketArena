@@ -46,7 +46,7 @@ async function pendingOrder(buyer: Buyer = alice) {
     { email: "alice@example.com" },
     randomUUID(),
   );
-  return { order, seatId: seat.id, correlationId: hold.correlationId };
+  return { order, seatId: seat.id, eventId: event.id, correlationId: hold.correlationId };
 }
 
 function paymentSucceeded(
@@ -302,5 +302,173 @@ describe("payment saga: payment.succeeded", () => {
 
     expect(readsWhileBlocked).toBe(0);
     expect(reads).toBe(1);
+  });
+});
+
+function paymentFailed(orderId: string, final: boolean) {
+  return {
+    data: JSON.stringify({
+      id: randomUUID(),
+      type: "payment.failed",
+      version: 1,
+      occurredAt: "2027-03-01T12:04:00.000Z",
+      correlationId: randomUUID(),
+      causationId: randomUUID(),
+      orderId,
+      payload: {
+        paymentId: randomUUID(),
+        orderId,
+        attemptNo: 1,
+        final,
+        reason: final ? "card_declined" : "provider_declined",
+      },
+    }),
+  };
+}
+
+function recordingMetrics() {
+  const counted: { metric: string; eventId: string }[] = [];
+  return {
+    counted,
+    metrics: {
+      increment: async (metric: "payment_attempt_failed", eventId: string) => {
+        counted.push({ metric, eventId });
+      },
+    },
+  };
+}
+
+describe("payment saga: payment.failed", () => {
+  test("cancels a PENDING_PAYMENT order on a final failure, frees its seats and emits order.cancelled in one transaction", async () => {
+    const { order, seatId } = await pendingOrder({
+      sessionId: "k".repeat(32),
+      buyerKey: "k".repeat(32),
+    });
+    const { emit, emitted } = recordingEmit();
+
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentFailed(order.id, true), { emit }),
+    );
+
+    expect(outcome).toBeUndefined();
+    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      "CANCELLED",
+    );
+    expect(await db().seat.findUniqueOrThrow({ where: { id: seatId } })).toMatchObject({
+      status: "AVAILABLE",
+      holdId: null,
+      claimBuyerKey: null,
+    });
+    expect(await db().orderPayment.count({ where: { orderId: order.id } })).toBe(0);
+    expect(emitted).toMatchObject([
+      {
+        type: "order.cancelled",
+        version: 1,
+        occurredAt: ON_TIME.toISOString(),
+        aggregateType: "order",
+        aggregateId: order.id,
+        orderId: order.id,
+        payload: {
+          orderId: order.id,
+          reason: "payment_failed",
+          contact: { email: "alice@example.com" },
+        },
+      },
+    ]);
+  });
+
+  test("rolls the cancellation back when the outbox write fails: the order stays open and its seats stay in checkout", async () => {
+    const { order, seatId } = await pendingOrder({
+      sessionId: "l".repeat(32),
+      buyerKey: "l".repeat(32),
+    });
+
+    await expect(
+      db().$transaction((tx) =>
+        saga(tx, paymentFailed(order.id, true), {
+          emit: async () => {
+            throw new Error("injected outbox failure");
+          },
+        }),
+      ),
+    ).rejects.toThrow("injected outbox failure");
+
+    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      "PENDING_PAYMENT",
+    );
+    expect((await db().seat.findUniqueOrThrow({ where: { id: seatId } })).status).toBe(
+      "IN_CHECKOUT",
+    );
+  });
+
+  test("leaves the order and seats alone on a non-final failure, writes no ledger row and counts the failed attempt", async () => {
+    const { order, seatId, eventId } = await pendingOrder({
+      sessionId: "m".repeat(32),
+      buyerKey: "m".repeat(32),
+    });
+    const { counted, metrics } = recordingMetrics();
+    const countingSaga = createPaymentSagaHandler({
+      clock: { now: () => ON_TIME },
+      newId: randomUUID,
+      metrics,
+    });
+    const { emit, emitted } = recordingEmit();
+
+    const outcome = await db().$transaction((tx) =>
+      countingSaga(tx, paymentFailed(order.id, false), { emit }),
+    );
+
+    expect(outcome).toBeUndefined();
+    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      "PENDING_PAYMENT",
+    );
+    expect((await db().seat.findUniqueOrThrow({ where: { id: seatId } })).status).toBe(
+      "IN_CHECKOUT",
+    );
+    expect(await db().orderPayment.count({ where: { orderId: order.id } })).toBe(0);
+    expect(emitted).toEqual([]);
+    expect(counted).toEqual([{ metric: "payment_attempt_failed", eventId }]);
+  });
+
+  test("still settles a non-final failure when the metric cannot be recorded", async () => {
+    const { order } = await pendingOrder({ sessionId: "n".repeat(32), buyerKey: "n".repeat(32) });
+    const failingSaga = createPaymentSagaHandler({
+      clock: { now: () => ON_TIME },
+      newId: randomUUID,
+      metrics: {
+        increment: async () => {
+          throw new Error("redis down");
+        },
+      },
+    });
+
+    await expect(
+      db().$transaction((tx) => failingSaga(tx, paymentFailed(order.id, false), recordingEmit())),
+    ).resolves.toBeUndefined();
+  });
+
+  test("does not cancel a confirmed order on a final failure", async () => {
+    const { order, seatId } = await pendingOrder({
+      sessionId: "o".repeat(32),
+      buyerKey: "o".repeat(32),
+    });
+    await db().$transaction((tx) => saga(tx, paymentSucceeded(order).message, recordingEmit()));
+    const { emit, emitted } = recordingEmit();
+
+    await db().$transaction((tx) => saga(tx, paymentFailed(order.id, true), { emit }));
+
+    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      "CONFIRMED",
+    );
+    expect((await db().seat.findUniqueOrThrow({ where: { id: seatId } })).status).toBe("SOLD");
+    expect(emitted).toEqual([]);
+  });
+
+  test("returns poison for a failure on an unknown orderId", async () => {
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentFailed(randomUUID(), true), recordingEmit()),
+    );
+
+    expect(outcome).toEqual({ outcome: "poison", reason: "unknown_order" });
   });
 });

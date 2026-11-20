@@ -1,4 +1,4 @@
-import { createPaymentSagaHandler } from "@ticketarena/booking";
+import { createPaymentSagaHandler, type SagaMetrics } from "@ticketarena/booking";
 import type { Logger } from "@ticketarena/contracts";
 import type { PrismaClient } from "@ticketarena/db";
 import type { ConsumerRunnerOptions } from "@ticketarena/messaging";
@@ -19,12 +19,19 @@ export interface ServiceConsumerDeps {
   readonly random: PaymentRandom;
   readonly newId: () => string;
   readonly latencyMs?: { readonly min: number; readonly max: number };
+  /** Share of mock payment attempts that capture; the rest fail non-finally. Defaults to 1. */
+  readonly paymentSuccessRate?: number;
+  /** Best-effort saga counters (`payment_attempt_failed`); none when omitted. */
+  readonly sagaMetrics?: SagaMetrics;
   /** The external delivery boundary; defaults to a mock that only records. */
   readonly notificationProvider?: NotificationProvider;
   readonly logger?: Logger;
 }
 
-/** The durable consumers of the payment saga: mock Payment, the booking saga, then mock Notification for confirmations and expiries (spec: Messaging). */
+/**
+ * The durable consumers of the payment saga: mock Payment, the booking saga (payment results),
+ * then mock Notification for confirmations, cancellations and expiries (spec: Messaging).
+ */
 export function createServiceConsumers(
   deps: ServiceConsumerDeps,
 ): Omit<ConsumerRunnerOptions, "bus" | "prisma" | "logger">[] {
@@ -34,6 +41,12 @@ export function createServiceConsumers(
     provider: deps.notificationProvider ?? createMockNotificationProvider(),
     clock: deps.clock,
     newId: deps.newId,
+    ...loggerOption,
+  });
+  const sagaHandler = createPaymentSagaHandler({
+    clock: deps.clock,
+    newId: deps.newId,
+    ...(deps.sagaMetrics === undefined ? {} : { metrics: deps.sagaMetrics }),
     ...loggerOption,
   });
   return [
@@ -46,6 +59,7 @@ export function createServiceConsumers(
         random: deps.random,
         newId: deps.newId,
         ...(deps.latencyMs === undefined ? {} : { latencyMs: deps.latencyMs }),
+        ...(deps.paymentSuccessRate === undefined ? {} : { successRate: deps.paymentSuccessRate }),
         ...loggerOption,
       }),
     },
@@ -53,11 +67,14 @@ export function createServiceConsumers(
       service: "booking",
       consumer: "booking-saga",
       filterSubject: "ta.payment.succeeded",
-      handler: createPaymentSagaHandler({
-        clock: deps.clock,
-        newId: deps.newId,
-        ...loggerOption,
-      }),
+      handler: sagaHandler,
+    },
+    // A durable consumer takes one filter subject; a second one keeps the first's config intact.
+    {
+      service: "booking",
+      consumer: "booking-saga-failed",
+      filterSubject: "ta.payment.failed",
+      handler: sagaHandler,
     },
     {
       service: "notification",
@@ -65,7 +82,12 @@ export function createServiceConsumers(
       filterSubject: "ta.order.confirmed",
       handler: notificationHandler,
     },
-    // A durable consumer takes one filter subject; a second one keeps the first's config intact.
+    {
+      service: "notification",
+      consumer: "notification-cancelled",
+      filterSubject: "ta.order.cancelled",
+      handler: notificationHandler,
+    },
     {
       service: "notification",
       consumer: "notification-expired",

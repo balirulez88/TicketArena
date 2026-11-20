@@ -4,7 +4,9 @@
 
 **Blocked by:** 17, 09
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-20 on devflow/run-202611201741
 
 - [ ] Payment records failed attempts (CHECK `FAILED ⇔ failureReason IS NOT NULL`) and emits `payment.failed` with `final`.
 - [ ] `+fail@` emails produce `final: true`; Payment never emits `final: true` while another attempt is in flight or captured (module test).

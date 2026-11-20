@@ -48,6 +48,31 @@ describe("payment schema", () => {
     ).toBe(true);
   });
 
+  it("records a FAILED attempt only with a failureReason, and a failureReason only on FAILED", async () => {
+    const failedOrderId = randomUUID();
+    const attempt = (attemptNo: number, status: "FAILED" | "ATTEMPTING", failureReason?: string) =>
+      client().paymentAttempt.create({
+        data: {
+          paymentId: randomUUID(),
+          orderId: failedOrderId,
+          attemptNo,
+          status,
+          ...(failureReason === undefined ? {} : { failureReason }),
+          amount: 1000,
+          currency: "EUR",
+          contactEmail: "a@example.com",
+          createdAt: new Date("2027-03-01T12:00:00.000Z"),
+        },
+      });
+
+    await expect(attempt(1, "FAILED")).rejects.toThrow();
+    await expect(attempt(2, "ATTEMPTING", "card_declined")).rejects.toThrow();
+    await expect(attempt(3, "FAILED", "card_declined")).resolves.toMatchObject({
+      status: "FAILED",
+      failureReason: "card_declined",
+    });
+  });
+
   describe("order_payments", () => {
     const at = new Date("2027-03-01T12:00:00.000Z");
     const buyer = "s".repeat(32);

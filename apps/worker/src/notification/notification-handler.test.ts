@@ -69,8 +69,26 @@ function orderExpired(contact: { email: string; phone?: string }) {
   };
 }
 
+function orderCancelled(contact: { email: string; phone?: string }) {
+  const orderId = randomUUID();
+  return {
+    id: randomUUID(),
+    type: "order.cancelled",
+    version: 1,
+    occurredAt: "2027-03-01T12:01:00.000Z",
+    correlationId: randomUUID(),
+    causationId: randomUUID(),
+    holdId: randomUUID(),
+    orderId,
+    payload: { orderId, reason: "payment_failed", contact },
+  };
+}
+
 async function deliver(
-  envelope: ReturnType<typeof orderConfirmed> | ReturnType<typeof orderExpired>,
+  envelope:
+    | ReturnType<typeof orderConfirmed>
+    | ReturnType<typeof orderExpired>
+    | ReturnType<typeof orderCancelled>,
   provider: MockNotificationProvider = createMockNotificationProvider(),
   times = 1,
 ) {
@@ -178,6 +196,26 @@ describe("Notification handler", () => {
     ]);
     expect(provider.deliveries()).toMatchObject([
       { idempotencyKey: rows[0]?.id, channel: "EMAIL", template: "order-expiry" },
+    ]);
+  });
+
+  it("records a cancellation email for order.cancelled", async () => {
+    const envelope = orderCancelled({ email: "buyer+fail@example.com" });
+
+    const provider = await deliver(envelope);
+
+    const rows = await prisma.notification.findMany({ where: { sourceEventId: envelope.id } });
+    expect(rows).toMatchObject([
+      {
+        channel: "EMAIL",
+        recipient: "buyer+fail@example.com",
+        template: "order-cancellation",
+        status: "SENT",
+        sentAt: NOW,
+      },
+    ]);
+    expect(provider.deliveries()).toMatchObject([
+      { idempotencyKey: rows[0]?.id, channel: "EMAIL", template: "order-cancellation" },
     ]);
   });
 

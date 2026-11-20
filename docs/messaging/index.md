@@ -60,15 +60,17 @@ Each slice that emits an event adds a row here. Every event travels in the envel
 `packages/contracts` (`id`, `type`, `version`, `occurredAt`, `correlationId`, `causationId`,
 optional `holdId`/`orderId`, `payload`); the full envelope is stored as the outbox row payload.
 
-| Event type          | Producer                                         | Consumers              | Payload version |
-| ------------------- | ------------------------------------------------ | ---------------------- | --------------- |
-| `seat.held`         | `BookingService.holdSeats` (same TX)             | none yet               | 1               |
-| `hold.released`     | `BookingService.releaseHold` (same TX)           | none yet               | 1               |
-| `hold.expired`      | `BookingService.sweepExpired` (same TX)          | none yet               | 1               |
-| `order.placed`      | `BookingService.placeOrder` (same TX)            | `payment`              | 1               |
-| `payment.succeeded` | mock Payment handler (same TX, `payment` outbox) | `booking-saga`         | 1               |
-| `order.confirmed`   | booking saga handler (same TX)                   | `notification`         | 1               |
-| `order.expired`     | `BookingService.sweepExpired` (same TX)          | `notification-expired` | 1               |
+| Event type          | Producer                                         | Consumers                | Payload version |
+| ------------------- | ------------------------------------------------ | ------------------------ | --------------- |
+| `seat.held`         | `BookingService.holdSeats` (same TX)             | none yet                 | 1               |
+| `hold.released`     | `BookingService.releaseHold` (same TX)           | none yet                 | 1               |
+| `hold.expired`      | `BookingService.sweepExpired` (same TX)          | none yet                 | 1               |
+| `order.placed`      | `BookingService.placeOrder` (same TX)            | `payment`                | 1               |
+| `payment.succeeded` | mock Payment handler (same TX, `payment` outbox) | `booking-saga`           | 1               |
+| `payment.failed`    | mock Payment handler (same TX, `payment` outbox) | `booking-saga-failed`    | 1               |
+| `order.confirmed`   | booking saga handler (same TX)                   | `notification`           | 1               |
+| `order.cancelled`   | booking saga handler (same TX)                   | `notification-cancelled` | 1               |
+| `order.expired`     | `BookingService.sweepExpired` (same TX)          | `notification-expired`   | 1               |
 
 `seat.held` payload: `holdId`, `eventId`, `seatIds`, `holdExpiresAt`. Its `correlationId` is
 minted here and reused by every later event of the booking.
@@ -90,11 +92,16 @@ expires an unpaid order at `paymentDeadline + 60 s`; it carries the order's `cor
 `capturedAt` (provider time). `order.confirmed` payload: `orderId`, `seatIds`, `totalMinor`, `currency`,
 `contact`.
 
+`payment.failed` payload: `paymentId`, `orderId`, `attemptNo`, `final`, `reason`. `final: false` is
+a failed attempt, not a failed checkout. `order.cancelled` payload: `orderId`, `reason`
+(`payment_failed`), `contact`; it carries the order's `holdId`, `orderId` and correlation.
+
 ## Notification
 
 `notification` (`service: "notification"`, `apps/worker/src/notification/`) consumes `order.confirmed`
 (template `order-confirmation`); the durable consumer `notification-expired` runs the same handler on
-`order.expired` (template `order-expiry`), because a durable consumer takes one filter subject. Per
+`order.expired` (template `order-expiry`) and `notification-cancelled` on `order.cancelled` (template
+`order-cancellation`), because a durable consumer takes one filter subject. Per
 channel (EMAIL; SMS when a phone was given) it first commits a `PENDING` `notification.notifications`
 row in its own transaction (via the injected `prisma`), calls the provider with
 `idempotencyKey = notification id`, then marks it `SENT` in the handler's transaction. A failed send
@@ -104,12 +111,20 @@ channel. The mock provider records deliveries and dedupes by key.
 **External delivery is at-least-once**: a crash between the call and the `SENT` commit repeats it on redelivery, and only
 the provider's key dedupe absorbs that.
 
-## Payment saga (happy path)
+## Payment saga
 
-`apps/worker/src/consumers.ts` registers the durable consumers `payment` and `booking-saga`. `payment` (`service: "payment"`)
-handles `order.placed` in `apps/worker/src/payment/`: one CAPTURED `payment.payment_attempts` row and a
-`payment.succeeded` event, with latency and outcome drawn from the injected `Random`/`Clock`. A
-`+dup@` email emits the result twice under distinct event ids.
+`apps/worker/src/consumers.ts` registers the durable consumers `payment`, `booking-saga` and
+`booking-saga-failed`. `payment` (`service: "payment"`) handles `order.placed` in
+`apps/worker/src/payment/`: one `payment.payment_attempts` row (attempt 1) and one result event, with
+latency and outcome drawn from the injected `Random`/`Clock`. Outcome: a `+fail@` email is a final
+failure (`FAILED`, `failureReason` `card_declined`, `payment.failed` with `final: true`); otherwise
+the attempt captures (`CAPTURED`, `payment.succeeded`) when the draw is below `successRate`
+(`paymentSuccessRate` in `createServiceConsumers`, default 1) and else fails non-finally
+(`provider_declined`, `final: false`). **Invariant:** `final: true` is never emitted while another
+attempt of the order is `ATTEMPTING` or `CAPTURED`. The check reads committed attempts only, which
+suffices while the MVP records only attempt 1. It is not safe under concurrent attempts: adding
+retries requires serializing attempts per order in every branch first. A `+dup@` email emits the
+result twice under distinct event ids.
 
 **Provider latency runs outside the transaction**, in the runner's `beforeTransaction` step, i.e.
 before dedupe-and-capture (TD-051). Awaited inside the runner's transaction it would hold a pooled
@@ -118,7 +133,8 @@ connection idle for the whole wait, and a wait longer than the interactive-trans
 capture back and redeliver the message forever. A redelivered `order.placed` waits again and is
 then acked as a duplicate by the `processed_messages` insert, so the wait never causes a second
 capture or a second `payment.succeeded`. `booking-saga` handles
-`payment.succeeded` (`createPaymentSagaHandler`, `packages/booking`). In the runner's transaction
+`payment.succeeded` and `booking-saga-failed` handles `payment.failed`, both with
+`createPaymentSagaHandler` (`packages/booking`). In the runner's transaction
 (whose `processed_messages` insert is the dedupe check): lock the order `FOR UPDATE`, read its
 ledger, lock its seats if it is `PENDING_PAYMENT` (the only state whose seats change), only then
 take `T = clock.now()` once (ADR 0005: decision time after all locks), call the pure `decide(orderState, ledger, event, T)`
@@ -126,12 +142,17 @@ take `T = clock.now()` once (ADR 0005: decision time after all locks), call the 
 retry | poison`, every non-transition with a reason code (`noop` reasons such as
 `duplicate_payment` are logged). Applied so far: `transition` `payment_on_time` (order `CONFIRMED`
 by a conditional update, `APPLIED` ledger row, seats `SOLD`, `order.confirmed` stamped with `T`; a
-zero-row update throws, never counts as success); `noop` (ack); `retry` and `poison` (unknown
+zero-row update throws, never counts as success); `transition` `final_failure` (a final failure on a
+`PENDING_PAYMENT` order with no `APPLIED` payment: order `CANCELLED` by a conditional update, its
+`IN_CHECKOUT` seats `AVAILABLE` with `holdId`/`claimBuyerKey` cleared, `order.cancelled`, no ledger
+row); `noop` (ack; a non-final failure, reason `attempt_failed`, is also counted as
+`payment_attempt_failed` in the event's Redis counter hash, best-effort, and leaves the order open
+until its deadline); `retry` and `poison` (unknown
 `orderId`) are returned to the runner as a `HandlerOutcome`. Decisions whose side effects later
 tickets build (late capture → `EXPIRED` + refund, amount mismatch and payments on settled orders →
 refund) throw `... is not handled yet` and are retried, so captured money is never dropped
-silently. `decide` already covers `payment.failed` and `payment.refunded`; the consumer subscribes
-to them once their contracts exist.
+silently. `decide` already covers `payment.refunded`; the saga subscribes to it once its contract
+exists.
 
 Relay and runner take a `service` (`booking` default, `payment` or `notification`) that selects the outbox and
 `processed_messages` of that schema (ADR 0009); the worker runs one relay per outbox.

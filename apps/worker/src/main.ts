@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { createBookingService } from "@ticketarena/booking";
+import { createBookingService, createRedisBookingMetrics } from "@ticketarena/booking";
 import { createPrismaClient } from "@ticketarena/db";
 import { connectJetStreamMessageBus } from "@ticketarena/messaging";
 import {
@@ -20,13 +20,6 @@ const prisma = createPrismaClient({ connectionString: env.DATABASE_URL, driver: 
 const bus = await connectJetStreamMessageBus({ servers: env.NATS_URL });
 // The composition root is the only place that reads the system clock and Math.random.
 const clock = { now: () => new Date(), sleep: (ms: number) => delay(ms) };
-const consumers = createServiceConsumers({
-  prisma,
-  clock,
-  random: { next: Math.random },
-  newId: randomUUID,
-  logger,
-});
 const booking = createBookingService({ db: prisma, clock, newId: randomUUID, logger });
 const redis = createClient({ url: env.REDIS_URL });
 // Without a listener node-redis rethrows socket errors as uncaught exceptions; a failed tick is
@@ -35,6 +28,15 @@ redis.on("error", (error: unknown) => {
   logger.error({ err: error instanceof Error ? error.message : String(error) }, "queue redis");
 });
 await redis.connect();
+const consumers = createServiceConsumers({
+  prisma,
+  clock,
+  random: { next: Math.random },
+  newId: randomUUID,
+  // No prefix: the same per-event counter hash the web app's booking counters use.
+  sagaMetrics: createRedisBookingMetrics(redis),
+  logger,
+});
 const queue = createQueueService({
   // No prefix: the same keys the web app reads and writes.
   store: createRedisQueueStore(redis, { prefix: "" }),

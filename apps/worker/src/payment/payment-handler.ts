@@ -1,5 +1,6 @@
 import {
   envelopeSchema,
+  type JsonValue,
   type Logger,
   orderPlacedPayloadSchema,
   silentLogger,
@@ -27,11 +28,21 @@ export interface PaymentHandlerDeps {
   readonly newId: () => string;
   /** Provider latency range; the wait is drawn from `random`. Defaults to none. */
   readonly latencyMs?: { readonly min: number; readonly max: number };
+  /**
+   * Share of attempts the provider captures, in [0, 1]; the draw comes from `random`. Defaults to
+   * 1, so outside `+fail@` every attempt captures unless a caller configures failures.
+   */
+  readonly successRate?: number;
   readonly logger?: Logger;
 }
 
 const ATTEMPT_NO = 1;
 const DUPLICATE_RESULT_MAGIC = "+dup@";
+const FINAL_FAILURE_MAGIC = "+fail@";
+/** `+fail@`: the card is refused for good, so the attempt is final. */
+const FINAL_FAILURE_REASON = "card_declined";
+/** A random failure is treated as transient: the buyer may still pay before the deadline. */
+const RANDOM_FAILURE_REASON = "provider_declined";
 const orderPlacedEnvelope = envelopeSchema(orderPlacedPayloadSchema);
 
 export type PaymentConsumerSteps = Required<
@@ -39,7 +50,8 @@ export type PaymentConsumerSteps = Required<
 >;
 
 /**
- * The mock provider: one attempt per order (MVP), captured immediately. It touches only the
+ * The mock provider: one attempt per order (MVP), decided immediately: captured, or failed
+ * (`+fail@` finally, a random failure non-finally). It touches only the
  * `payment` schema and learns about the order solely from `order.placed` (ADR 0009). Spread the
  * result into a consumer runner bound to `service: "payment"` so the dedupe row and the result
  * events share the handler's transaction.
@@ -52,6 +64,7 @@ export type PaymentConsumerSteps = Required<
 export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerSteps {
   const latency = deps.latencyMs ?? { min: 0, max: 0 };
   const logger = deps.logger ?? silentLogger;
+  const successRate = deps.successRate ?? 1;
 
   async function awaitProviderLatency(): Promise<void> {
     const waitMs = latency.min + deps.random.next() * (latency.max - latency.min);
@@ -67,48 +80,97 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
   ): Promise<undefined> {
     const placed = orderPlacedEnvelope.parse(JSON.parse(message.data));
     const order = placed.payload;
-    const capturedAt = deps.clock.now();
+    const at = deps.clock.now();
     const paymentId = deps.newId();
+    const outcome = attemptOutcome(order.contact.email);
+    const attempt = {
+      paymentId,
+      orderId: order.orderId,
+      attemptNo: ATTEMPT_NO,
+      amount: order.amountMinor,
+      currency: order.currency,
+      contactEmail: order.contact.email,
+      ...(order.contact.phone === undefined ? {} : { contactPhone: order.contact.phone }),
+      createdAt: at,
+    };
 
-    await tx.paymentAttempt.create({
-      data: {
-        paymentId,
-        orderId: order.orderId,
-        attemptNo: ATTEMPT_NO,
-        status: "CAPTURED",
-        capturedAt,
-        amount: order.amountMinor,
-        currency: order.currency,
-        contactEmail: order.contact.email,
-        ...(order.contact.phone === undefined ? {} : { contactPhone: order.contact.phone }),
-        createdAt: capturedAt,
-      },
-    });
-
-    // Duplicates are separate events (new ids) for the same payment: they get past broker and
-    // consumer dedupe, so booking's ledger is what must absorb them.
-    const copies = order.contact.email.includes(DUPLICATE_RESULT_MAGIC) ? 2 : 1;
-    for (let copy = 0; copy < copies; copy += 1) {
-      await emit({
-        id: deps.newId(),
+    let result: { type: "payment.succeeded" | "payment.failed"; payload: JsonValue };
+    if (outcome.captured) {
+      await tx.paymentAttempt.create({
+        data: { ...attempt, status: "CAPTURED", capturedAt: at },
+      });
+      result = {
         type: "payment.succeeded",
-        version: 1,
-        occurredAt: capturedAt.toISOString(),
-        aggregateType: "payment",
-        aggregateId: paymentId,
-        orderId: order.orderId,
-        ...(placed.holdId === undefined ? {} : { holdId: placed.holdId }),
         payload: {
           paymentId,
           orderId: order.orderId,
           attemptNo: ATTEMPT_NO,
           amount: order.amountMinor,
           currency: order.currency,
-          capturedAt: capturedAt.toISOString(),
+          capturedAt: at.toISOString(),
+        },
+      };
+    } else {
+      await tx.paymentAttempt.create({
+        data: { ...attempt, status: "FAILED", failureReason: outcome.reason },
+      });
+      // Invariant (spec: Mock Payment service): `final: true` lets booking cancel the order and
+      // free its seats, so it is never sent while another attempt may still capture or has.
+      // The check sees committed attempts only. That suffices while the MVP records only attempt
+      // 1: nothing else writes attempts concurrently. Whoever adds retries must serialize attempts
+      // per order (in every branch) before this check holds under concurrency.
+      const otherLive = await tx.paymentAttempt.count({
+        where: {
+          orderId: order.orderId,
+          attemptNo: { not: ATTEMPT_NO },
+          status: { in: ["ATTEMPTING", "CAPTURED"] },
         },
       });
+      result = {
+        type: "payment.failed",
+        payload: {
+          paymentId,
+          orderId: order.orderId,
+          attemptNo: ATTEMPT_NO,
+          final: outcome.final && otherLive === 0,
+          reason: outcome.reason,
+        },
+      };
     }
-    logger.info({ orderId: order.orderId, paymentId, copies }, "payment captured");
+
+    // Duplicates are separate events (new ids) for the same payment: they get past broker and
+    // consumer dedupe, so booking's ledger and decision are what must absorb them.
+    const copies = order.contact.email.includes(DUPLICATE_RESULT_MAGIC) ? 2 : 1;
+    for (let copy = 0; copy < copies; copy += 1) {
+      await emit({
+        id: deps.newId(),
+        type: result.type,
+        version: 1,
+        occurredAt: at.toISOString(),
+        aggregateType: "payment",
+        aggregateId: paymentId,
+        orderId: order.orderId,
+        ...(placed.holdId === undefined ? {} : { holdId: placed.holdId }),
+        payload: result.payload,
+      });
+    }
+    logger.info(
+      { orderId: order.orderId, paymentId, copies, result: result.type },
+      "payment attempted",
+    );
+  }
+
+  /** Magic emails decide first (spec: Mock Payment service); otherwise the injected Random. */
+  function attemptOutcome(
+    email: string,
+  ): { captured: true } | { captured: false; final: boolean; reason: string } {
+    if (email.includes(FINAL_FAILURE_MAGIC)) {
+      return { captured: false, final: true, reason: FINAL_FAILURE_REASON };
+    }
+    if (deps.random.next() < successRate) {
+      return { captured: true };
+    }
+    return { captured: false, final: false, reason: RANDOM_FAILURE_REASON };
   }
 
   return { beforeTransaction: awaitProviderLatency, handler: handleOrderPlaced };

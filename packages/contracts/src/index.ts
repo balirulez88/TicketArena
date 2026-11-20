@@ -10,8 +10,10 @@ export {
   parseEnvelope,
   silentLogger,
 } from "./logging";
+export { type OrderCancelledPayload, orderCancelledPayloadSchema } from "./order-cancelled";
 export { type OrderConfirmedPayload, orderConfirmedPayloadSchema } from "./order-confirmed";
 export { type OrderExpiredPayload, orderExpiredPayloadSchema } from "./order-expired";
 export { type OrderPlacedPayload, orderPlacedPayloadSchema } from "./order-placed";
+export { type PaymentFailedPayload, paymentFailedPayloadSchema } from "./payment-failed";
 export { type PaymentSucceededPayload, paymentSucceededPayloadSchema } from "./payment-succeeded";
 export { type SeatHeldPayload, seatHeldPayloadSchema } from "./seat-held";

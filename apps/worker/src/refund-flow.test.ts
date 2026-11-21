@@ -50,6 +50,7 @@ describe("late payment -> refund requested -> Payment refunds -> booking saga", 
       { email: "buyer+late@example.com" },
       randomUUID(),
     );
+    const notifications = createMockNotificationProvider();
     const worker = await startWorker({
       bus,
       prisma,
@@ -60,7 +61,7 @@ describe("late payment -> refund requested -> Payment refunds -> booking saga", 
         clock: { now: () => new Date(), sleep: async () => undefined },
         random: { next: () => 0 },
         newId: randomUUID,
-        notificationProvider: createMockNotificationProvider(),
+        notificationProvider: notifications,
       }),
     });
     try {
@@ -94,6 +95,17 @@ describe("late payment -> refund requested -> Payment refunds -> booking saga", 
       expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
         "EXPIRED",
       );
+      await expect
+        .poll(
+          () =>
+            notifications
+              .deliveries()
+              .filter((delivery) => delivery.recipient === "buyer+late@example.com")
+              .map((delivery) => delivery.template)
+              .sort(),
+          { timeout: 20_000 },
+        )
+        .toEqual(["order-expiry", "refund-completed", "refund-initiated"]);
     } finally {
       await worker.stop();
     }

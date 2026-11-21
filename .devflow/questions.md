@@ -530,3 +530,27 @@ Does booking emit anything or notify the buyer when a refund completes?
 Assumed: No; the ledger update emits nothing; refund emails are a later ticket
 
 Answer: (open)
+
+## 2026-11-21 11:57 ticket 21
+
+What happens to a refund event without a contact (unknown_order)?
+
+Assumed: Acked and logged at info, no notification record; a retry could never supply a recipient
+
+Answer: (open)
+
+## 2026-11-21 11:57 ticket 21
+
+What does 'duplicate delivery' cover in AT-43?
+
+Assumed: A redelivery of the same message and a copy of the same event under a new message id; dedupe is by sourceEventId. A future reconciler re-emit of payment.refund_requested under a new event id would send a second refund-initiated notification (documented)
+
+Answer: (open)
+
+## 2026-11-21 11:57 ticket 21
+
+What do refund notifications contain and how are the consumers named?
+
+Assumed: Templates refund-initiated and refund-completed only (email always, SMS with a phone); consumers notification-refund-requested and notification-refunded
+
+Answer: (open)

@@ -346,6 +346,9 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
 - Steps: insert the notification row `PENDING` (unique `(sourceEventId, channel)`), call the mock
   provider with `idempotencyKey = notification id`, mark `SENT`. Email always; SMS when a phone
   number exists. Nothing is really sent; the mock provider records and dedupes by key.
+- Templates: `order-confirmation`, `order-cancellation`, `order-expiry`, `refund-initiated`
+  (`payment.refund_requested`), `refund-completed` (`payment.refunded`). A refund event without a
+  contact (`unknown_order`) is acked with no notification record: there is no buyer to tell.
 - **Guarantee:** internal records are exactly-once; external delivery is **at-least-once** (a crash
   between provider call and `SENT` resends) unless the provider honours the idempotency key.
 

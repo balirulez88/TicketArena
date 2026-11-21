@@ -31,8 +31,8 @@ export interface ServiceConsumerDeps {
 
 /**
  * The durable consumers of the payment saga: mock Payment (captures and refunds), the booking saga
- * (payment results and refunds), then mock Notification for confirmations, cancellations and
- * expiries (spec: Messaging).
+ * (payment results and refunds), then mock Notification for confirmations, cancellations,
+ * expiries and refunds initiated and completed (spec: Messaging).
  */
 export function createServiceConsumers(
   deps: ServiceConsumerDeps,
@@ -106,6 +106,18 @@ export function createServiceConsumers(
       service: "notification",
       consumer: "notification-expired",
       filterSubject: "ta.order.expired",
+      handler: notificationHandler,
+    },
+    {
+      service: "notification",
+      consumer: "notification-refund-requested",
+      filterSubject: "ta.payment.refund_requested",
+      handler: notificationHandler,
+    },
+    {
+      service: "notification",
+      consumer: "notification-refunded",
+      filterSubject: "ta.payment.refunded",
       handler: notificationHandler,
     },
   ];

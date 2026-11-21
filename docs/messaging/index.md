@@ -60,19 +60,19 @@ Each slice that emits an event adds a row here. Every event travels in the envel
 `packages/contracts` (`id`, `type`, `version`, `occurredAt`, `correlationId`, `causationId`,
 optional `holdId`/`orderId`, `payload`); the full envelope is stored as the outbox row payload.
 
-| Event type                 | Producer                                                                | Consumers                | Payload version |
-| -------------------------- | ----------------------------------------------------------------------- | ------------------------ | --------------- |
-| `seat.held`                | `BookingService.holdSeats` (same TX)                                    | none yet                 | 1               |
-| `hold.released`            | `BookingService.releaseHold` (same TX)                                  | none yet                 | 1               |
-| `hold.expired`             | `BookingService.sweepExpired` (same TX)                                 | none yet                 | 1               |
-| `order.placed`             | `BookingService.placeOrder` (same TX)                                   | `payment`                | 1               |
-| `payment.succeeded`        | mock Payment handler (same TX, `payment` outbox)                        | `booking-saga`           | 1               |
-| `payment.failed`           | mock Payment handler (same TX, `payment` outbox)                        | `booking-saga-failed`    | 1               |
-| `order.confirmed`          | booking saga handler (same TX)                                          | `notification`           | 1               |
-| `order.cancelled`          | booking saga handler (same TX)                                          | `notification-cancelled` | 1               |
-| `order.expired`            | `BookingService.sweepExpired`; booking saga on a late capture (same TX) | `notification-expired`   | 1               |
-| `payment.refund_requested` | booking saga handler (same TX)                                          | `payment-refund`         | 1               |
-| `payment.refunded`         | mock Payment refund handler (same TX, `payment` outbox)                 | `booking-saga-refunded`  | 1               |
+| Event type                 | Producer                                                                | Consumers                                         | Payload version |
+| -------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------- | --------------- |
+| `seat.held`                | `BookingService.holdSeats` (same TX)                                    | none yet                                          | 1               |
+| `hold.released`            | `BookingService.releaseHold` (same TX)                                  | none yet                                          | 1               |
+| `hold.expired`             | `BookingService.sweepExpired` (same TX)                                 | none yet                                          | 1               |
+| `order.placed`             | `BookingService.placeOrder` (same TX)                                   | `payment`                                         | 1               |
+| `payment.succeeded`        | mock Payment handler (same TX, `payment` outbox)                        | `booking-saga`                                    | 1               |
+| `payment.failed`           | mock Payment handler (same TX, `payment` outbox)                        | `booking-saga-failed`                             | 1               |
+| `order.confirmed`          | booking saga handler (same TX)                                          | `notification`                                    | 1               |
+| `order.cancelled`          | booking saga handler (same TX)                                          | `notification-cancelled`                          | 1               |
+| `order.expired`            | `BookingService.sweepExpired`; booking saga on a late capture (same TX) | `notification-expired`                            | 1               |
+| `payment.refund_requested` | booking saga handler (same TX)                                          | `payment-refund`, `notification-refund-requested` | 1               |
+| `payment.refunded`         | mock Payment refund handler (same TX, `payment` outbox)                 | `booking-saga-refunded`, `notification-refunded`  | 1               |
 
 `seat.held` payload: `holdId`, `eventId`, `seatIds`, `holdExpiresAt`. Its `correlationId` is
 minted here and reused by every later event of the booking.
@@ -95,13 +95,13 @@ expires the order (caused by the `payment.succeeded`).
 `reason` (`late_capture`, `late_delivery`, `order_expired`, `order_cancelled`, `order_confirmed`,
 `amount_mismatch`, `unknown_order`) and `contact`, which is absent only for `unknown_order`. Its
 aggregate is `order_payment` / `paymentId`; it carries the order's `holdId` when the order exists.
-The mock Payment service executes it (`payment-refund`, see Payment saga). Refund emails and the
-reconciler are later tickets.
+The mock Payment service executes it (`payment-refund`, see Payment saga) and Notification tells the
+buyer the refund was initiated (`notification-refund-requested`). The reconciler is a later ticket.
 
 `payment.refunded` payload: `paymentId`, `orderId`, `amount`, `currency`, `refundedAt` (provider
 time) and the request's `contact`, absent only when the request had none (`unknown_order`). Its
 aggregate is `payment` / `paymentId`; it carries the request's `orderId`, `holdId` and correlation.
-No notification consumer subscribes yet.
+Notification tells the buyer the refund completed (`notification-refunded`).
 
 `payment.succeeded` payload: `paymentId`, `orderId`, `attemptNo`, `amount` (minor units), `currency`,
 `capturedAt` (provider time). `order.confirmed` payload: `orderId`, `seatIds`, `totalMinor`, `currency`,
@@ -116,13 +116,18 @@ a failed attempt, not a failed checkout. `order.cancelled` payload: `orderId`, `
 `notification` (`service: "notification"`, `apps/worker/src/notification/`) consumes `order.confirmed`
 (template `order-confirmation`); the durable consumer `notification-expired` runs the same handler on
 `order.expired` (template `order-expiry`) and `notification-cancelled` on `order.cancelled` (template
-`order-cancellation`), because a durable consumer takes one filter subject. Per
+`order-cancellation`), `notification-refund-requested` on `payment.refund_requested` (template
+`refund-initiated`) and `notification-refunded` on `payment.refunded` (template `refund-completed`),
+because a durable consumer takes one filter subject. A refund event without a contact (only an
+`unknown_order` refund: the order and its buyer are gone) is logged and acked with no record. Per
 channel (EMAIL; SMS when a phone was given) it first commits a `PENDING` `notification.notifications`
 row in its own transaction (via the injected `prisma`), calls the provider with
 `idempotencyKey = notification id`, then marks it `SENT` in the handler's transaction. A failed send
 leaves the `PENDING` row; redelivery resumes it with the same key. Unique `(sourceEventId, channel)`
 plus the consumer's `processed_messages` keep a redelivered or `+dup@` event at one record per
-channel. The mock provider records deliveries and dedupes by key.
+channel (AT-43, for all five kinds). Dedupe is by event id: a refund request re-emitted under a new
+event id (the planned reconciler) would be a new source event and send a second `refund-initiated`.
+The mock provider records deliveries and dedupes by key.
 **External delivery is at-least-once**: a crash between the call and the `SENT` commit repeats it on redelivery, and only
 the provider's key dedupe absorbs that.
 

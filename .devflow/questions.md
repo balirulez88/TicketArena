@@ -386,3 +386,51 @@ Where do checkout and order status live?
 Assumed: Checkout inline in the hold area on /events/[eventId] (heartbeat keeps running); order status at /orders/[orderId], also shown in place of the hold after placeOrder; polling every 2 s only while PENDING_PAYMENT
 
 Answer: Accepted (2026-11-19).
+
+## 2026-11-20 18:03 ticket 18
+
+How does a non-final failure arise when the MVP has one attempt per order?
+
+Assumed: A random draw at or above successRate fails non-finally (provider_declined); +fail@ is final (card_declined). successRate defaults to 1 and is set only via createServiceConsumers({ paymentSuccessRate }); no worker env variable yet
+
+Answer: Accepted (2026-11-21).
+
+## 2026-11-20 18:03 ticket 18
+
+How is 'never final while another attempt is live' enforced and tested with one attempt per order?
+
+Assumed: Before emitting final, the handler counts other ATTEMPTING/CAPTURED attempts for the order under a per-order advisory lock; the module test inserts an attempt 2 to stand in for a concurrent retry
+
+Answer: Superseded by the 18:07 answer below: the advisory lock was removed after review (2026-11-21).
+
+## 2026-11-20 18:03 ticket 18
+
+Where does the non-final failure metric live?
+
+Assumed: A separate SagaMetrics port with one counter payment_attempt_failed in the same per-event Redis hash, not part of BookingMetric; not shown on the admin dashboard yet; fire-and-forget, so a rolled-back and retried message can over-count
+
+Answer: Accepted (2026-11-21); an approximate metric: it is incremented before commit, so a rollback or retry can over-count.
+
+## 2026-11-20 18:03 ticket 18
+
+What reasons can order.cancelled carry, and does the hold change status?
+
+Assumed: reason is z.enum(['payment_failed']), extendable later; the hold stays ORDERED, as when the sweeper expires an order
+
+Answer: Accepted (2026-11-21).
+
+## 2026-11-20 18:03 ticket 18
+
+Where does the saga get the eventId for the counter, since orders has no eventId?
+
+Assumed: The order-lock query joins holds and locks FOR UPDATE OF o
+
+Answer: Accepted (2026-11-21).
+
+## 2026-11-20 18:07 ticket 18
+
+After review: does the payment handler lock attempts per order?
+
+Assumed: No. The advisory lock was removed; the final check sees committed attempts only, which suffices while the MVP writes only attempt 1 (unique (orderId, attemptNo)). Retries must first serialize attempts per order in every branch. Supersedes the earlier advisory-lock assumption
+
+Answer: Accepted (2026-11-21). Before retries are introduced, every attempt branch must be serialized per order; the (orderId, attemptNo) index alone allows attempts 1 and 2 together.

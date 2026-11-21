@@ -1,4 +1,5 @@
 import type { BookingMetric, BookingMetrics } from "./booking-service";
+import type { SagaMetric, SagaMetrics } from "./payment-saga";
 
 /** The one Redis command the adapter needs; keeps the package free of a client dependency. */
 export interface RedisMetricsClient {
@@ -31,10 +32,16 @@ function metricsKey(prefix: string, eventId: string): string {
   return `${prefix}booking:metrics:${eventId}`;
 }
 
-/** Counters live in one hash per event: `${prefix}booking:metrics:${eventId}`, field = metric. */
-export function createRedisBookingMetrics(client: RedisMetricsClient, prefix = ""): BookingMetrics {
+/**
+ * Counters live in one hash per event: `${prefix}booking:metrics:${eventId}`, field = metric.
+ * The saga's counters share the hash; the reader reads only the hold counters the dashboard shows.
+ */
+export function createRedisBookingMetrics(
+  client: RedisMetricsClient,
+  prefix = "",
+): BookingMetrics & SagaMetrics {
   return {
-    async increment(metric, eventId) {
+    async increment(metric: BookingMetric | SagaMetric, eventId: string) {
       await client.hIncrBy(metricsKey(prefix, eventId), metric, 1);
     },
   };

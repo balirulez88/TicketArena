@@ -48,6 +48,23 @@ describe("createRedisBookingMetricsReader", () => {
   });
 });
 
+describe("createRedisBookingMetrics", () => {
+  test("counts the saga's payment_attempt_failed in the event's hash without disturbing the hold counters", async () => {
+    const eventId = randomUUID();
+    const metrics = createRedisBookingMetrics(redisClient, redis.prefix);
+
+    await metrics.increment("payment_attempt_failed", eventId);
+    await metrics.increment("payment_attempt_failed", eventId);
+
+    expect(
+      await redisClient.hGet(`${redis.prefix}booking:metrics:${eventId}`, "payment_attempt_failed"),
+    ).toBe("2");
+    expect(
+      Object.values(await createRedisBookingMetricsReader(redisClient, redis.prefix).read(eventId)),
+    ).toEqual([0, 0, 0, 0, 0]);
+  });
+});
+
 describe("createRedisBookingMetricsReset", () => {
   test("zeroes every counter of the event and leaves other events' counters alone", async () => {
     const eventId = randomUUID();

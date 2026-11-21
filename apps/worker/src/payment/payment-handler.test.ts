@@ -63,6 +63,7 @@ interface DeliveryDeps {
   sleeps?: number[];
   random?: number;
   latencyMs?: { min: number; max: number };
+  successRate?: number;
   /** Replaces the recording sleep stub, e.g. with a real timer. */
   sleep?: (ms: number) => Promise<void>;
   /** The runner's database client; defaults to the shared one. */
@@ -94,18 +95,41 @@ async function paymentRunner(deps: DeliveryDeps = {}) {
       random: { next: () => deps.random ?? 0 },
       newId: randomUUID,
       ...(deps.latencyMs === undefined ? {} : { latencyMs: deps.latencyMs }),
+      ...(deps.successRate === undefined ? {} : { successRate: deps.successRate }),
     }),
   });
   return { runner, subject };
 }
 
 /** Delivers one `order.placed` to a payment consumer built from the given deps. */
-async function deliver(email: string, deps: DeliveryDeps = {}) {
+async function deliver(email: string, deps: DeliveryDeps = {}, placed = orderPlaced(email)) {
   const { runner, subject } = await paymentRunner(deps);
-  const placed = orderPlaced(email);
   await bus.publish({ subject, data: JSON.stringify(placed.envelope), msgId: placed.envelope.id });
   await runner.pollOnce();
   return { ...placed, runner };
+}
+
+function failedEventsFor(orderId: string) {
+  return prisma.paymentOutboxEvent.findMany({
+    where: { eventType: "payment.failed", payload: { path: ["orderId"], equals: orderId } },
+  });
+}
+
+/** Another attempt for the order, as a retry would leave it; attempt 1 is the handler's own. */
+function otherAttempt(orderId: string, status: "ATTEMPTING" | "CAPTURED") {
+  return prisma.paymentAttempt.create({
+    data: {
+      paymentId: randomUUID(),
+      orderId,
+      attemptNo: 2,
+      status,
+      ...(status === "CAPTURED" ? { capturedAt: CAPTURE_TIME } : {}),
+      amount: 12_500,
+      currency: "EUR",
+      contactEmail: "buyer+fail@example.com",
+      createdAt: CAPTURE_TIME,
+    },
+  });
 }
 
 function succeededEventsFor(orderId: string) {
@@ -280,4 +304,63 @@ describe("mock Payment handler", () => {
     expect(await prisma.paymentAttempt.count({ where: { orderId: placed.orderId } })).toBe(1);
     expect(await succeededEventsFor(placed.orderId)).toBe(1);
   });
+
+  it("records a FAILED attempt with its reason and emits payment.failed with final: true for a +fail@ buyer", async () => {
+    const placed = await deliver("buyer+fail@example.com");
+
+    const attempts = await prisma.paymentAttempt.findMany({ where: { orderId: placed.orderId } });
+    expect(attempts).toMatchObject([
+      { attemptNo: 1, status: "FAILED", capturedAt: null, failureReason: "card_declined" },
+    ]);
+    const events = await failedEventsFor(placed.orderId);
+    expect(events.map((event) => event.payload)).toMatchObject([
+      {
+        type: "payment.failed",
+        version: 1,
+        orderId: placed.orderId,
+        correlationId: placed.envelope.correlationId,
+        causationId: placed.envelope.id,
+        payload: {
+          paymentId: attempts[0]?.paymentId,
+          orderId: placed.orderId,
+          attemptNo: 1,
+          final: true,
+          reason: "card_declined",
+        },
+      },
+    ]);
+    expect(await succeededEventsFor(placed.orderId)).toBe(0);
+  });
+
+  it("emits a non-final payment.failed when the injected Random draws a failure", async () => {
+    const placed = await deliver("buyer@example.com", { random: 0.5, successRate: 0.5 });
+
+    expect(
+      await prisma.paymentAttempt.findMany({ where: { orderId: placed.orderId } }),
+    ).toMatchObject([{ status: "FAILED", failureReason: "provider_declined" }]);
+    expect((await failedEventsFor(placed.orderId)).map((event) => event.payload)).toMatchObject([
+      { payload: { final: false, reason: "provider_declined" } },
+    ]);
+  });
+
+  it("captures when the injected Random draws below the success rate", async () => {
+    const placed = await deliver("buyer@example.com", { random: 0.4, successRate: 0.5 });
+
+    expect(await succeededEventsFor(placed.orderId)).toBe(1);
+    expect(await failedEventsFor(placed.orderId)).toEqual([]);
+  });
+
+  it.each(["ATTEMPTING", "CAPTURED"] as const)(
+    "never emits final: true while another attempt for the order is %s",
+    async (status) => {
+      const placed = orderPlaced("buyer+fail@example.com");
+      await otherAttempt(placed.orderId, status);
+
+      await deliver("buyer+fail@example.com", {}, placed);
+
+      expect((await failedEventsFor(placed.orderId)).map((event) => event.payload)).toMatchObject([
+        { payload: { attemptNo: 1, final: false, reason: "card_declined" } },
+      ]);
+    },
+  );
 });

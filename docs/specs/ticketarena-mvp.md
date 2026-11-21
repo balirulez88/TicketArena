@@ -266,13 +266,23 @@ In one transaction: dedupe check → lock the order `FOR UPDATE` (then seats if 
 outbox writes → commit.
 
 `decide` is a pure function returning `transition | noop | refund | retry | poison`. Zero-row
-conditional updates are never treated as success. Unknown `orderId` or unknown `paymentId` on a
-refund event is `poison` (the order always commits before `order.placed` is published, so a
-missing order means a bad message). Every `noop` is logged with a reason code. `retry` (state not
-yet reached) does not occur in today's flow but is supported.
+conditional updates are never treated as success. The order always commits before `order.placed`
+is published, so a missing order never means a message arrived early. An unknown `orderId` on a
+`succeeded` payment is a **refund** (reason `unknown_order`), not poison: the capture took real
+money and the order can be gone for good (a demo reset deletes settled orders). With no order to
+attach a ledger row to, the obligation is the `payment.refund_requested` outbox event alone (no
+contact), written in the same transaction as the consumer's dedupe record; duplicates of that
+payment serialize on an advisory lock keyed by `paymentId` and find the earlier request in the
+outbox, so a redelivered or duplicate message refunds that `paymentId` exactly once. An unknown
+`orderId` on a `failed` or `refunded` event, and an unknown `paymentId` on a `refunded` event,
+stay `poison`. Every `noop` is logged with a reason code. `retry` (state not yet reached) does not
+occur in today's flow but is supported.
 
 "On time" means `capturedAt <= order.paymentDeadline`. "Refund" means: insert a ledger row with
-`REFUND_REQUESTED` and write outbox `payment.refund_requested`, in the same transaction.
+`REFUND_REQUESTED` (`refundRequestedAt = T`) and write outbox `payment.refund_requested` (with the
+order's contact), in the same transaction. A late capture on a `PENDING_PAYMENT` order does both
+in the transaction that expires the order and frees its seats; the seats are never reclaimed for
+the late payment, even when they are still free (AT-20).
 A success whose amount or currency differs from the order total is always refunded.
 
 | Order state     | `succeeded`, new payment, on time                              | `succeeded`, new payment, late                 | `succeeded`, known payment | `failed`, not final | `failed`, final                                              | `refunded`                                                       | Sweeper (deadline + grace) |
@@ -281,6 +291,7 @@ A success whose amount or currency differs from the order total is always refund
 | CONFIRMED       | refund                                                         | refund                                         | noop (duplicate)           | noop                | noop                                                         | ledger → `REFUNDED` if it was `REFUND_REQUESTED`/`MANUAL_REVIEW` | noop                       |
 | CANCELLED       | refund                                                         | refund                                         | noop (duplicate)           | noop                | noop                                                         | ledger → `REFUNDED`                                              | noop                       |
 | EXPIRED         | refund                                                         | refund                                         | noop (duplicate)           | noop                | noop                                                         | ledger → `REFUNDED`                                              | noop                       |
+| unknown orderId | refund (`unknown_order`, outbox event only)                    | refund (`unknown_order`, outbox event only)    | noop (request exists)      | poison              | poison                                                       | poison                                                           | n/a                        |
 
 Every refund caused by an on-time payment delivered after expiry increments `late_delivery_refund`.
 
@@ -289,7 +300,9 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
 - **Guarantee: eventual financial consistency.** Every capture on an order that cannot be fulfilled
   gets a durable refund obligation in the same transaction that decides it. The system retries it
   until it is `REFUNDED` or a human resolves `MANUAL_REVIEW`. Money is never kept silently; the
-  refund can lag.
+  refund can lag. A capture whose order no longer exists has no ledger row to hold the obligation:
+  its `payment.refund_requested` outbox event (reason `unknown_order`) is the obligation, and the
+  reconciler, which scans ledger rows, does not see it.
 - Ledger disposition transitions: `REFUND_REQUESTED → REFUNDED | MANUAL_REVIEW`;
   `MANUAL_REVIEW → REFUND_REQUESTED | REFUNDED`. `APPLIED` is terminal in the MVP.
 - Execution: the Payment consumer refunds idempotently (unique `paymentId` in `payment.refunds`)
@@ -308,7 +321,9 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
 - One attempt per order in the MVP. Outcome by magic email, else random via injected `Random`
   with configurable success rate and latency:
   - `+fail@` → `payment.failed` with `final: true`
-  - `+late@` → capture after the deadline (demonstrates the late-payment refund)
+  - `+late@` → capture after the deadline (demonstrates the late-payment refund): the attempt
+    always captures and `capturedAt` is the order's `paymentDeadline` plus 1 s (provider time);
+    the event is delivered at once, so booking sees a late capture on a still-open order
   - `+dup@` → publishes its result twice (demonstrates dedupe)
   - `+double@` → captures twice with two payment ids (demonstrates refund of the extra charge)
 - Invariant (tested in the module): never emits `final: true` while another attempt for the order

@@ -204,9 +204,22 @@ describe.each(["CONFIRMED", "CANCELLED", "EXPIRED"] as const)("decide: %s", (sta
   });
 });
 
+describe("decide: unknown orderId", () => {
+  test.each([
+    ["on time", onTime],
+    ["late", late],
+  ] as const)("succeeded (%s) for an unknown orderId → refund (unknown_order)", (_when, event) => {
+    expect(decide(null, noLedger, event, T)).toEqual({
+      kind: "refund",
+      reason: "unknown_order",
+      paymentId: PAYMENT,
+      at: T,
+    });
+  });
+});
+
 describe("decide: poison", () => {
   test.each([
-    ["payment.succeeded", onTime],
     ["payment.failed", failedFinal],
     ["payment.refunded", refunded],
   ] as const)("%s for an unknown orderId → poison (unknown_order)", (_type, event) => {

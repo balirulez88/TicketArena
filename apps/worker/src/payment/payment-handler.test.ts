@@ -174,6 +174,31 @@ describe("mock Payment handler", () => {
     });
   });
 
+  it("captures after the order's payment deadline for a +late@ buyer", async () => {
+    const placed = await deliver("buyer+late@example.com");
+    const deadline = new Date(placed.envelope.payload.paymentDeadline);
+
+    const [attempt] = await prisma.paymentAttempt.findMany({ where: { orderId: placed.orderId } });
+    expect(attempt).toMatchObject({ attemptNo: 1, status: "CAPTURED" });
+    expect(attempt?.capturedAt?.getTime()).toBeGreaterThan(deadline.getTime());
+    const events = await prisma.paymentOutboxEvent.findMany({
+      where: {
+        eventType: "payment.succeeded",
+        payload: { path: ["orderId"], equals: placed.orderId },
+      },
+    });
+    expect(events.map((event) => event.payload)).toMatchObject([
+      { payload: { capturedAt: attempt?.capturedAt?.toISOString() } },
+    ]);
+  });
+
+  it("captures a +late@ buyer even when the injected Random draws a failure", async () => {
+    const placed = await deliver("buyer+late@example.com", { random: 0.9, successRate: 0 });
+
+    expect(await succeededEventsFor(placed.orderId)).toBe(1);
+    expect(await failedEventsFor(placed.orderId)).toEqual([]);
+  });
+
   it("publishes its result twice, with distinct event ids, for a +dup@ buyer", async () => {
     const placed = await deliver("buyer+dup@example.com");
 

@@ -40,8 +40,12 @@ export type TransitionReason =
   | "late_capture"
   | "final_failure"
   | "refund_completed";
-/** `late_delivery`: an on-time capture that reached an already expired order (counted later). */
+/**
+ * `late_delivery`: an on-time capture that reached an already expired order. `unknown_order`: a
+ * capture for an order that no longer exists.
+ */
 export type RefundReason =
+  | "unknown_order"
   | "amount_mismatch"
   | "order_confirmed"
   | "order_cancelled"
@@ -73,7 +77,10 @@ export type SagaDecision =
       readonly at: Date;
     }
   | {
-      /** Order unchanged; a `REFUND_REQUESTED` ledger row plus `payment.refund_requested`. */
+      /**
+       * Order unchanged; a `REFUND_REQUESTED` ledger row plus `payment.refund_requested` (for
+       * `unknown_order` only the event: there is no order to attach a ledger row to).
+       */
       readonly kind: "refund";
       readonly reason: RefundReason;
       readonly paymentId: string;
@@ -89,10 +96,14 @@ export function decide(
   event: SagaEvent,
   T: Date,
 ): SagaDecision {
-  // The order always commits before `order.placed` is published, so a missing order means the
-  // message itself is bad, not that it arrived early.
   if (order === null) {
-    return { kind: "poison", reason: "unknown_order" };
+    // The order always commits before `order.placed` is published, so a missing order never
+    // means the message arrived early. A capture still took real money, and the order can be
+    // gone for good (a demo reset deletes settled orders), so it is refunded, never kept; any
+    // other event for a missing order is a bad message.
+    return event.type === "payment.succeeded"
+      ? { kind: "refund", reason: "unknown_order", paymentId: event.paymentId, at: T }
+      : { kind: "poison", reason: "unknown_order" };
   }
   switch (event.type) {
     case "payment.succeeded":

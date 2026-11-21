@@ -434,3 +434,51 @@ After review: does the payment handler lock attempts per order?
 Assumed: No. The advisory lock was removed; the final check sees committed attempts only, which suffices while the MVP writes only attempt 1 (unique (orderId, attemptNo)). Retries must first serialize attempts per order in every branch. Supersedes the earlier advisory-lock assumption
 
 Answer: Accepted (2026-11-21). Before retries are introduced, every attempt branch must be serialized per order; the (orderId, attemptNo) index alone allows attempts 1 and 2 together.
+
+## 2026-11-21 10:59 ticket 19
+
+How does +late@ capture after the deadline without the handler waiting?
+
+Assumed: The attempt always captures with capturedAt = order.paymentDeadline + 1 s (provider time), delivered at once, so the saga sees a late capture on a still-open order
+
+Answer: (open)
+
+## 2026-11-21 10:59 ticket 19
+
+Where is the refund obligation for an unknown order, given the ledger has a FK to orders?
+
+Assumed: No ledger row; the payment.refund_requested outbox row (reason unknown_order, no contact) is the obligation, written only if none exists for that paymentId, serialized by a per-paymentId advisory xact lock. The future reconciler, which scans ledger rows, will not re-emit it (documented)
+
+Answer: (open)
+
+## 2026-11-21 10:59 ticket 19
+
+What is the shape of payment.refund_requested?
+
+Assumed: paymentId, orderId, amount, currency, reason (late_capture|late_delivery|order_expired|order_cancelled|order_confirmed|amount_mismatch|unknown_order), contact optional only for unknown_order; aggregate order_payment/paymentId v1; no consumer yet
+
+Answer: (open)
+
+## 2026-11-21 10:59 ticket 19
+
+Do refund decisions for CONFIRMED orders and amount mismatches keep throwing 'not handled yet' until ticket 22?
+
+Assumed: No: the refund apply step is generic, so they now get a refund obligation instead of retrying forever; +double@, AT-21, AT-22 remain ticket 22
+
+Answer: (open)
+
+## 2026-11-21 10:59 ticket 19
+
+Add the late_delivery_refund counter now?
+
+Assumed: Yes, as a SagaMetric counted best-effort for a late_delivery refund
+
+Answer: (open)
+
+## 2026-11-21 10:59 ticket 19
+
+After a late capture, what is the hold status?
+
+Assumed: Stays ORDERED, as when the sweeper expires an order; order.expired carries the same payload with causationId = the payment.succeeded
+
+Answer: (open)

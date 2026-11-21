@@ -23,19 +23,19 @@
 All tables live in the `public` schema (`multiSchema` with `schemas = ["public"]`; every model and
 enum carries `@@schema("public")`).
 
-| Table                | Purpose                                                                                                           |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `outbox_events`      | Transactional outbox: integration events written in the business TX                                               |
-| `processed_messages` | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007)           |
-| `venues`             | Seeded venues                                                                                                     |
-| `sections`           | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                      |
-| `rows`               | Row label within a section                                                                                        |
-| `events`             | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                           |
-| `seats`              | **Per event** seat: `status` `AVAILABLE\|HELD\|IN_CHECKOUT\|SOLD`, `holdId?`, `claimBuyerKey?`                    |
-| `holds`              | A buyer's hold: `buyerKey`, `status` `HELD\|ORDERED\|RELEASED\|EXPIRED`, `holdExpiresAt`, `correlationId`         |
-| `orders`             | One per hold: contact, `totalMinor`, `status`, fixed `paymentDeadline`, unique `(sessionId, idempotencyKey)`      |
-| `order_lines`        | Seat prices copied at placement                                                                                   |
-| `order_payments`     | Ledger of captured money: `paymentId` PK, `amount`, `capturedAt`, `disposition` (`APPLIED` for a confirmed order) |
+| Table                | Purpose                                                                                                                                                                                |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `outbox_events`      | Transactional outbox: integration events written in the business TX                                                                                                                    |
+| `processed_messages` | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007)                                                                                |
+| `venues`             | Seeded venues                                                                                                                                                                          |
+| `sections`           | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                                                                                           |
+| `rows`               | Row label within a section                                                                                                                                                             |
+| `events`             | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                                                                                                |
+| `seats`              | **Per event** seat: `status` `AVAILABLE\                                                                                                                                               |
+| `holds`              | A buyer's hold: `buyerKey`, `status` `HELD\                                                                                                                                            |
+| `orders`             | One per hold: contact, `totalMinor`, `status`, fixed `paymentDeadline`, unique `(sessionId, idempotencyKey)`                                                                           |
+| `order_lines`        | Seat prices copied at placement                                                                                                                                                        |
+| `order_payments`     | Ledger of captured money: `paymentId` PK, `amount`, `capturedAt`, `disposition` (`APPLIED` for a confirmed order, `REFUND_REQUESTED` with `refundRequestedAt` for a refund obligation) |
 
 Catalog data is seeded, never edited through the API. `seedCatalog(prisma, now)`
 (`packages/db/src/seed.ts`, run with `pnpm --filter @ticketarena/db db:seed`) only inserts
@@ -159,8 +159,7 @@ claims `PENDING_PAYMENT` orders with `paymentDeadline + 60 s` (settlement grace)
 `claimBuyerKey` cleared, so the buyer limit drops) and writes one `order.expired` outbox row per
 order with the contact. Invariant: `IN_CHECKOUT` seats are freed only in the transaction that ends
 the checkout; lazy expiry and the hold sweeper never free them, so checkout outlives the hold's own
-expiry (AT-10). The only other such transaction is the payment saga's cancellation on a final
-payment failure (order `CANCELLED`, seats `AVAILABLE`, `order.cancelled`). An order the payment saga has locked is skipped and re-checked next sweep. The hold
+expiry (AT-10). The only other such transactions are the payment saga's cancellation on a final payment failure (order `CANCELLED`, seats `AVAILABLE`, `order.cancelled`) and its expiry on a capture after the deadline (order `EXPIRED`, seats `AVAILABLE`, `order.expired`, a `REFUND_REQUESTED` ledger row and `payment.refund_requested`); the late payment never reclaims the seats. An order the payment saga has locked is skipped and re-checked next sweep. The hold
 stays `ORDERED`. `apps/worker` runs it every 15 s.
 
 ### Demo reset
@@ -181,11 +180,12 @@ cross-schema deletes). Only `admin.resetDemo` calls it. `reset-event.test.ts` ra
 against `holdSeats`, `placeOrder`, the payment saga and both sweepers on real Postgres to pin these
 guarantees.
 
-Known limitation: the reset deletes `EXPIRED` and `CANCELLED` demo orders even while a late
-capture for one may still be in flight, so the later `payment.succeeded` meets an unknown order
-(`decide` returns `poison` for an unknown `orderId`, as the spec requires; until the DLQ exists the
-message is redelivered on the retry schedule). Whether such a capture should be refunded instead is
-an open question for the late-payment ticket.
+The reset deletes `EXPIRED` and `CANCELLED` demo orders even while a late capture for one may
+still be in flight, so the later `payment.succeeded` meets an unknown order. The saga refunds it
+(reason `unknown_order`): no ledger row can reference the deleted order, so the
+`payment.refund_requested` outbox row, written once per `paymentId` under an advisory lock, is the
+only record of that obligation, and the reconciler, which scans ledger rows, will not re-emit it.
+Ticket 64 makes the case rare by keeping orders on a reset.
 
 Catalog API (`apps/web`): `events.list`, `events.get`, `seats.map`. Inputs and outputs are zod
 validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.

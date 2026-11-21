@@ -39,6 +39,13 @@ export interface PaymentHandlerDeps {
 const ATTEMPT_NO = 1;
 const DUPLICATE_RESULT_MAGIC = "+dup@";
 const FINAL_FAILURE_MAGIC = "+fail@";
+const LATE_CAPTURE_MAGIC = "+late@";
+/**
+ * `+late@`: the simulated provider stamps the capture this long after the order's payment
+ * deadline. Provider time is what decides "on time" (spec: Payment saga), so the event is still
+ * delivered at once and booking receives a late capture while the order is still open.
+ */
+const LATE_CAPTURE_AFTER_DEADLINE_MS = 1_000;
 /** `+fail@`: the card is refused for good, so the attempt is final. */
 const FINAL_FAILURE_REASON = "card_declined";
 /** A random failure is treated as transient: the buyer may still pay before the deadline. */
@@ -96,8 +103,11 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
 
     let result: { type: "payment.succeeded" | "payment.failed"; payload: JsonValue };
     if (outcome.captured) {
+      const capturedAt = order.contact.email.includes(LATE_CAPTURE_MAGIC)
+        ? new Date(new Date(order.paymentDeadline).getTime() + LATE_CAPTURE_AFTER_DEADLINE_MS)
+        : at;
       await tx.paymentAttempt.create({
-        data: { ...attempt, status: "CAPTURED", capturedAt: at },
+        data: { ...attempt, status: "CAPTURED", capturedAt },
       });
       result = {
         type: "payment.succeeded",
@@ -107,7 +117,7 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
           attemptNo: ATTEMPT_NO,
           amount: order.amountMinor,
           currency: order.currency,
-          capturedAt: at.toISOString(),
+          capturedAt: capturedAt.toISOString(),
         },
       };
     } else {
@@ -166,6 +176,9 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
   ): { captured: true } | { captured: false; final: boolean; reason: string } {
     if (email.includes(FINAL_FAILURE_MAGIC)) {
       return { captured: false, final: true, reason: FINAL_FAILURE_REASON };
+    }
+    if (email.includes(LATE_CAPTURE_MAGIC)) {
+      return { captured: true };
     }
     if (deps.random.next() < successRate) {
       return { captured: true };

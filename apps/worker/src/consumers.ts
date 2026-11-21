@@ -12,6 +12,7 @@ import {
   type PaymentClock,
   type PaymentRandom,
 } from "./payment/payment-handler.js";
+import { createRefundHandler } from "./payment/refund-handler.js";
 
 export interface ServiceConsumerDeps {
   readonly prisma: PrismaClient;
@@ -29,8 +30,9 @@ export interface ServiceConsumerDeps {
 }
 
 /**
- * The durable consumers of the payment saga: mock Payment, the booking saga (payment results),
- * then mock Notification for confirmations, cancellations and expiries (spec: Messaging).
+ * The durable consumers of the payment saga: mock Payment (captures and refunds), the booking saga
+ * (payment results and refunds), then mock Notification for confirmations, cancellations and
+ * expiries (spec: Messaging).
  */
 export function createServiceConsumers(
   deps: ServiceConsumerDeps,
@@ -64,6 +66,12 @@ export function createServiceConsumers(
       }),
     },
     {
+      service: "payment",
+      consumer: "payment-refund",
+      filterSubject: "ta.payment.refund_requested",
+      handler: createRefundHandler({ clock: deps.clock, newId: deps.newId, ...loggerOption }),
+    },
+    {
       service: "booking",
       consumer: "booking-saga",
       filterSubject: "ta.payment.succeeded",
@@ -74,6 +82,12 @@ export function createServiceConsumers(
       service: "booking",
       consumer: "booking-saga-failed",
       filterSubject: "ta.payment.failed",
+      handler: sagaHandler,
+    },
+    {
+      service: "booking",
+      consumer: "booking-saga-refunded",
+      filterSubject: "ta.payment.refunded",
       handler: sagaHandler,
     },
     {

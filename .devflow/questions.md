@@ -482,3 +482,51 @@ After a late capture, what is the hold status?
 Assumed: Stays ORDERED, as when the sweeper expires an order; order.expired carries the same payload with causationId = the payment.succeeded
 
 Answer: (open)
+
+## 2026-11-21 11:47 ticket 20
+
+How is payment.refunded handled when its order no longer exists (unknown_order refund, no ledger row)?
+
+Assumed: The saga checks booking's own outbox for a payment.refund_requested with that paymentId: if present, a logged noop (unknown_order_refunded); otherwise poison (unknown_order). Passed to decide() via optional DecideContext.refundRequested
+
+Answer: (open)
+
+## 2026-11-21 11:47 ticket 20
+
+What does payment.refunded carry when the request had no contact?
+
+Assumed: contact is optional, copied from the request; absent only for unknown_order; the refund still executes
+
+Answer: (open)
+
+## 2026-11-21 11:47 ticket 20
+
+Matrix says refunded on PENDING_PAYMENT is poison, but an amount-mismatch refund leaves the order PENDING_PAYMENT with a REFUND_REQUESTED row
+
+Assumed: Matrix gap: the ledger row moves to REFUNDED whatever the order status; PENDING_PAYMENT stays poison (refund_for_pending_order) only when the payment is not in the ledger; spec matrix updated
+
+Answer: (open)
+
+## 2026-11-21 11:47 ticket 20
+
+What does a duplicate payment.refund_requested do on the Payment side?
+
+Assumed: Insert ON CONFLICT DO NOTHING; nothing refunded or emitted again, logged and acked. A future reconciler re-emit for an executed payment yields no second payment.refunded; recovery relies on the first payment.refunded in the payment outbox
+
+Answer: (open)
+
+## 2026-11-21 11:47 ticket 20
+
+What goes in a payment.refunds row and in payment.refunded?
+
+Assumed: Row: paymentId PK, orderId, amount, currency, reason, refundedAt (injected clock); no check against payment attempts; payment.refunded adds currency, aggregate payment/paymentId
+
+Answer: (open)
+
+## 2026-11-21 11:47 ticket 20
+
+Does booking emit anything or notify the buyer when a refund completes?
+
+Assumed: No; the ledger update emits nothing; refund emails are a later ticket
+
+Answer: (open)

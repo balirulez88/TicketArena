@@ -23,19 +23,19 @@
 All tables live in the `public` schema (`multiSchema` with `schemas = ["public"]`; every model and
 enum carries `@@schema("public")`).
 
-| Table                | Purpose                                                                                                                                                                                |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `outbox_events`      | Transactional outbox: integration events written in the business TX                                                                                                                    |
-| `processed_messages` | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007)                                                                                |
-| `venues`             | Seeded venues                                                                                                                                                                          |
-| `sections`           | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                                                                                           |
-| `rows`               | Row label within a section                                                                                                                                                             |
-| `events`             | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                                                                                                |
-| `seats`              | **Per event** seat: `status` `AVAILABLE\                                                                                                                                               |
-| `holds`              | A buyer's hold: `buyerKey`, `status` `HELD\                                                                                                                                            |
-| `orders`             | One per hold: contact, `totalMinor`, `status`, fixed `paymentDeadline`, unique `(sessionId, idempotencyKey)`                                                                           |
-| `order_lines`        | Seat prices copied at placement                                                                                                                                                        |
-| `order_payments`     | Ledger of captured money: `paymentId` PK, `amount`, `capturedAt`, `disposition` (`APPLIED` for a confirmed order, `REFUND_REQUESTED` with `refundRequestedAt` for a refund obligation) |
+| Table                | Purpose                                                                                                                                                                                                                              |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `outbox_events`      | Transactional outbox: integration events written in the business TX                                                                                                                                                                  |
+| `processed_messages` | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007)                                                                                                                              |
+| `venues`             | Seeded venues                                                                                                                                                                                                                        |
+| `sections`           | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                                                                                                                                         |
+| `rows`               | Row label within a section                                                                                                                                                                                                           |
+| `events`             | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                                                                                                                                              |
+| `seats`              | **Per event** seat: `status` `AVAILABLE\                                                                                                                                                                                             |
+| `holds`              | A buyer's hold: `buyerKey`, `status` `HELD\                                                                                                                                                                                          |
+| `orders`             | One per hold: contact, `totalMinor`, `status`, fixed `paymentDeadline`, unique `(sessionId, idempotencyKey)`                                                                                                                         |
+| `order_lines`        | Seat prices copied at placement                                                                                                                                                                                                      |
+| `order_payments`     | Ledger of captured money: `paymentId` PK, `amount`, `capturedAt`, `disposition` (`APPLIED` for a confirmed order, `REFUND_REQUESTED` with `refundRequestedAt` for a refund obligation, `REFUNDED` once `payment.refunded` closes it) |
 
 Catalog data is seeded, never edited through the API. `seedCatalog(prisma, now)`
 (`packages/db/src/seed.ts`, run with `pnpm --filter @ticketarena/db db:seed`) only inserts
@@ -200,6 +200,7 @@ The mock Payment service ([ADR 0009](../adr/0009-per-service-schemas.md)) owns t
 | `payment.outbox_events`      | Payment's own outbox, same shape as `public.outbox_events`; the relay drains both                                                                                                                |
 | `payment.processed_messages` | Payment consumer dedupe, same shape as `public.processed_messages`                                                                                                                               |
 | `payment.payment_attempts`   | One row per provider attempt (`CAPTURED`, or `FAILED` with its `failureReason`): unique `(orderId, attemptNo)`; CHECKs `CAPTURED ⇔ capturedAt IS NOT NULL`, `FAILED ⇔ failureReason IS NOT NULL` |
+| `payment.refunds`            | One executed refund per payment: `paymentId` PK (the once-only guard, AT-23), `orderId`, `amount`, `currency`, `reason` (from the request), `refundedAt`                                         |
 
 ### `notification` schema
 

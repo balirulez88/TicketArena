@@ -3,6 +3,7 @@ import {
   envelopeSchema,
   type Logger,
   paymentFailedPayloadSchema,
+  paymentRefundedPayloadSchema,
   paymentSucceededPayloadSchema,
   silentLogger,
 } from "@ticketarena/contracts";
@@ -58,6 +59,7 @@ const REFUND_AGGREGATE = "order_payment";
 
 const paymentSucceededEnvelope = envelopeSchema(paymentSucceededPayloadSchema);
 const paymentFailedEnvelope = envelopeSchema(paymentFailedPayloadSchema);
+const paymentRefundedEnvelope = envelopeSchema(paymentRefundedPayloadSchema);
 
 /** Validates the message as the payment event its `type` names and reduces it for `decide`. */
 function parsePaymentEvent(data: string): { orderId: string; event: SagaEvent } {
@@ -83,6 +85,10 @@ function parsePaymentEvent(data: string): { orderId: string; event: SagaEvent } 
         orderId: payload.orderId,
         event: { type, paymentId: payload.paymentId, final: payload.final },
       };
+    }
+    case "payment.refunded": {
+      const { payload } = paymentRefundedEnvelope.parse(raw);
+      return { orderId: payload.orderId, event: { type, paymentId: payload.paymentId } };
     }
     default:
       throw new Error(`booking saga cannot handle event type ${String(type)}`);
@@ -154,7 +160,9 @@ export function createPaymentSagaHandler(deps: PaymentSagaDeps) {
     // One T per transaction, read after every lock is held (ADR 0005): every timestamp this
     // message writes uses it.
     const T = deps.clock.now();
-    const decision = decide(order ?? null, ledger, event, T);
+    const decision = decide(order ?? null, ledger, event, T, {
+      refundRequested: await refundRequestedForVanishedOrder(tx, order, event),
+    });
 
     switch (decision.kind) {
       case "noop":
@@ -264,6 +272,10 @@ async function applyTransition(
     await confirm(tx, order, seatIds, event, decision.at, emit, newId);
     return "order confirmed";
   }
+  if (decision.reason === "refund_completed") {
+    await recordRefunded(tx, order, event);
+    return "refund recorded";
+  }
   if (decision.reason === "final_failure") {
     await cancel(tx, order, seatIds, decision.at, emit, newId);
     return "order cancelled";
@@ -279,6 +291,29 @@ function notHandledYet(event: SagaEvent, decision: SagaDecision): Error {
   return new Error(
     `${event.type} decision ${decision.kind} (${decision.reason}) is not handled yet`,
   );
+}
+
+/**
+ * Applies `refund_completed`: the payment's ledger row moves to REFUNDED, closing the obligation.
+ * The order is unchanged and nothing is emitted: Notification hears `payment.refunded` itself.
+ */
+async function recordRefunded(
+  tx: TransactionClient,
+  order: LockedOrder,
+  event: SagaEvent,
+): Promise<void> {
+  // Conditional on the disposition decide saw: zero rows means the decision is stale.
+  const refunded = await tx.orderPayment.updateMany({
+    where: {
+      paymentId: event.paymentId,
+      orderId: order.id,
+      disposition: { in: ["REFUND_REQUESTED", "MANUAL_REVIEW"] },
+    },
+    data: { disposition: "REFUNDED" },
+  });
+  if (refunded.count !== 1) {
+    throw new Error(`payment ${event.paymentId} has no open refund obligation`);
+  }
 }
 
 /** Applies `payment_on_time`: order CONFIRMED, ledger APPLIED, seats SOLD, `order.confirmed`. */
@@ -480,6 +515,33 @@ async function emitRefundRequested(
   });
 }
 
+/** Only a `payment.refunded` for an order that no longer exists needs this outbox read. */
+async function refundRequestedForVanishedOrder(
+  tx: TransactionClient,
+  order: LockedOrder | undefined,
+  event: SagaEvent,
+): Promise<boolean> {
+  return order === undefined && event.type === "payment.refunded"
+    ? refundRequestExists(tx, event.paymentId)
+    : false;
+}
+
+/**
+ * Whether booking ever requested a refund of this payment. For an order that no longer exists the
+ * outbox row is the only record of that request (no ledger row can reference the order).
+ */
+async function refundRequestExists(tx: TransactionClient, paymentId: string): Promise<boolean> {
+  const existing = await tx.outboxEvent.findFirst({
+    where: {
+      aggregateType: REFUND_AGGREGATE,
+      aggregateId: paymentId,
+      eventType: REFUND_REQUESTED_EVENT,
+    },
+    select: { id: true },
+  });
+  return existing !== null;
+}
+
 /**
  * Refunds a capture whose order no longer exists (a demo reset deletes settled orders). There is
  * no order to attach a ledger row to, so the outbox row is the obligation, and it is what makes
@@ -497,15 +559,7 @@ async function requestUnknownOrderRefund(
   emit: SagaContext["emit"],
   newId: () => string,
 ): Promise<boolean> {
-  const existing = await tx.outboxEvent.findFirst({
-    where: {
-      aggregateType: REFUND_AGGREGATE,
-      aggregateId: payment.paymentId,
-      eventType: REFUND_REQUESTED_EVENT,
-    },
-    select: { id: true },
-  });
-  if (existing !== null) {
+  if (await refundRequestExists(tx, payment.paymentId)) {
     return false;
   }
   await emit({

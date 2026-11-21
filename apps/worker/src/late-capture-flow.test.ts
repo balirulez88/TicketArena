@@ -91,7 +91,9 @@ describe("hold -> order -> worker -> late payment.succeeded", () => {
         holdId: null,
       });
       const ledger = await prisma.orderPayment.findMany({ where: { orderId: order.id } });
-      expect(ledger).toMatchObject([{ disposition: "REFUND_REQUESTED" }]);
+      // The worker also executes the refund (refund-flow.test.ts), so the obligation may be done.
+      expect(ledger).toHaveLength(1);
+      expect(["REFUND_REQUESTED", "REFUNDED"]).toContain(ledger[0]?.disposition);
       expect(ledger[0]?.capturedAt.getTime()).toBeGreaterThan(order.paymentDeadline.getTime());
       expect(await refundRequestsFor(ledger[0]?.paymentId ?? "")).toMatchObject([
         {

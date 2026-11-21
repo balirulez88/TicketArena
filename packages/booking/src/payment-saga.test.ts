@@ -801,3 +801,146 @@ describe("payment saga: payment.succeeded on a settled order", () => {
     expect(counted).toEqual([{ metric: "late_delivery_refund", eventId }]);
   });
 });
+
+function paymentRefunded(orderId: string, paymentId: string) {
+  return {
+    data: JSON.stringify({
+      id: randomUUID(),
+      type: "payment.refunded",
+      version: 1,
+      occurredAt: "2027-03-01T12:10:00.000Z",
+      correlationId: randomUUID(),
+      causationId: randomUUID(),
+      orderId,
+      payload: {
+        paymentId,
+        orderId,
+        amount: 4_200,
+        currency: "EUR",
+        refundedAt: "2027-03-01T12:10:00.000Z",
+        contact: { email: "alice@example.com" },
+      },
+    }),
+  };
+}
+
+/** An order the saga expired on a late capture: its ledger holds a REFUND_REQUESTED row. */
+async function refundRequestedOrder(buyer: Buyer) {
+  const pending = await pendingOrder(buyer);
+  const late = paymentSucceeded(pending.order, { capturedAt: LATE.toISOString() });
+  await db().$transaction((tx) => saga(tx, late.message, recordingEmit()));
+  return { ...pending, paymentId: late.paymentId };
+}
+
+function ledgerOf(orderId: string) {
+  return db().orderPayment.findMany({
+    where: { orderId },
+    select: { paymentId: true, disposition: true },
+  });
+}
+
+describe("payment saga: payment.refunded", () => {
+  test("moves a REFUND_REQUESTED ledger row to REFUNDED, leaves the order alone and emits nothing", async () => {
+    const { order, paymentId } = await refundRequestedOrder({
+      sessionId: "v".repeat(32),
+      buyerKey: "v".repeat(32),
+    });
+    const { emit, emitted } = recordingEmit();
+
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(order.id, paymentId), { emit }),
+    );
+
+    expect(outcome).toBeUndefined();
+    expect(await ledgerOf(order.id)).toEqual([{ paymentId, disposition: "REFUNDED" }]);
+    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      "EXPIRED",
+    );
+    expect(emitted).toEqual([]);
+  });
+
+  test("moves a MANUAL_REVIEW ledger row to REFUNDED", async () => {
+    const { order, paymentId } = await refundRequestedOrder({
+      sessionId: "w".repeat(32),
+      buyerKey: "w".repeat(32),
+    });
+    await db().orderPayment.update({
+      where: { paymentId },
+      data: { disposition: "MANUAL_REVIEW" },
+    });
+
+    await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(order.id, paymentId), recordingEmit()),
+    );
+
+    expect(await ledgerOf(order.id)).toEqual([{ paymentId, disposition: "REFUNDED" }]);
+  });
+
+  test("records the refund of an amount mismatch on a still PENDING_PAYMENT order", async () => {
+    const { order } = await pendingOrder({ sessionId: "x".repeat(32), buyerKey: "x".repeat(32) });
+    const mismatch = paymentSucceeded(order, { amount: order.totalMinor + 1 });
+    await db().$transaction((tx) => saga(tx, mismatch.message, recordingEmit()));
+
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(order.id, mismatch.paymentId), recordingEmit()),
+    );
+
+    expect(outcome).toBeUndefined();
+    expect(await ledgerOf(order.id)).toEqual([
+      { paymentId: mismatch.paymentId, disposition: "REFUNDED" },
+    ]);
+    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      "PENDING_PAYMENT",
+    );
+  });
+
+  test("acks a repeated payment.refunded without changing the ledger again", async () => {
+    const { order, paymentId } = await refundRequestedOrder({
+      sessionId: "y".repeat(32),
+      buyerKey: "y".repeat(32),
+    });
+    for (let delivery = 0; delivery < 2; delivery += 1) {
+      const outcome = await db().$transaction((tx) =>
+        saga(tx, paymentRefunded(order.id, paymentId), recordingEmit()),
+      );
+      expect(outcome).toBeUndefined();
+    }
+
+    expect(await ledgerOf(order.id)).toEqual([{ paymentId, disposition: "REFUNDED" }]);
+  });
+
+  test("returns poison for a payment.refunded whose paymentId is not in the order's ledger", async () => {
+    const { order, paymentId } = await refundRequestedOrder({
+      sessionId: "z".repeat(32),
+      buyerKey: "z".repeat(32),
+    });
+
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(order.id, randomUUID()), recordingEmit()),
+    );
+
+    expect(outcome).toEqual({ outcome: "poison", reason: "unknown_payment" });
+    expect(await ledgerOf(order.id)).toEqual([{ paymentId, disposition: "REFUND_REQUESTED" }]);
+  });
+
+  test("returns poison for a payment.refunded on an unknown orderId booking never asked to refund", async () => {
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(randomUUID(), randomUUID()), recordingEmit()),
+    );
+
+    expect(outcome).toEqual({ outcome: "poison", reason: "unknown_order" });
+  });
+
+  test("acks the payment.refunded of an unknown_order refund booking requested, as a noop", async () => {
+    const vanished = { id: randomUUID(), totalMinor: 4_200, currency: "EUR" };
+    const capture = paymentSucceeded(vanished);
+    await db().$transaction((tx) => saga(tx, capture.message, { emit: outboxEmit(tx) }));
+
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(vanished.id, capture.paymentId), recordingEmit()),
+    );
+
+    expect(outcome).toBeUndefined();
+    expect(await db().orderPayment.count({ where: { paymentId: capture.paymentId } })).toBe(0);
+  });
+});

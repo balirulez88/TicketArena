@@ -180,7 +180,8 @@ Interfaces (shape level):
 - `payment.payment_attempts`: unique `(orderId, attemptNo)`, `paymentId`, `status`
   `ATTEMPTING | CAPTURED | FAILED`, `capturedAt?`, `failureReason?`, amount, currency, contact.
   CHECK: `CAPTURED ⇔ capturedAt IS NOT NULL`; `FAILED ⇔ failureReason IS NOT NULL`.
-- `payment.refunds`: unique `paymentId`.
+- `payment.refunds`: `paymentId` (primary key, so unique), `orderId`, amount, currency, `reason`,
+  `refundedAt`.
 - `notification.notifications`: `sourceEventId`, `channel` `EMAIL | SMS`, recipient, template,
   `status` `PENDING | SENT`; unique `(sourceEventId, channel)`.
 - No cross-schema foreign keys or reads; services learn about each other only from events.
@@ -274,8 +275,12 @@ attach a ledger row to, the obligation is the `payment.refund_requested` outbox 
 contact), written in the same transaction as the consumer's dedupe record; duplicates of that
 payment serialize on an advisory lock keyed by `paymentId` and find the earlier request in the
 outbox, so a redelivered or duplicate message refunds that `paymentId` exactly once. An unknown
-`orderId` on a `failed` or `refunded` event, and an unknown `paymentId` on a `refunded` event,
-stay `poison`. Every `noop` is logged with a reason code. `retry` (state not yet reached) does not
+`orderId` on a `failed` event, and an unknown `paymentId` on a `refunded` event, stay `poison`. A
+`refunded` event for an unknown `orderId` is a logged noop when booking's outbox holds a
+`payment.refund_requested` for that `paymentId` (the `unknown_order` refund it asked for, which has
+no ledger row), and `poison` otherwise. A `refunded` event moves the payment's ledger row from
+`REFUND_REQUESTED` or `MANUAL_REVIEW` to `REFUNDED` whatever the order's status: an amount
+mismatch is refunded while the order stays `PENDING_PAYMENT`. Every `noop` is logged with a reason code. `retry` (state not yet reached) does not
 occur in today's flow but is supported.
 
 "On time" means `capturedAt <= order.paymentDeadline`. "Refund" means: insert a ledger row with
@@ -287,11 +292,11 @@ A success whose amount or currency differs from the order total is always refund
 
 | Order state     | `succeeded`, new payment, on time                              | `succeeded`, new payment, late                 | `succeeded`, known payment | `failed`, not final | `failed`, final                                              | `refunded`                                                       | Sweeper (deadline + grace) |
 | --------------- | -------------------------------------------------------------- | ---------------------------------------------- | -------------------------- | ------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------- | -------------------------- |
-| PENDING_PAYMENT | → CONFIRMED, ledger `APPLIED`, seats `SOLD`, `order.confirmed` | → EXPIRED, free seats, `order.expired`, refund | noop (duplicate)           | log + metric, noop  | → CANCELLED (if no `APPLIED`), free seats, `order.cancelled` | poison                                                           | → EXPIRED, free seats      |
+| PENDING_PAYMENT | → CONFIRMED, ledger `APPLIED`, seats `SOLD`, `order.confirmed` | → EXPIRED, free seats, `order.expired`, refund | noop (duplicate)           | log + metric, noop  | → CANCELLED (if no `APPLIED`), free seats, `order.cancelled` | ledger → `REFUNDED` if it was `REFUND_REQUESTED`, else poison    | → EXPIRED, free seats      |
 | CONFIRMED       | refund                                                         | refund                                         | noop (duplicate)           | noop                | noop                                                         | ledger → `REFUNDED` if it was `REFUND_REQUESTED`/`MANUAL_REVIEW` | noop                       |
 | CANCELLED       | refund                                                         | refund                                         | noop (duplicate)           | noop                | noop                                                         | ledger → `REFUNDED`                                              | noop                       |
 | EXPIRED         | refund                                                         | refund                                         | noop (duplicate)           | noop                | noop                                                         | ledger → `REFUNDED`                                              | noop                       |
-| unknown orderId | refund (`unknown_order`, outbox event only)                    | refund (`unknown_order`, outbox event only)    | noop (request exists)      | poison              | poison                                                       | poison                                                           | n/a                        |
+| unknown orderId | refund (`unknown_order`, outbox event only)                    | refund (`unknown_order`, outbox event only)    | noop (request exists)      | poison              | poison                                                       | noop if booking requested its refund, else poison                | n/a                        |
 
 Every refund caused by an on-time payment delivered after expiry increments `late_delivery_refund`.
 
@@ -306,7 +311,10 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
 - Ledger disposition transitions: `REFUND_REQUESTED → REFUNDED | MANUAL_REVIEW`;
   `MANUAL_REVIEW → REFUND_REQUESTED | REFUNDED`. `APPLIED` is terminal in the MVP.
 - Execution: the Payment consumer refunds idempotently (unique `paymentId` in `payment.refunds`)
-  and emits `payment.refunded`; transient failures follow the retry schedule, then the DLQ.
+  and emits `payment.refunded` only when its insert wrote the row, so a duplicate request (a new
+  event id) refunds nothing and emits nothing; transient failures follow the retry schedule, then
+  the DLQ. Every request is executed; an `unknown_order` request has no contact, and its
+  `payment.refunded` carries none.
 - Reconciler (worker, every 5 min): each `REFUND_REQUESTED` row older than 10 min gets its event
   re-emitted through the outbox and `refundAttempts` incremented. After 3 re-emits it moves to
   `MANUAL_REVIEW`. This also covers a dead-lettered or lost message.
@@ -385,7 +393,7 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
   | `ta.payment.succeeded`        | payment         | booking-saga               | paymentId, orderId, attemptNo, amount, currency, capturedAt |
   | `ta.payment.failed`           | payment         | booking-saga               | paymentId, orderId, attemptNo, final, reason                |
   | `ta.payment.refund_requested` | booking         | payment, notification      | paymentId, orderId, amount, currency, reason, contact       |
-  | `ta.payment.refunded`         | payment         | booking-saga, notification | paymentId, orderId, amount, refundedAt, contact             |
+  | `ta.payment.refunded`         | payment         | booking-saga, notification | paymentId, orderId, amount, currency, refundedAt, contact?  |
   | `ta.dlq.<consumer>`           | consumer runner | none (inspection, replay)  | original envelope, error, deliveryCount                     |
 
 - **Consumers:** durable pull consumers `payment`, `booking-saga`, `notification`, each with its

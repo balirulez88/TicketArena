@@ -57,7 +57,8 @@ export type NoopReason =
   | "payment_applied"
   | "order_not_pending"
   | "already_refunded"
-  | "refund_not_requested";
+  | "refund_not_requested"
+  | "unknown_order_refunded";
 /** No matrix cell retries today; the outcome exists for states a message may arrive before. */
 export type RetryReason = "state_not_reached";
 export type PoisonReason = "unknown_order" | "unknown_payment" | "refund_for_pending_order";
@@ -90,12 +91,27 @@ export type SagaDecision =
   | { readonly kind: "retry"; readonly reason: RetryReason }
   | { readonly kind: "poison"; readonly reason: PoisonReason };
 
+/** Facts besides the order and its ledger; read only where the matrix needs them. */
+export interface DecideContext {
+  /**
+   * Booking's outbox holds a `payment.refund_requested` for the event's payment. Consulted only
+   * for a `payment.refunded` whose order is gone: an `unknown_order` refund has no ledger row,
+   * so this request is the only proof that booking asked for the money back.
+   */
+  readonly refundRequested?: boolean;
+}
+
 export function decide(
   order: SagaOrderState | null,
   ledger: readonly LedgerEntry[],
   event: SagaEvent,
   T: Date,
+  context: DecideContext = {},
 ): SagaDecision {
+  if (order === null && event.type === "payment.refunded" && context.refundRequested === true) {
+    // The refund booking requested for a vanished order is done; there is no row to record it on.
+    return { kind: "noop", reason: "unknown_order_refunded" };
+  }
   if (order === null) {
     // The order always commits before `order.placed` is published, so a missing order never
     // means the message arrived early. A capture still took real money, and the order can be
@@ -186,14 +202,13 @@ function decideRefunded(
   event: Extract<SagaEvent, { type: "payment.refunded" }>,
   T: Date,
 ): SagaDecision {
-  // A refund is only ever requested once the order has left PENDING_PAYMENT or for a payment
-  // that is already in the ledger, so either mismatch means a bad message.
-  if (order.status === "PENDING_PAYMENT") {
-    return { kind: "poison", reason: "refund_for_pending_order" };
-  }
+  // Booking requests a refund only by writing the payment's ledger row (an `amount_mismatch` does
+  // so on a still PENDING_PAYMENT order), so a payment missing from the ledger is a bad message.
   const entry = ledger.find((candidate) => candidate.paymentId === event.paymentId);
   if (entry === undefined) {
-    return { kind: "poison", reason: "unknown_payment" };
+    return order.status === "PENDING_PAYMENT"
+      ? { kind: "poison", reason: "refund_for_pending_order" }
+      : { kind: "poison", reason: "unknown_payment" };
   }
   switch (entry.disposition) {
     case "REFUND_REQUESTED":

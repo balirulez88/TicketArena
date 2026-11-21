@@ -325,6 +325,21 @@ model PaymentAttempt {
   @@schema("payment")
 }
 
+/// One executed refund per captured payment. The primary key on `paymentId` is what makes a
+/// refund happen once: a duplicate request under a new event id gets past `processed_messages`,
+/// and its insert finds this row instead (AT-23).
+model PaymentRefund {
+  paymentId  String   @id @db.Uuid
+  orderId    String   @db.Uuid
+  amount     Int
+  currency   String
+  reason     String
+  refundedAt DateTime @db.Timestamptz(3)
+
+  @@map("refunds")
+  @@schema("payment")
+}
+
 enum NotificationOutboxStatus {
   PENDING
   PUBLISHED

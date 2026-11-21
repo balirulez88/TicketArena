@@ -71,7 +71,8 @@ optional `holdId`/`orderId`, `payload`); the full envelope is stored as the outb
 | `order.confirmed`          | booking saga handler (same TX)                                          | `notification`           | 1               |
 | `order.cancelled`          | booking saga handler (same TX)                                          | `notification-cancelled` | 1               |
 | `order.expired`            | `BookingService.sweepExpired`; booking saga on a late capture (same TX) | `notification-expired`   | 1               |
-| `payment.refund_requested` | booking saga handler (same TX)                                          | none yet                 | 1               |
+| `payment.refund_requested` | booking saga handler (same TX)                                          | `payment-refund`         | 1               |
+| `payment.refunded`         | mock Payment refund handler (same TX, `payment` outbox)                 | `booking-saga-refunded`  | 1               |
 
 `seat.held` payload: `holdId`, `eventId`, `seatIds`, `holdExpiresAt`. Its `correlationId` is
 minted here and reused by every later event of the booking.
@@ -94,7 +95,13 @@ expires the order (caused by the `payment.succeeded`).
 `reason` (`late_capture`, `late_delivery`, `order_expired`, `order_cancelled`, `order_confirmed`,
 `amount_mismatch`, `unknown_order`) and `contact`, which is absent only for `unknown_order`. Its
 aggregate is `order_payment` / `paymentId`; it carries the order's `holdId` when the order exists.
-No consumer subscribes yet: refund execution, refund emails and the reconciler are later tickets.
+The mock Payment service executes it (`payment-refund`, see Payment saga). Refund emails and the
+reconciler are later tickets.
+
+`payment.refunded` payload: `paymentId`, `orderId`, `amount`, `currency`, `refundedAt` (provider
+time) and the request's `contact`, absent only when the request had none (`unknown_order`). Its
+aggregate is `payment` / `paymentId`; it carries the request's `orderId`, `holdId` and correlation.
+No notification consumer subscribes yet.
 
 `payment.succeeded` payload: `paymentId`, `orderId`, `attemptNo`, `amount` (minor units), `currency`,
 `capturedAt` (provider time). `order.confirmed` payload: `orderId`, `seatIds`, `totalMinor`, `currency`,
@@ -121,8 +128,8 @@ the provider's key dedupe absorbs that.
 
 ## Payment saga
 
-`apps/worker/src/consumers.ts` registers the durable consumers `payment`, `booking-saga` and
-`booking-saga-failed`. `payment` (`service: "payment"`) handles `order.placed` in
+`apps/worker/src/consumers.ts` registers the durable consumers `payment`, `payment-refund`,
+`booking-saga`, `booking-saga-failed` and `booking-saga-refunded`. `payment` (`service: "payment"`) handles `order.placed` in
 `apps/worker/src/payment/`: one `payment.payment_attempts` row (attempt 1) and one result event, with
 latency and outcome drawn from the injected `Random`/`Clock`. Outcome: a `+fail@` email is a final
 failure (`FAILED`, `failureReason` `card_declined`, `payment.failed` with `final: true`); a `+late@`
@@ -171,8 +178,25 @@ failure, reason `attempt_failed`, is also counted as `payment_attempt_failed` in
 counter hash, best-effort, and leaves the order open until its deadline); `retry` and `poison`
 (unknown `orderId` on a failure) are returned to the runner as a `HandlerOutcome`. Any decision
 the handler does not apply yet throws `... is not handled yet` and is retried, so captured money
-is never dropped silently. `decide` already covers `payment.refunded` (an unknown `paymentId` there
-stays `poison`); the saga subscribes to it once its contract exists.
+is never dropped silently.
+
+**Refund execution.** `payment-refund` (`service: "payment"`, `apps/worker/src/payment/refund-handler.ts`)
+consumes `payment.refund_requested`: in the runner's transaction it inserts one `payment.refunds`
+row (primary key `paymentId`, `INSERT … ON CONFLICT DO NOTHING`) and, only if that insert wrote the
+row, emits `payment.refunded` through the payment outbox. `processed_messages` absorbs a
+redelivery; the primary key absorbs a duplicate request under a new event id, including a
+concurrent one, whose insert waits on the uncommitted row and then skips it. So a payment is
+refunded once and `payment.refunded` is emitted once (AT-23); a skipped duplicate is logged and
+acked. Every request is executed, with or without a contact. `booking-saga-refunded` runs
+`createPaymentSagaHandler` on `payment.refunded`: `transition` `refund_completed` moves the
+payment's ledger row from `REFUND_REQUESTED` or `MANUAL_REVIEW` to `REFUNDED` by a conditional
+update (zero rows throws), whatever the order's status (an `amount_mismatch` refund leaves the
+order `PENDING_PAYMENT`); the order is unchanged and nothing is emitted. A repeat is `noop`
+`already_refunded`. A `paymentId` missing from a known order's ledger is `poison`
+(`unknown_payment`, or `refund_for_pending_order` on a `PENDING_PAYMENT` order). For an unknown
+`orderId` the handler asks booking's outbox whether it requested a refund of that payment (an
+`unknown_order` refund has no ledger row): if so the event is `noop` `unknown_order_refunded`,
+else `poison` (`unknown_order`).
 
 Relay and runner take a `service` (`booking` default, `payment` or `notification`) that selects the outbox and
 `processed_messages` of that schema (ADR 0009); the worker runs one relay per outbox.

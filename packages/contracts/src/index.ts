@@ -19,5 +19,6 @@ export {
   type PaymentRefundRequestedPayload,
   paymentRefundRequestedPayloadSchema,
 } from "./payment-refund-requested";
+export { type PaymentRefundedPayload, paymentRefundedPayloadSchema } from "./payment-refunded";
 export { type PaymentSucceededPayload, paymentSucceededPayloadSchema } from "./payment-succeeded";
 export { type SeatHeldPayload, seatHeldPayloadSchema } from "./seat-held";

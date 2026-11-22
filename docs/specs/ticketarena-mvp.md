@@ -180,7 +180,8 @@ Interfaces (shape level):
 - `payment.payment_attempts`: unique `(orderId, attemptNo)`, `paymentId`, `status`
   `ATTEMPTING | CAPTURED | FAILED`, `capturedAt?`, `failureReason?`, amount, currency, contact.
   CHECK: `CAPTURED ⇔ capturedAt IS NOT NULL`; `FAILED ⇔ failureReason IS NOT NULL`.
-- `payment.refunds`: unique `paymentId`.
+- `payment.refunds`: `paymentId` (primary key, so unique), `orderId`, amount, currency, `reason`,
+  `refundedAt`.
 - `notification.notifications`: `sourceEventId`, `channel` `EMAIL | SMS`, recipient, template,
   `status` `PENDING | SENT`; unique `(sourceEventId, channel)`.
 - No cross-schema foreign keys or reads; services learn about each other only from events.
@@ -266,21 +267,36 @@ In one transaction: dedupe check → lock the order `FOR UPDATE` (then seats if 
 outbox writes → commit.
 
 `decide` is a pure function returning `transition | noop | refund | retry | poison`. Zero-row
-conditional updates are never treated as success. Unknown `orderId` or unknown `paymentId` on a
-refund event is `poison` (the order always commits before `order.placed` is published, so a
-missing order means a bad message). Every `noop` is logged with a reason code. `retry` (state not
-yet reached) does not occur in today's flow but is supported.
+conditional updates are never treated as success. The order always commits before `order.placed`
+is published, so a missing order never means a message arrived early. An unknown `orderId` on a
+`succeeded` payment is a **refund** (reason `unknown_order`), not poison: the capture took real
+money and the order can be gone for good (a demo reset deletes settled orders). With no order to
+attach a ledger row to, the obligation is the `payment.refund_requested` outbox event alone (no
+contact), written in the same transaction as the consumer's dedupe record; duplicates of that
+payment serialize on an advisory lock keyed by `paymentId` and find the earlier request in the
+outbox, so a redelivered or duplicate message refunds that `paymentId` exactly once. An unknown
+`orderId` on a `failed` event, and an unknown `paymentId` on a `refunded` event, stay `poison`. A
+`refunded` event for an unknown `orderId` is a logged noop when booking's outbox holds a
+`payment.refund_requested` for that `paymentId` (the `unknown_order` refund it asked for, which has
+no ledger row), and `poison` otherwise. A `refunded` event moves the payment's ledger row from
+`REFUND_REQUESTED` or `MANUAL_REVIEW` to `REFUNDED` whatever the order's status: an amount
+mismatch is refunded while the order stays `PENDING_PAYMENT`. Every `noop` is logged with a reason code. `retry` (state not yet reached) does not
+occur in today's flow but is supported.
 
 "On time" means `capturedAt <= order.paymentDeadline`. "Refund" means: insert a ledger row with
-`REFUND_REQUESTED` and write outbox `payment.refund_requested`, in the same transaction.
+`REFUND_REQUESTED` (`refundRequestedAt = T`) and write outbox `payment.refund_requested` (with the
+order's contact), in the same transaction. A late capture on a `PENDING_PAYMENT` order does both
+in the transaction that expires the order and frees its seats; the seats are never reclaimed for
+the late payment, even when they are still free (AT-20).
 A success whose amount or currency differs from the order total is always refunded.
 
 | Order state     | `succeeded`, new payment, on time                              | `succeeded`, new payment, late                 | `succeeded`, known payment | `failed`, not final | `failed`, final                                              | `refunded`                                                       | Sweeper (deadline + grace) |
 | --------------- | -------------------------------------------------------------- | ---------------------------------------------- | -------------------------- | ------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------- | -------------------------- |
-| PENDING_PAYMENT | → CONFIRMED, ledger `APPLIED`, seats `SOLD`, `order.confirmed` | → EXPIRED, free seats, `order.expired`, refund | noop (duplicate)           | log + metric, noop  | → CANCELLED (if no `APPLIED`), free seats, `order.cancelled` | poison                                                           | → EXPIRED, free seats      |
+| PENDING_PAYMENT | → CONFIRMED, ledger `APPLIED`, seats `SOLD`, `order.confirmed` | → EXPIRED, free seats, `order.expired`, refund | noop (duplicate)           | log + metric, noop  | → CANCELLED (if no `APPLIED`), free seats, `order.cancelled` | ledger → `REFUNDED` if it was `REFUND_REQUESTED`, else poison    | → EXPIRED, free seats      |
 | CONFIRMED       | refund                                                         | refund                                         | noop (duplicate)           | noop                | noop                                                         | ledger → `REFUNDED` if it was `REFUND_REQUESTED`/`MANUAL_REVIEW` | noop                       |
 | CANCELLED       | refund                                                         | refund                                         | noop (duplicate)           | noop                | noop                                                         | ledger → `REFUNDED`                                              | noop                       |
 | EXPIRED         | refund                                                         | refund                                         | noop (duplicate)           | noop                | noop                                                         | ledger → `REFUNDED`                                              | noop                       |
+| unknown orderId | refund (`unknown_order`, outbox event only)                    | refund (`unknown_order`, outbox event only)    | noop (request exists)      | poison              | poison                                                       | noop if booking requested its refund, else poison                | n/a                        |
 
 Every refund caused by an on-time payment delivered after expiry increments `late_delivery_refund`.
 
@@ -289,11 +305,16 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
 - **Guarantee: eventual financial consistency.** Every capture on an order that cannot be fulfilled
   gets a durable refund obligation in the same transaction that decides it. The system retries it
   until it is `REFUNDED` or a human resolves `MANUAL_REVIEW`. Money is never kept silently; the
-  refund can lag.
+  refund can lag. A capture whose order no longer exists has no ledger row to hold the obligation:
+  its `payment.refund_requested` outbox event (reason `unknown_order`) is the obligation, and the
+  reconciler, which scans ledger rows, does not see it.
 - Ledger disposition transitions: `REFUND_REQUESTED → REFUNDED | MANUAL_REVIEW`;
   `MANUAL_REVIEW → REFUND_REQUESTED | REFUNDED`. `APPLIED` is terminal in the MVP.
 - Execution: the Payment consumer refunds idempotently (unique `paymentId` in `payment.refunds`)
-  and emits `payment.refunded`; transient failures follow the retry schedule, then the DLQ.
+  and emits `payment.refunded` only when its insert wrote the row, so a duplicate request (a new
+  event id) refunds nothing and emits nothing; transient failures follow the retry schedule, then
+  the DLQ. Every request is executed; an `unknown_order` request has no contact, and its
+  `payment.refunded` carries none.
 - Reconciler (worker, every 5 min): each `REFUND_REQUESTED` row older than 10 min gets its event
   re-emitted through the outbox and `refundAttempts` incremented. After 3 re-emits it moves to
   `MANUAL_REVIEW`. This also covers a dead-lettered or lost message.
@@ -308,7 +329,9 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
 - One attempt per order in the MVP. Outcome by magic email, else random via injected `Random`
   with configurable success rate and latency:
   - `+fail@` → `payment.failed` with `final: true`
-  - `+late@` → capture after the deadline (demonstrates the late-payment refund)
+  - `+late@` → capture after the deadline (demonstrates the late-payment refund): the attempt
+    always captures and `capturedAt` is the order's `paymentDeadline` plus 1 s (provider time);
+    the event is delivered at once, so booking sees a late capture on a still-open order
   - `+dup@` → publishes its result twice (demonstrates dedupe)
   - `+double@` → captures twice with two payment ids (demonstrates refund of the extra charge)
 - Invariant (tested in the module): never emits `final: true` while another attempt for the order
@@ -323,6 +346,9 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
 - Steps: insert the notification row `PENDING` (unique `(sourceEventId, channel)`), call the mock
   provider with `idempotencyKey = notification id`, mark `SENT`. Email always; SMS when a phone
   number exists. Nothing is really sent; the mock provider records and dedupes by key.
+- Templates: `order-confirmation`, `order-cancellation`, `order-expiry`, `refund-initiated`
+  (`payment.refund_requested`), `refund-completed` (`payment.refunded`). A refund event without a
+  contact (`unknown_order`) is acked with no notification record: there is no buyer to tell.
 - **Guarantee:** internal records are exactly-once; external delivery is **at-least-once** (a crash
   between provider call and `SENT` resends) unless the provider honours the idempotency key.
 
@@ -370,7 +396,7 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
   | `ta.payment.succeeded`        | payment         | booking-saga               | paymentId, orderId, attemptNo, amount, currency, capturedAt |
   | `ta.payment.failed`           | payment         | booking-saga               | paymentId, orderId, attemptNo, final, reason                |
   | `ta.payment.refund_requested` | booking         | payment, notification      | paymentId, orderId, amount, currency, reason, contact       |
-  | `ta.payment.refunded`         | payment         | booking-saga, notification | paymentId, orderId, amount, refundedAt, contact             |
+  | `ta.payment.refunded`         | payment         | booking-saga, notification | paymentId, orderId, amount, currency, refundedAt, contact?  |
   | `ta.dlq.<consumer>`           | consumer runner | none (inspection, replay)  | original envelope, error, deliveryCount                     |
 
 - **Consumers:** durable pull consumers `payment`, `booking-saga`, `notification`, each with its

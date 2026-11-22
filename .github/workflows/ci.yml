@@ -51,10 +51,11 @@ jobs:
       - name: Quality gate (lint, typecheck, test)
         run: pnpm run lint && pnpm run typecheck && pnpm run test
 
-      # ADR 0016: the frozen register stays an honest record. Against the register this push or
-      # pull request started from, no entry or history line disappears and every changed triage
-      # field comes with a new history line. A new branch's first push has no "before" to compare.
-      - name: Debt register audit
+      # ADR 0024: the debt register is frozen, so it must equal the register this push or pull
+      # request started from, byte for byte. The frozen ralph-debt audit is no longer run: its
+      # live ticket links cannot hold for a record nobody updates. A new branch's first push has
+      # no "before" to compare.
+      - name: Debt register unchanged
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
@@ -66,7 +67,12 @@ jobs:
             echo "the base has no register"; exit 0
           fi
           git show "$BASE_SHA:docs/technical-debt.md" > "$RUNNER_TEMP/debt-base.md"
-          node scripts/ralph-debt.mjs audit docs/technical-debt.md --base "$RUNNER_TEMP/debt-base.md"
+          if ! cmp --silent "$RUNNER_TEMP/debt-base.md" docs/technical-debt.md; then
+            echo "docs/technical-debt.md is frozen (ADR 0024) but differs from $BASE_SHA:"
+            diff "$RUNNER_TEMP/debt-base.md" docs/technical-debt.md | head -40
+            exit 1
+          fi
+          echo "docs/technical-debt.md is unchanged"
 
       - name: Service logs
         if: failure()

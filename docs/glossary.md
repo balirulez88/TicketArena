@@ -25,7 +25,7 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Settlement grace**   | 60s after the payment deadline before the sweeper expires an order. Best-effort.                       |
 | **Payment attempt**    | One try to charge an order, owned by the payment service; may fail non-finally.                        |
 | **Order payment**      | A captured payment in the booking ledger, with a disposition (`APPLIED`, `REFUND_REQUESTED`, ...).     |
-| **Refund obligation**  | A `REFUND_REQUESTED` ledger row; retried by the reconciler until refunded or escalated.                |
+| **Refund obligation**  | A `REFUND_REQUESTED` ledger row, retried by the reconciler; only its refund event if the order is gone |
 | **Sweeper**            | Worker job that expires holds and overdue orders and frees their seats.                                |
 | **Admission ticker**   | Worker job (1 s) admitting buyers from the queue head within `admitRate` and `maxActive`.              |
 | **Reaper**             | Worker job (15 s) freeing active slots idle over 90 s or with an expired admission; revokes the `jti`. |

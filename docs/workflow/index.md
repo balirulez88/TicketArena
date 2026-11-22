@@ -453,8 +453,9 @@ commits. `node scripts/ralph-debt.mjs gate` prints every unfinished ticket's ver
   (`slice` rules: severity, risk, triage, target, blocks, acceptance and history are fixed), or
   leaves an entry the ticket owns unresolved. `debt_slice_check` in `run_gate` applies the same
   rules inside the loop, early.
-- **Maintainers.** CI runs `ralph-debt.mjs audit` against the base: every governed field a
-  commit changes needs a new history line, and no entry or history line disappears.
+- **Maintainers.** Harness v1 only: CI ran `ralph-debt.mjs audit` against the base. Since the
+  register was frozen, CI instead requires it to equal the base's register byte for byte
+  (ADR 0024), and its entries no longer gate tickets.
 - **Recorder.** New entries are `UNTRIAGED`/`pending` (a `security` finding is `SECURITY`); the
   history suggests a class. A higher-severity sighting sends the entry back to triage.
 

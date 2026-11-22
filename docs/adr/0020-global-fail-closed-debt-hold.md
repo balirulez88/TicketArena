@@ -1,6 +1,6 @@
 # 0020: Global, fail-closed debt hold
 
-- **Status:** Accepted
+- **Status:** Accepted; blocking rules and the CI audit superseded by [0024](0024-frozen-debt-register-check.md)
 - **Date:** 2026-11-14
 - **Amends:** [0016](0016-risk-based-debt-gate.md)
 

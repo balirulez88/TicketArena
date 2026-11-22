@@ -1,10 +1,19 @@
 import { randomUUID } from "node:crypto";
-import type { CausedEventInput } from "@ticketarena/contracts";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
+import {
+  type CausedEventInput,
+  orderExpiredPayloadSchema,
+  paymentRefundRequestedPayloadSchema,
+} from "@ticketarena/contracts";
+import {
+  createPrismaClient,
+  type PrismaClient,
+  seedCatalog,
+  type TransactionClient,
+} from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { type Buyer, createBookingService } from "./booking-service";
-import { createPaymentSagaHandler } from "./payment-saga";
+import { createPaymentSagaHandler, type SagaMetric } from "./payment-saga";
 
 const database = setupTestDatabase();
 let prisma: PrismaClient | undefined;
@@ -77,6 +86,40 @@ function paymentSucceeded(
       }),
     },
   };
+}
+
+/** Writes each event to the transaction's outbox, as the consumer runner's `emit` does. */
+function outboxEmit(tx: TransactionClient) {
+  return async (event: CausedEventInput) => {
+    const { aggregateType, aggregateId, ...envelope } = event;
+    await tx.outboxEvent.create({
+      data: {
+        id: event.id,
+        aggregateType,
+        aggregateId,
+        eventType: event.type,
+        payload: JSON.parse(JSON.stringify(envelope)),
+      },
+    });
+  };
+}
+
+function refundRequestsFor(paymentId: string) {
+  return db().outboxEvent.findMany({
+    where: { eventType: "payment.refund_requested", aggregateId: paymentId },
+  });
+}
+
+/** An order the sweeper expired at its deadline plus grace; its seat is free again. */
+async function expiredOrder(buyer: Buyer) {
+  const pending = await pendingOrder(buyer);
+  const sweeper = createBookingService({
+    db: db(),
+    clock: { now: () => new Date(pending.order.paymentDeadline.getTime() + 61_000) },
+    newId: randomUUID,
+  });
+  await sweeper.sweepExpired();
+  return pending;
 }
 
 function recordingEmit() {
@@ -169,51 +212,229 @@ describe("payment saga: payment.succeeded", () => {
     expect(emitted).toHaveLength(1);
   });
 
-  test("refuses a payment captured after the deadline rather than confirming it", async () => {
-    const { order } = await pendingOrder({ sessionId: "d".repeat(32), buyerKey: "d".repeat(32) });
-    const { message } = paymentSucceeded(order, { capturedAt: LATE.toISOString() });
-
-    await expect(
-      db().$transaction((tx) => saga(tx, message, { emit: async () => undefined })),
-    ).rejects.toThrow(/late/i);
-    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
-      "PENDING_PAYMENT",
-    );
-  });
-  test("returns poison for an unknown orderId and writes nothing", async () => {
-    const { order } = await pendingOrder({ sessionId: "e".repeat(32), buyerKey: "e".repeat(32) });
-    const { paymentId, message } = paymentSucceeded({ ...order, id: randomUUID() });
+  test("expires the order on a capture after the deadline, frees its seats and requests a refund in one transaction", async () => {
+    const { order, seatId } = await pendingOrder({
+      sessionId: "d".repeat(32),
+      buyerKey: "d".repeat(32),
+    });
+    const { paymentId, message } = paymentSucceeded(order, { capturedAt: LATE.toISOString() });
     const { emit, emitted } = recordingEmit();
 
     const outcome = await db().$transaction((tx) => saga(tx, message, { emit }));
 
-    expect(outcome).toEqual({ outcome: "poison", reason: "unknown_order" });
-    expect(await db().orderPayment.count({ where: { paymentId } })).toBe(0);
-    expect(emitted).toEqual([]);
+    expect(outcome).toBeUndefined();
+    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      "EXPIRED",
+    );
+    expect(await db().seat.findUniqueOrThrow({ where: { id: seatId } })).toMatchObject({
+      status: "AVAILABLE",
+      holdId: null,
+      claimBuyerKey: null,
+    });
+    expect(await db().orderPayment.findMany({ where: { orderId: order.id } })).toMatchObject([
+      {
+        paymentId,
+        amount: order.totalMinor,
+        currency: order.currency,
+        capturedAt: LATE,
+        disposition: "REFUND_REQUESTED",
+        refundRequestedAt: ON_TIME,
+      },
+    ]);
+    expect(emitted).toMatchObject([
+      {
+        type: "order.expired",
+        version: 1,
+        occurredAt: ON_TIME.toISOString(),
+        aggregateType: "order",
+        aggregateId: order.id,
+        orderId: order.id,
+        payload: { orderId: order.id, contact: { email: "alice@example.com" } },
+      },
+      {
+        type: "payment.refund_requested",
+        version: 1,
+        occurredAt: ON_TIME.toISOString(),
+        aggregateType: "order_payment",
+        aggregateId: paymentId,
+        orderId: order.id,
+        payload: {
+          paymentId,
+          orderId: order.id,
+          amount: order.totalMinor,
+          currency: order.currency,
+          reason: "late_capture",
+          contact: { email: "alice@example.com" },
+        },
+      },
+    ]);
+    expect(orderExpiredPayloadSchema.safeParse(emitted[0]?.payload).success).toBe(true);
+    expect(paymentRefundRequestedPayloadSchema.safeParse(emitted[1]?.payload).success).toBe(true);
   });
 
-  test("refuses a payment whose amount differs from the order total rather than confirming it", async () => {
-    const { order } = await pendingOrder({ sessionId: "f".repeat(32), buyerKey: "f".repeat(32) });
-    const { message } = paymentSucceeded(order, { amount: order.totalMinor + 1 });
+  test("rolls the late-capture expiry back when the refund request cannot be written", async () => {
+    const { order, seatId } = await pendingOrder({
+      sessionId: "p".repeat(32),
+      buyerKey: "p".repeat(32),
+    });
+    const { message } = paymentSucceeded(order, { capturedAt: LATE.toISOString() });
 
     await expect(
-      db().$transaction((tx) => saga(tx, message, { emit: async () => undefined })),
-    ).rejects.toThrow(/amount_mismatch/);
+      db().$transaction((tx) =>
+        saga(tx, message, {
+          emit: async (event) => {
+            if (event.type === "payment.refund_requested") {
+              throw new Error("injected outbox failure");
+            }
+          },
+        }),
+      ),
+    ).rejects.toThrow("injected outbox failure");
+
     expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
       "PENDING_PAYMENT",
+    );
+    expect((await db().seat.findUniqueOrThrow({ where: { id: seatId } })).status).toBe(
+      "IN_CHECKOUT",
     );
     expect(await db().orderPayment.count({ where: { orderId: order.id } })).toBe(0);
   });
 
-  test("refuses a new payment for an already confirmed order rather than applying it twice", async () => {
+  test("refunds a captured payment whose orderId no longer exists, with no ledger row and no contact", async () => {
+    const order = { id: randomUUID(), totalMinor: 4_200, currency: "EUR" };
+    const { paymentId, message } = paymentSucceeded(order);
+
+    const outcome = await db().$transaction((tx) => saga(tx, message, { emit: outboxEmit(tx) }));
+
+    expect(outcome).toBeUndefined();
+    expect(await db().orderPayment.count({ where: { paymentId } })).toBe(0);
+    const requests = await refundRequestsFor(paymentId);
+    expect(requests).toMatchObject([
+      {
+        aggregateType: "order_payment",
+        aggregateId: paymentId,
+        payload: {
+          type: "payment.refund_requested",
+          orderId: order.id,
+          payload: {
+            paymentId,
+            orderId: order.id,
+            amount: 4_200,
+            currency: "EUR",
+            reason: "unknown_order",
+          },
+        },
+      },
+    ]);
+    const stored: unknown = requests[0]?.payload;
+    const payload =
+      typeof stored === "object" && stored !== null && "payload" in stored
+        ? stored.payload
+        : undefined;
+    expect(paymentRefundRequestedPayloadSchema.parse(payload).contact).toBeUndefined();
+  });
+
+  test("requests one refund for an unknown order however often its payment is delivered", async () => {
+    const order = { id: randomUUID(), totalMinor: 4_200, currency: "EUR" };
+    const first = paymentSucceeded(order);
+    const duplicate = {
+      data: JSON.stringify({ ...JSON.parse(first.message.data), id: randomUUID() }),
+    };
+
+    for (const message of [first.message, duplicate, first.message]) {
+      await db().$transaction((tx) => saga(tx, message, { emit: outboxEmit(tx) }));
+    }
+
+    expect(await refundRequestsFor(first.paymentId)).toHaveLength(1);
+  });
+
+  test("requests one refund for an unknown order when two duplicates race", async () => {
+    const order = { id: randomUUID(), totalMinor: 4_200, currency: "EUR" };
+    const first = paymentSucceeded(order);
+    const duplicate = {
+      data: JSON.stringify({ ...JSON.parse(first.message.data), id: randomUUID() }),
+    };
+    let release: () => void = () => undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let requested: () => void = () => undefined;
+    const firstRequested = new Promise<void>((resolve) => {
+      requested = resolve;
+    });
+
+    // The first transaction writes its refund request and then stays open, so the duplicate
+    // runs while that request is still uncommitted and invisible to it.
+    const winner = db().$transaction(
+      (tx) =>
+        saga(tx, first.message, {
+          emit: async (event) => {
+            await outboxEmit(tx)(event);
+            requested();
+            await released;
+          },
+        }),
+      { timeout: 30_000 },
+    );
+    await firstRequested;
+    const racer = db().$transaction((tx) => saga(tx, duplicate, { emit: outboxEmit(tx) }), {
+      timeout: 30_000,
+    });
+    // Wait (by condition, not by time) until the duplicate is blocked behind the first.
+    for (;;) {
+      const [waiting] = await db().$queryRaw<{ count: bigint }[]>`
+        SELECT count(*) AS "count" FROM pg_stat_activity
+        WHERE "datname" = current_database() AND "wait_event_type" = 'Lock'`;
+      if ((waiting?.count ?? 0n) > 0n) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    release();
+    await Promise.all([winner, racer]);
+
+    expect(await refundRequestsFor(first.paymentId)).toHaveLength(1);
+  });
+
+  test("requests a refund for a payment whose amount differs from the order total rather than confirming it", async () => {
+    const { order } = await pendingOrder({ sessionId: "f".repeat(32), buyerKey: "f".repeat(32) });
+    const { paymentId, message } = paymentSucceeded(order, { amount: order.totalMinor + 1 });
+    const { emit, emitted } = recordingEmit();
+
+    await db().$transaction((tx) => saga(tx, message, { emit }));
+
+    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      "PENDING_PAYMENT",
+    );
+    expect(await db().orderPayment.findMany({ where: { orderId: order.id } })).toMatchObject([
+      { paymentId, amount: order.totalMinor + 1, disposition: "REFUND_REQUESTED" },
+    ]);
+    expect(emitted).toMatchObject([
+      { type: "payment.refund_requested", payload: { paymentId, reason: "amount_mismatch" } },
+    ]);
+  });
+
+  test("requests a refund for a new payment on an already confirmed order rather than applying it twice", async () => {
     const { order } = await pendingOrder({ sessionId: "g".repeat(32), buyerKey: "g".repeat(32) });
     await db().$transaction((tx) => saga(tx, paymentSucceeded(order).message, recordingEmit()));
     const second = paymentSucceeded(order);
+    const { emit, emitted } = recordingEmit();
 
-    await expect(
-      db().$transaction((tx) => saga(tx, second.message, { emit: async () => undefined })),
-    ).rejects.toThrow(/order_confirmed/);
-    expect(await db().orderPayment.count({ where: { orderId: order.id } })).toBe(1);
+    await db().$transaction((tx) => saga(tx, second.message, { emit }));
+
+    expect(
+      await db().orderPayment.findMany({
+        where: { orderId: order.id },
+        select: { disposition: true },
+        orderBy: { disposition: "asc" },
+      }),
+    ).toEqual([{ disposition: "APPLIED" }, { disposition: "REFUND_REQUESTED" }]);
+    expect(emitted).toMatchObject([
+      {
+        type: "payment.refund_requested",
+        payload: { paymentId: second.paymentId, reason: "order_confirmed" },
+      },
+    ]);
   });
 
   test("never treats a zero-row seat update as success: a seat no longer IN_CHECKOUT rolls the confirmation back", async () => {
@@ -331,7 +552,7 @@ function recordingMetrics() {
   return {
     counted,
     metrics: {
-      increment: async (metric: "payment_attempt_failed", eventId: string) => {
+      increment: async (metric: SagaMetric, eventId: string) => {
         counted.push({ metric, eventId });
       },
     },
@@ -470,5 +691,256 @@ describe("payment saga: payment.failed", () => {
     );
 
     expect(outcome).toEqual({ outcome: "poison", reason: "unknown_order" });
+  });
+});
+
+describe("payment saga: payment.succeeded on a settled order", () => {
+  test.each([
+    ["on time", ON_TIME, "late_delivery"],
+    ["late", LATE, "order_expired"],
+  ] as const)(
+    "requests a refund for a capture (%s) on an EXPIRED order and never reclaims its free seats (AT-20)",
+    async (_when, capturedAt, reason) => {
+      const char = reason === "late_delivery" ? "q" : "r";
+      const { order, seatId } = await expiredOrder({
+        sessionId: char.repeat(32),
+        buyerKey: char.repeat(32),
+      });
+      const { paymentId, message } = paymentSucceeded(order, {
+        capturedAt: capturedAt.toISOString(),
+      });
+      const { emit, emitted } = recordingEmit();
+
+      const outcome = await db().$transaction((tx) => saga(tx, message, { emit }));
+
+      expect(outcome).toBeUndefined();
+      expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+        "EXPIRED",
+      );
+      expect(await db().seat.findUniqueOrThrow({ where: { id: seatId } })).toMatchObject({
+        status: "AVAILABLE",
+        holdId: null,
+      });
+      expect(await db().orderPayment.findMany({ where: { orderId: order.id } })).toMatchObject([
+        { paymentId, disposition: "REFUND_REQUESTED", refundRequestedAt: ON_TIME, capturedAt },
+      ]);
+      expect(emitted).toMatchObject([
+        {
+          type: "payment.refund_requested",
+          aggregateType: "order_payment",
+          aggregateId: paymentId,
+          orderId: order.id,
+          payload: {
+            paymentId,
+            orderId: order.id,
+            amount: order.totalMinor,
+            currency: order.currency,
+            reason,
+            contact: { email: "alice@example.com" },
+          },
+        },
+      ]);
+    },
+  );
+
+  test("requests a refund for a capture on a CANCELLED order and leaves its seats alone", async () => {
+    const { order, seatId } = await pendingOrder({
+      sessionId: "s".repeat(32),
+      buyerKey: "s".repeat(32),
+    });
+    await db().$transaction((tx) => saga(tx, paymentFailed(order.id, true), recordingEmit()));
+    const { paymentId, message } = paymentSucceeded(order);
+    const { emit, emitted } = recordingEmit();
+
+    await db().$transaction((tx) => saga(tx, message, { emit }));
+
+    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      "CANCELLED",
+    );
+    expect((await db().seat.findUniqueOrThrow({ where: { id: seatId } })).status).toBe("AVAILABLE");
+    expect(await db().orderPayment.findMany({ where: { orderId: order.id } })).toMatchObject([
+      { paymentId, disposition: "REFUND_REQUESTED", refundRequestedAt: ON_TIME },
+    ]);
+    expect(emitted).toMatchObject([
+      { type: "payment.refund_requested", payload: { paymentId, reason: "order_cancelled" } },
+    ]);
+  });
+
+  test("requests one refund when the same payment reaches a settled order twice", async () => {
+    const { order } = await expiredOrder({ sessionId: "t".repeat(32), buyerKey: "t".repeat(32) });
+    const first = paymentSucceeded(order, { capturedAt: LATE.toISOString() });
+    const duplicate = {
+      data: JSON.stringify({ ...JSON.parse(first.message.data), id: randomUUID() }),
+    };
+    const { emit, emitted } = recordingEmit();
+
+    for (const message of [first.message, duplicate]) {
+      await db().$transaction((tx) => saga(tx, message, { emit }));
+    }
+
+    expect(await db().orderPayment.count({ where: { orderId: order.id } })).toBe(1);
+    expect(emitted).toHaveLength(1);
+  });
+
+  test("counts late_delivery_refund for an on-time capture delivered after the order expired", async () => {
+    const { order, eventId } = await expiredOrder({
+      sessionId: "u".repeat(32),
+      buyerKey: "u".repeat(32),
+    });
+    const { counted, metrics } = recordingMetrics();
+    const countingSaga = createPaymentSagaHandler({
+      clock: { now: () => ON_TIME },
+      newId: randomUUID,
+      metrics,
+    });
+
+    await db().$transaction((tx) =>
+      countingSaga(tx, paymentSucceeded(order).message, recordingEmit()),
+    );
+
+    expect(counted).toEqual([{ metric: "late_delivery_refund", eventId }]);
+  });
+});
+
+function paymentRefunded(orderId: string, paymentId: string) {
+  return {
+    data: JSON.stringify({
+      id: randomUUID(),
+      type: "payment.refunded",
+      version: 1,
+      occurredAt: "2027-03-01T12:10:00.000Z",
+      correlationId: randomUUID(),
+      causationId: randomUUID(),
+      orderId,
+      payload: {
+        paymentId,
+        orderId,
+        amount: 4_200,
+        currency: "EUR",
+        refundedAt: "2027-03-01T12:10:00.000Z",
+        contact: { email: "alice@example.com" },
+      },
+    }),
+  };
+}
+
+/** An order the saga expired on a late capture: its ledger holds a REFUND_REQUESTED row. */
+async function refundRequestedOrder(buyer: Buyer) {
+  const pending = await pendingOrder(buyer);
+  const late = paymentSucceeded(pending.order, { capturedAt: LATE.toISOString() });
+  await db().$transaction((tx) => saga(tx, late.message, recordingEmit()));
+  return { ...pending, paymentId: late.paymentId };
+}
+
+function ledgerOf(orderId: string) {
+  return db().orderPayment.findMany({
+    where: { orderId },
+    select: { paymentId: true, disposition: true },
+  });
+}
+
+describe("payment saga: payment.refunded", () => {
+  test("moves a REFUND_REQUESTED ledger row to REFUNDED, leaves the order alone and emits nothing", async () => {
+    const { order, paymentId } = await refundRequestedOrder({
+      sessionId: "v".repeat(32),
+      buyerKey: "v".repeat(32),
+    });
+    const { emit, emitted } = recordingEmit();
+
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(order.id, paymentId), { emit }),
+    );
+
+    expect(outcome).toBeUndefined();
+    expect(await ledgerOf(order.id)).toEqual([{ paymentId, disposition: "REFUNDED" }]);
+    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      "EXPIRED",
+    );
+    expect(emitted).toEqual([]);
+  });
+
+  test("moves a MANUAL_REVIEW ledger row to REFUNDED", async () => {
+    const { order, paymentId } = await refundRequestedOrder({
+      sessionId: "w".repeat(32),
+      buyerKey: "w".repeat(32),
+    });
+    await db().orderPayment.update({
+      where: { paymentId },
+      data: { disposition: "MANUAL_REVIEW" },
+    });
+
+    await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(order.id, paymentId), recordingEmit()),
+    );
+
+    expect(await ledgerOf(order.id)).toEqual([{ paymentId, disposition: "REFUNDED" }]);
+  });
+
+  test("records the refund of an amount mismatch on a still PENDING_PAYMENT order", async () => {
+    const { order } = await pendingOrder({ sessionId: "x".repeat(32), buyerKey: "x".repeat(32) });
+    const mismatch = paymentSucceeded(order, { amount: order.totalMinor + 1 });
+    await db().$transaction((tx) => saga(tx, mismatch.message, recordingEmit()));
+
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(order.id, mismatch.paymentId), recordingEmit()),
+    );
+
+    expect(outcome).toBeUndefined();
+    expect(await ledgerOf(order.id)).toEqual([
+      { paymentId: mismatch.paymentId, disposition: "REFUNDED" },
+    ]);
+    expect((await db().order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      "PENDING_PAYMENT",
+    );
+  });
+
+  test("acks a repeated payment.refunded without changing the ledger again", async () => {
+    const { order, paymentId } = await refundRequestedOrder({
+      sessionId: "y".repeat(32),
+      buyerKey: "y".repeat(32),
+    });
+    for (let delivery = 0; delivery < 2; delivery += 1) {
+      const outcome = await db().$transaction((tx) =>
+        saga(tx, paymentRefunded(order.id, paymentId), recordingEmit()),
+      );
+      expect(outcome).toBeUndefined();
+    }
+
+    expect(await ledgerOf(order.id)).toEqual([{ paymentId, disposition: "REFUNDED" }]);
+  });
+
+  test("returns poison for a payment.refunded whose paymentId is not in the order's ledger", async () => {
+    const { order, paymentId } = await refundRequestedOrder({
+      sessionId: "z".repeat(32),
+      buyerKey: "z".repeat(32),
+    });
+
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(order.id, randomUUID()), recordingEmit()),
+    );
+
+    expect(outcome).toEqual({ outcome: "poison", reason: "unknown_payment" });
+    expect(await ledgerOf(order.id)).toEqual([{ paymentId, disposition: "REFUND_REQUESTED" }]);
+  });
+
+  test("returns poison for a payment.refunded on an unknown orderId booking never asked to refund", async () => {
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(randomUUID(), randomUUID()), recordingEmit()),
+    );
+
+    expect(outcome).toEqual({ outcome: "poison", reason: "unknown_order" });
+  });
+
+  test("acks the payment.refunded of an unknown_order refund booking requested, as a noop", async () => {
+    const vanished = { id: randomUUID(), totalMinor: 4_200, currency: "EUR" };
+    const capture = paymentSucceeded(vanished);
+    await db().$transaction((tx) => saga(tx, capture.message, { emit: outboxEmit(tx) }));
+
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(vanished.id, capture.paymentId), recordingEmit()),
+    );
+
+    expect(outcome).toBeUndefined();
+    expect(await db().orderPayment.count({ where: { paymentId: capture.paymentId } })).toBe(0);
   });
 });

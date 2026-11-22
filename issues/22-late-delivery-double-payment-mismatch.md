@@ -4,7 +4,9 @@
 
 **Blocked by:** 20
 
-**Status:** ready-for-agent
+**Status:** blocked
+
+**Blocked reason:** stopped by the user
 
 - [ ] On time is `capturedAt <= paymentDeadline`, independent of delivery time.
 - [ ] A refund caused by an on-time payment delivered after expiry increments `late_delivery_refund`.

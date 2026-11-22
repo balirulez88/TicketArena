@@ -4,6 +4,8 @@ import {
   orderCancelledPayloadSchema,
   orderConfirmedPayloadSchema,
   orderExpiredPayloadSchema,
+  paymentRefundedPayloadSchema,
+  paymentRefundRequestedPayloadSchema,
   silentLogger,
 } from "@ticketarena/contracts";
 import type { PrismaClient, TransactionClient } from "@ticketarena/db";
@@ -27,11 +29,17 @@ const notifiedEnvelope = z.discriminatedUnion("type", [
   }),
   envelopeSchema(orderExpiredPayloadSchema).extend({ type: z.literal("order.expired") }),
   envelopeSchema(orderCancelledPayloadSchema).extend({ type: z.literal("order.cancelled") }),
+  envelopeSchema(paymentRefundRequestedPayloadSchema).extend({
+    type: z.literal("payment.refund_requested"),
+  }),
+  envelopeSchema(paymentRefundedPayloadSchema).extend({ type: z.literal("payment.refunded") }),
 ]);
 const TEMPLATES = {
   "order.confirmed": "order-confirmation",
   "order.expired": "order-expiry",
   "order.cancelled": "order-cancellation",
+  "payment.refund_requested": "refund-initiated",
+  "payment.refunded": "refund-completed",
 } as const;
 
 /** One email always; an SMS only when the buyer gave a phone number. */
@@ -47,7 +55,8 @@ function deliveryTargets(contact: {
 
 /**
  * The mock Notification service. It learns everything from `order.confirmed`,
- * `order.cancelled` and `order.expired` (ADR 0009). The
+ * `order.cancelled`, `order.expired`, `payment.refund_requested` (refund initiated) and
+ * `payment.refunded` (refund completed) (ADR 0009). The
  * PENDING record is committed before the provider is called; the SENT update rides the handler's
  * transaction. If the send or that commit fails, redelivery resumes the PENDING record and calls
  * the provider again with the same key (the notification id), so external delivery is at-least-once
@@ -86,8 +95,18 @@ export function createNotificationHandler(deps: NotificationHandlerDeps) {
     const notified = notifiedEnvelope.parse(JSON.parse(message.data));
     const sourceEventId = notified.id;
     const template = TEMPLATES[notified.type];
+    const contact = notified.payload.contact;
+    // Only an `unknown_order` refund has no contact: the order and its buyer are gone, so there is
+    // no one to tell. Acked, not retried; no redelivery could ever supply a recipient.
+    if (contact === undefined) {
+      logger.info(
+        { orderId: notified.payload.orderId, template },
+        "notification skipped: no contact",
+      );
+      return undefined;
+    }
 
-    for (const { channel, recipient } of deliveryTargets(notified.payload.contact)) {
+    for (const { channel, recipient } of deliveryTargets(contact)) {
       const existing = await tx.notification.findUnique({
         where: { sourceEventId_channel: { sourceEventId, channel } },
       });

@@ -434,3 +434,123 @@ After review: does the payment handler lock attempts per order?
 Assumed: No. The advisory lock was removed; the final check sees committed attempts only, which suffices while the MVP writes only attempt 1 (unique (orderId, attemptNo)). Retries must first serialize attempts per order in every branch. Supersedes the earlier advisory-lock assumption
 
 Answer: Accepted (2026-11-21). Before retries are introduced, every attempt branch must be serialized per order; the (orderId, attemptNo) index alone allows attempts 1 and 2 together.
+
+## 2026-11-21 10:59 ticket 19
+
+How does +late@ capture after the deadline without the handler waiting?
+
+Assumed: The attempt always captures with capturedAt = order.paymentDeadline + 1 s (provider time), delivered at once, so the saga sees a late capture on a still-open order
+
+Answer: Accepted (2026-11-22): a mock with capturedAt = paymentDeadline + 1 s, delivered at once; the simulated provider time is documented.
+
+## 2026-11-21 10:59 ticket 19
+
+Where is the refund obligation for an unknown order, given the ledger has a FK to orders?
+
+Assumed: No ledger row; the payment.refund_requested outbox row (reason unknown_order, no contact) is the obligation, written only if none exists for that paymentId, serialized by a per-paymentId advisory xact lock. The future reconciler, which scans ledger rows, will not re-emit it (documented)
+
+Answer: Not accepted as the durable design (2026-11-22): an outbox row alone is deleted by the 14-day retention while the refund may be open. Needs a booking-owned obligation unique by paymentId, storable without an order FK, with a closable state that recovery also covers. Interim until then.
+
+## 2026-11-21 10:59 ticket 19
+
+What is the shape of payment.refund_requested?
+
+Assumed: paymentId, orderId, amount, currency, reason (late_capture|late_delivery|order_expired|order_cancelled|order_confirmed|amount_mismatch|unknown_order), contact optional only for unknown_order; aggregate order_payment/paymentId v1; no consumer yet
+
+Answer: Accepted (2026-11-22), with one change made in review: contact may be absent only for unknown_order, and the schema enforces it (discriminated union on reason).
+
+## 2026-11-21 10:59 ticket 19
+
+Do refund decisions for CONFIRMED orders and amount mismatches keep throwing 'not handled yet' until ticket 22?
+
+Assumed: No: the refund apply step is generic, so they now get a refund obligation instead of retrying forever; +double@, AT-21, AT-22 remain ticket 22
+
+Answer: Accepted (2026-11-22): the shared refund path handles CONFIRMED and amount-mismatch now; ticket 22 keeps its own tests and demo.
+
+## 2026-11-21 10:59 ticket 19
+
+Add the late_delivery_refund counter now?
+
+Assumed: Yes, as a SagaMetric counted best-effort for a late_delivery refund
+
+Answer: Accepted (2026-11-22): best-effort, approximate metric; over-counting under rollback or retry is a documented limit.
+
+## 2026-11-21 10:59 ticket 19
+
+After a late capture, what is the hold status?
+
+Assumed: Stays ORDERED, as when the sweeper expires an order; order.expired carries the same payload with causationId = the payment.succeeded
+
+Answer: Accepted (2026-11-22): the hold stays ORDERED; the order is EXPIRED, the seats are freed, and order.expired has the payment.succeeded event as causationId.
+
+## 2026-11-21 11:47 ticket 20
+
+How is payment.refunded handled when its order no longer exists (unknown_order refund, no ledger row)?
+
+Assumed: The saga checks booking's own outbox for a payment.refund_requested with that paymentId: if present, a logged noop (unknown_order_refunded); otherwise poison (unknown_order). Passed to decide() via optional DecideContext.refundRequested
+
+Answer: Accepted as interim (2026-11-22): a logged noop when booking's outbox proves the request, else poison. The durable orphan obligation must be closed here once it exists.
+
+## 2026-11-21 11:47 ticket 20
+
+What does payment.refunded carry when the request had no contact?
+
+Assumed: contact is optional, copied from the request; absent only for unknown_order; the refund still executes
+
+Answer: Accepted (2026-11-22) for unknown_order: contact is copied from the request, and a missing contact never blocks executing the refund.
+
+## 2026-11-21 11:47 ticket 20
+
+Matrix says refunded on PENDING_PAYMENT is poison, but an amount-mismatch refund leaves the order PENDING_PAYMENT with a REFUND_REQUESTED row
+
+Assumed: Matrix gap: the ledger row moves to REFUNDED whatever the order status; PENDING_PAYMENT stays poison (refund_for_pending_order) only when the payment is not in the ledger; spec matrix updated
+
+Answer: Accepted (2026-11-22): the REFUND_REQUESTED or MANUAL_REVIEW ledger row closes to REFUNDED whatever the order status; the order is unchanged; an unknown paymentId is poison.
+
+## 2026-11-21 11:47 ticket 20
+
+What does a duplicate payment.refund_requested do on the Payment side?
+
+Assumed: Insert ON CONFLICT DO NOTHING; nothing refunded or emitted again, logged and acked. A future reconciler re-emit for an executed payment yields no second payment.refunded; recovery relies on the first payment.refunded in the payment outbox
+
+Answer: Accepted (2026-11-22): one refund and one completion event; recovering an emitted completion relies on the outbox.
+
+## 2026-11-21 11:47 ticket 20
+
+What goes in a payment.refunds row and in payment.refunded?
+
+Assumed: Row: paymentId PK, orderId, amount, currency, reason, refundedAt (injected clock); no check against payment attempts; payment.refunded adds currency, aggregate payment/paymentId
+
+Answer: Accepted (2026-11-22): the proposed fields, with currency on the completion. No separate capture or amount check is acceptable for the mock MVP; revisit for a real provider.
+
+## 2026-11-21 11:47 ticket 20
+
+Does booking emit anything or notify the buyer when a refund completes?
+
+Assumed: No; the ledger update emits nothing; refund emails are a later ticket
+
+Answer: Accepted (2026-11-22): booking emits nothing new; Notification notifies straight from payment.refunded (ticket 21).
+
+## 2026-11-21 11:57 ticket 21
+
+What happens to a refund event without a contact (unknown_order)?
+
+Assumed: Acked and logged at info, no notification record; a retry could never supply a recipient
+
+Answer: Accepted (2026-11-22): for unknown_order, ack and log with no notification record. Any other refund request without a contact fails validation (now enforced by the schema).
+
+## 2026-11-21 11:57 ticket 21
+
+What does 'duplicate delivery' cover in AT-43?
+
+Assumed: A redelivery of the same message and a copy of the same event under a new message id; dedupe is by sourceEventId. A future reconciler re-emit of payment.refund_requested under a new event id would send a second refund-initiated notification (documented)
+
+Answer: Accepted (2026-11-22): same-message redelivery and the same event under a new transport msgId. A reconciler re-emit under a new eventId needs an explicit notification-dedupe decision later; it is not automatically a new business notification.
+
+## 2026-11-21 11:57 ticket 21
+
+What do refund notifications contain and how are the consumers named?
+
+Assumed: Templates refund-initiated and refund-completed only (email always, SMS with a phone); consumers notification-refund-requested and notification-refunded
+
+Answer: Accepted (2026-11-22): refund-initiated and refund-completed; email always, SMS with a phone; consumers notification-refund-requested and notification-refunded.

@@ -1,6 +1,6 @@
 # 0016: Risk-based technical debt gate
 
-- **Status:** Accepted
+- **Status:** Accepted; blocking rules and the CI audit superseded by [0024](0024-frozen-debt-register-check.md)
 - **Date:** 2026-11-06
 - **Extends:** [0014](0014-sandbox-trust-boundary.md), [0015](0015-review-and-verification-isolation.md)
 - **Amended by:** [0020](0020-global-fail-closed-debt-hold.md) (`Blocks: ALL_AGENT_TICKETS`, the global, fail-closed hold)

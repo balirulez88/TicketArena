@@ -6,9 +6,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** deferred
+**Status:** ready-for-agent
 
-**Status reason:** hardening, after the MVP (scope cut 2026-11-18)
+**Reprioritized:** 2026-11-22, by the maintainer in the review of PR #15: moved ahead of the MVP scope cut of 2026-11-18. Refund notifications (ticket 21) shipped before this ticket, although TD-062 and TD-065 named it as their prerequisite, so the redelivery coverage they rely on, above all an SMS failure after a sent email followed by a redelivery, is still unproven. Run it next.
 
 - [ ] TD-072: each test in `apps/worker/src/payment-flow.test.ts` runs with its own consumers (or stream prefix), or drains them before stopping its worker, so no test receives another test's event; the AT-14/AT-15 assertions hold as exact counts without scoping deliveries to work around leakage.
 - [ ] TD-062: a notification whose send fails is redelivered as the same message after the `nak` (same message id), and a partial failure (EMAIL sent, then the SMS send fails) ends, after redelivery, with both channels `SENT` under the same keys and no duplicate delivery; the dead `.catch(() => undefined)` is gone.

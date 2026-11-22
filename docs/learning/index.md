@@ -10,3 +10,6 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [33: Queue room és hold UI](33-queue-room-and-hold-ui.md): polling mint heartbeat, hibakód-parsolás, clock skew, fake timers
 - [34: Checkout és order status UI](34-checkout-and-order-status-ui.md): kliensoldali idempotency key checkout kísérletenként, at-least-once retry, polling végállapotig
 - [18: Fizetési hiba és lemondás](18-payment-failure.md): `final` flag, sikertelen kísérlet ≠ sikertelen checkout, `final: true` invariáns, `CANCELLED` + székek felszabadítása egy tranzakcióban
+- [19: Refund obligation késői capture esetén](19-refund-obligation-for-late-capture.md): `REFUND_REQUESTED` ledger + outbox egy tranzakcióban, AT-20, ismeretlen order refund advisory lockkal
+- [20: Refund execution](20-refund-execution.md): `payment.refunds` PK + `ON CONFLICT DO NOTHING`, emit csak ha írt sort, ledger `REFUNDED` feltételes update-tel, AT-23
+- [21: Refund értesítések](21-refund-notifications.md): egy handler öt esemény-típusra, `sourceEventId` dedupe, contact nélküli refund ack, AT-43

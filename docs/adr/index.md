@@ -22,11 +22,12 @@ number sequentially, and never rewrite an accepted decision; supersede it with a
 | [0013](0013-deployment-topology.md)                             | Deployment topology and CI                                    | Accepted                           |
 | [0014](0014-sandbox-trust-boundary.md)                          | Sandbox trust boundary: bundles in, validated bundles out     | Accepted                           |
 | [0015](0015-review-and-verification-isolation.md)               | Isolated host reviews and hardened, staged verification       | Accepted                           |
-| [0016](0016-risk-based-debt-gate.md)                            | Risk-based technical debt gate                                | Accepted                           |
+| [0016](0016-risk-based-debt-gate.md)                            | Risk-based technical debt gate                                | Superseded in part by 0024         |
 | [0017](0017-opt-in-lead-driver.md)                              | Opt-in lead driver for ticket execution                       | Accepted                           |
 | [0018](0018-host-side-replay-of-a-rejected-candidate.md)        | Host-side replay of a rejected candidate                      | Accepted                           |
 | [0019](0019-readiness-checks-for-the-lead-driver.md)            | Readiness checks for the lead driver                          | Accepted                           |
-| [0020](0020-global-fail-closed-debt-hold.md)                    | Global, fail-closed debt hold (amends 0016)                   | Accepted                           |
+| [0020](0020-global-fail-closed-debt-hold.md)                    | Global, fail-closed debt hold (amends 0016)                   | Superseded in part by 0024         |
 | [0021](0021-rejected-work-is-not-published-by-default.md)       | Rejected work is not published by default                     | Accepted                           |
 | [0022](0022-terminal-failed-outbox-events.md)                   | Terminal FAILED outbox events release their aggregate         | Accepted (ticket 59 implements it) |
 | [0023](0023-quarantine-replay-namespaces-and-recovery-holds.md) | Quarantine replay namespaces and recovery holds               | Accepted                           |
+| [0024](0024-frozen-debt-register-check.md)                      | Frozen debt register is checked for changes                   | Accepted                           |

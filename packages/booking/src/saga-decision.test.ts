@@ -118,11 +118,23 @@ describe("decide: PENDING_PAYMENT", () => {
     });
   });
 
-  test("refunded → poison (refund_for_pending_order)", () => {
-    const requested: LedgerEntry[] = [{ paymentId: PAYMENT, disposition: "REFUND_REQUESTED" }];
-    expect(decide(pending, requested, refunded, T)).toEqual({
+  test("refunded, payment not in the ledger → poison (refund_for_pending_order)", () => {
+    expect(decide(pending, noLedger, refunded, T)).toEqual({
       kind: "poison",
       reason: "refund_for_pending_order",
+    });
+  });
+
+  // Matrix gap: an amount-mismatch refund leaves the order PENDING_PAYMENT with a
+  // REFUND_REQUESTED row. The money is back, so the ledger records it rather than poisoning.
+  test("refunded, ledger REFUND_REQUESTED (amount mismatch) → ledger REFUNDED", () => {
+    const requested: LedgerEntry[] = [{ paymentId: PAYMENT, disposition: "REFUND_REQUESTED" }];
+    expect(decide(pending, requested, refunded, T)).toEqual({
+      kind: "transition",
+      reason: "refund_completed",
+      order: null,
+      ledger: { paymentId: PAYMENT, disposition: "REFUNDED" },
+      at: T,
     });
   });
 });
@@ -204,9 +216,31 @@ describe.each(["CONFIRMED", "CANCELLED", "EXPIRED"] as const)("decide: %s", (sta
   });
 });
 
+describe("decide: unknown orderId", () => {
+  test.each([
+    ["on time", onTime],
+    ["late", late],
+  ] as const)("succeeded (%s) for an unknown orderId → refund (unknown_order)", (_when, event) => {
+    expect(decide(null, noLedger, event, T)).toEqual({
+      kind: "refund",
+      reason: "unknown_order",
+      paymentId: PAYMENT,
+      at: T,
+    });
+  });
+});
+
+describe("decide: unknown orderId, refunded", () => {
+  test("refunded for an unknown orderId whose refund booking requested → noop (unknown_order_refunded)", () => {
+    expect(decide(null, noLedger, refunded, T, { refundRequested: true })).toEqual({
+      kind: "noop",
+      reason: "unknown_order_refunded",
+    });
+  });
+});
+
 describe("decide: poison", () => {
   test.each([
-    ["payment.succeeded", onTime],
     ["payment.failed", failedFinal],
     ["payment.refunded", refunded],
   ] as const)("%s for an unknown orderId → poison (unknown_order)", (_type, event) => {

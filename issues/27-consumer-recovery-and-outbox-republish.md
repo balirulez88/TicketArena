@@ -2,7 +2,7 @@
 
 **What to build:** an operator can recreate a consumer, or recover from broker data loss, without ever skipping an unprocessed message, using a script and a documented runbook. Spec: Consumer recovery; ADR 0011.
 
-**Blocked by:** 25, 44 (payment latency outside the runner transaction), 49 (Prisma schema drift), 59 (terminal outbox failures)
+**Blocked by:** 25, 44 (payment latency outside the runner transaction), 49 (Prisma schema drift), 59 (terminal outbox failures), 70 (durable orphan refund obligation, before any outbox retention)
 
 **Status:** deferred
 

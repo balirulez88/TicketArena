@@ -195,12 +195,12 @@ validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.
 The mock Payment service ([ADR 0009](../adr/0009-per-service-schemas.md)) owns tables in the
 `payment` schema; booking never reads them and they carry no foreign keys to `public`.
 
-| Table                        | Purpose                                                                                                                                                                                          |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `payment.outbox_events`      | Payment's own outbox, same shape as `public.outbox_events`; the relay drains both                                                                                                                |
-| `payment.processed_messages` | Payment consumer dedupe, same shape as `public.processed_messages`                                                                                                                               |
-| `payment.payment_attempts`   | One row per provider attempt (`CAPTURED`, or `FAILED` with its `failureReason`): unique `(orderId, attemptNo)`; CHECKs `CAPTURED ⇔ capturedAt IS NOT NULL`, `FAILED ⇔ failureReason IS NOT NULL` |
-| `payment.refunds`            | One executed refund per payment: `paymentId` PK (the once-only guard, AT-23), `orderId`, `amount`, `currency`, `reason` (from the request), `refundedAt`                                         |
+| Table                        | Purpose                                                                                                                                                                                                                                |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `payment.outbox_events`      | Payment's own outbox, same shape as `public.outbox_events`; the relay drains both                                                                                                                                                      |
+| `payment.processed_messages` | Payment consumer dedupe, same shape as `public.processed_messages`                                                                                                                                                                     |
+| `payment.payment_attempts`   | One row per provider attempt (`CAPTURED`, or `FAILED` with its `failureReason`; `+double@` captures attempts 1 and 2): unique `(orderId, attemptNo)`; CHECKs `CAPTURED ⇔ capturedAt IS NOT NULL`, `FAILED ⇔ failureReason IS NOT NULL` |
+| `payment.refunds`            | One executed refund per payment: `paymentId` PK (the once-only guard, AT-23), `orderId`, `amount`, `currency`, `reason` (from the request), `refundedAt`                                                                               |
 
 ### `notification` schema
 

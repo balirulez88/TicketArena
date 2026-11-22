@@ -4,13 +4,13 @@
 
 **Blocked by:** 20
 
-**Status:** ready-for-agent
+**Status:** in-progress
 
-- [ ] On time is `capturedAt <= paymentDeadline`, independent of delivery time.
-- [ ] A refund caused by an on-time payment delivered after expiry increments `late_delivery_refund`.
-- [ ] `+double@` captures twice with two payment ids.
-- [ ] AT-18: on time but delivered after grace → order `EXPIRED`, refund requested, `late_delivery_refund` incremented.
-- [ ] AT-19: on time, delivered within grace → `CONFIRMED`.
-- [ ] AT-21: second payment on a confirmed order → refunded; exactly one `APPLIED`.
-- [ ] AT-22: amount or currency mismatch → refund, not confirmation.
-- [ ] The best-effort nature of the grace period is documented.
+- [x] On time is `capturedAt <= paymentDeadline`, independent of delivery time.
+- [x] A refund caused by an on-time payment delivered after expiry increments `late_delivery_refund`.
+- [x] `+double@` captures twice with two payment ids.
+- [x] AT-18: on time but delivered after grace → order `EXPIRED`, refund requested, `late_delivery_refund` incremented.
+- [x] AT-19: on time, delivered within grace → `CONFIRMED`.
+- [x] AT-21: second payment on a confirmed order → refunded; exactly one `APPLIED`.
+- [x] AT-22: amount or currency mismatch → refund, not confirmation.
+- [x] The best-effort nature of the grace period is documented.

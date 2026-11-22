@@ -135,7 +135,7 @@ the provider's key dedupe absorbs that.
 
 `apps/worker/src/consumers.ts` registers the durable consumers `payment`, `payment-refund`,
 `booking-saga`, `booking-saga-failed` and `booking-saga-refunded`. `payment` (`service: "payment"`) handles `order.placed` in
-`apps/worker/src/payment/`: one `payment.payment_attempts` row (attempt 1) and one result event, with
+`apps/worker/src/payment/`: one `payment.payment_attempts` row (attempt 1) and one result event (two for `+double@`), with
 latency and outcome drawn from the injected `Random`/`Clock`. Outcome: a `+fail@` email is a final
 failure (`FAILED`, `failureReason` `card_declined`, `payment.failed` with `final: true`); a `+late@`
 email always captures, stamped `capturedAt = paymentDeadline + 1 s` (provider time, delivered at
@@ -146,7 +146,11 @@ the attempt captures (`CAPTURED`, `payment.succeeded`) when the draw is below `s
 attempt of the order is `ATTEMPTING` or `CAPTURED`. The check reads committed attempts only, which
 suffices while the MVP records only attempt 1. It is not safe under concurrent attempts: adding
 retries requires serializing attempts per order in every branch first. A `+dup@` email emits the
-result twice under distinct event ids.
+result twice under distinct event ids. A `+double@` email always captures twice: attempts 1 and 2,
+each with its own `paymentId` and `payment.succeeded`, written in the one transaction of that
+`order.placed`, so the two attempts are serialized per order by construction, each keeps its own
+`(orderId, attemptNo)`, and no `final: true` is at stake (neither fails). Booking confirms on
+whichever arrives first and refunds the other (`order_confirmed`; AT-21: exactly one `APPLIED`).
 
 **Provider latency runs outside the transaction**, in the runner's `beforeTransaction` step, i.e.
 before dedupe-and-capture (TD-051). Awaited inside the runner's transaction it would hold a pooled
@@ -184,6 +188,16 @@ counter hash, best-effort, and leaves the order open until its deadline); `retry
 (unknown `orderId` on a failure) are returned to the runner as a `HandlerOutcome`. Any decision
 the handler does not apply yet throws `... is not handled yet` and is retried, so captured money
 is never dropped silently.
+
+**The settlement grace is best-effort.** On time is `capturedAt <= paymentDeadline` (provider
+time), never the delivery time, so an on-time capture delivered after the deadline still confirms
+while the order is `PENDING_PAYMENT` (AT-19). Nothing waits for it, though: the sweeper expires the
+order once `paymentDeadline + 60 s <= T`, and a capture delivered after that is refunded (reason
+`late_delivery`, counter `late_delivery_refund`, AT-18). The grace only absorbs ordinary relay and
+consumer lag and NTP-level clock skew between services; a longer outage refunds an on-time payment
+rather than keep the seats waiting. The boundary is not exact either way: a capture delivered just
+after the grace still confirms if the sweeper (every 15 s) has not reached that order yet, and the
+counter is fire-and-forget. Asking the provider before expiry is phase 2.
 
 **Refund execution.** `payment-refund` (`service: "payment"`, `apps/worker/src/payment/refund-handler.ts`)
 consumes `payment.refund_requested`: in the runner's transaction it inserts one `payment.refunds`

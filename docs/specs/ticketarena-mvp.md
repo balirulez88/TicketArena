@@ -290,6 +290,13 @@ in the transaction that expires the order and frees its seats; the seats are nev
 the late payment, even when they are still free (AT-20).
 A success whose amount or currency differs from the order total is always refunded.
 
+**The settlement grace is best-effort.** Delivery time never decides "on time": an on-time capture
+delivered late confirms while the order is still `PENDING_PAYMENT` (AT-19), and once the sweeper has
+expired it at `paymentDeadline + 60 s` the same capture is refunded with reason `late_delivery` and
+counted as `late_delivery_refund` (AT-18). The grace absorbs normal delivery lag and NTP-level clock
+skew only; it is no promise: a delivery just past it still confirms if the sweeper has not reached
+the order yet, and a longer outage refunds an on-time payment instead of holding seats.
+
 | Order state     | `succeeded`, new payment, on time                              | `succeeded`, new payment, late                 | `succeeded`, known payment | `failed`, not final | `failed`, final                                              | `refunded`                                                       | Sweeper (deadline + grace) |
 | --------------- | -------------------------------------------------------------- | ---------------------------------------------- | -------------------------- | ------------------- | ------------------------------------------------------------ | ---------------------------------------------------------------- | -------------------------- |
 | PENDING_PAYMENT | → CONFIRMED, ledger `APPLIED`, seats `SOLD`, `order.confirmed` | → EXPIRED, free seats, `order.expired`, refund | noop (duplicate)           | log + metric, noop  | → CANCELLED (if no `APPLIED`), free seats, `order.cancelled` | ledger → `REFUNDED` if it was `REFUND_REQUESTED`, else poison    | → EXPIRED, free seats      |
@@ -333,7 +340,10 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
     always captures and `capturedAt` is the order's `paymentDeadline` plus 1 s (provider time);
     the event is delivered at once, so booking sees a late capture on a still-open order
   - `+dup@` → publishes its result twice (demonstrates dedupe)
-  - `+double@` → captures twice with two payment ids (demonstrates refund of the extra charge)
+  - `+double@` → captures twice with two payment ids (demonstrates refund of the extra charge):
+    attempts 1 and 2, both `CAPTURED` on time and written in the one transaction of that
+    `order.placed` (so serialized per order), one `payment.succeeded` each; booking confirms on
+    the first it handles and refunds the other (`order_confirmed`)
 - Invariant (tested in the module): never emits `final: true` while another attempt for the order
   is in flight or captured.
 - Events carry `capturedAt` (provider time), distinct from delivery time. Clock skew between

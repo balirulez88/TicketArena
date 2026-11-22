@@ -58,6 +58,28 @@ describe("decide: PENDING_PAYMENT", () => {
     });
   });
 
+  // On time is `capturedAt <= paymentDeadline`; when the event is delivered (T) never matters.
+  test.each([
+    ["before the deadline", -60_000],
+    ["within the settlement grace", 59_000],
+    ["after the settlement grace", 3_600_000],
+  ])(
+    "succeeded, delivered %s → on time or late by capturedAt alone",
+    (_when, deliveredAfterDeadlineMs) => {
+      const delivered = new Date(DEADLINE.getTime() + deliveredAfterDeadlineMs);
+      expect(decide(pending, noLedger, onTime, delivered)).toMatchObject({
+        kind: "transition",
+        reason: "payment_on_time",
+        order: "CONFIRMED",
+      });
+      expect(decide(pending, noLedger, late, delivered)).toMatchObject({
+        kind: "transition",
+        reason: "late_capture",
+        order: "EXPIRED",
+      });
+    },
+  );
+
   test("succeeded, new payment, late → EXPIRED with a REFUND_REQUESTED ledger row", () => {
     expect(decide(pending, noLedger, late, T)).toEqual({
       kind: "transition",

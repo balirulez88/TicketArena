@@ -220,6 +220,37 @@ describe("mock Payment handler", () => {
     ).toBe(1);
   });
 
+  it("captures twice, as attempts 1 and 2 with two payment ids, for a +double@ buyer", async () => {
+    const placed = await deliver("buyer+double@example.com", { random: 0.9, successRate: 0 });
+
+    const attempts = await prisma.paymentAttempt.findMany({
+      where: { orderId: placed.orderId },
+      orderBy: { attemptNo: "asc" },
+    });
+    expect(attempts).toMatchObject([
+      { attemptNo: 1, status: "CAPTURED", capturedAt: CAPTURE_TIME, amount: 12_500 },
+      { attemptNo: 2, status: "CAPTURED", capturedAt: CAPTURE_TIME, amount: 12_500 },
+    ]);
+    expect(new Set(attempts.map((attempt) => attempt.paymentId)).size).toBe(2);
+    const events = await prisma.paymentOutboxEvent.findMany({
+      where: {
+        eventType: "payment.succeeded",
+        payload: { path: ["orderId"], equals: placed.orderId },
+      },
+    });
+    expect(
+      events
+        .map((event) => {
+          const { payload } = event.payload as {
+            payload: { paymentId: string; attemptNo: number };
+          };
+          return [event.aggregateId, payload.paymentId, payload.attemptNo];
+        })
+        .sort((a, b) => Number(a[2]) - Number(b[2])),
+    ).toEqual(attempts.map((attempt) => [attempt.paymentId, attempt.paymentId, attempt.attemptNo]));
+    expect(await failedEventsFor(placed.orderId)).toEqual([]);
+  });
+
   it("waits a latency drawn from the injected Random before capturing", async () => {
     const sleeps: number[] = [];
 

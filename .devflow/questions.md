@@ -554,3 +554,35 @@ What do refund notifications contain and how are the consumers named?
 Assumed: Templates refund-initiated and refund-completed only (email always, SMS with a phone); consumers notification-refund-requested and notification-refunded
 
 Answer: (open)
+
+## 2026-11-21 18:59 ticket 22
+
+How is +double@ stored in payment storage?
+
+Assumed: Two CAPTURED payment_attempts rows (attempt 1 and 2), each with its own paymentId and payment.succeeded, both on time, written in the one order.placed transaction (serialized per order); unique (orderId, attemptNo) unchanged; always captures regardless of the random draw
+
+Answer: (open)
+
+## 2026-11-21 19:05 ticket 22
+
+How do AT-18/AT-19 control delivery time and the grace?
+
+Assumed: One injected clock for the sweeper and the saga stands for delivery time; capturedAt comes from a hand-built event; AT-18 delivers at deadline + 61 s after the sweeper expired the order, AT-19 at + 59 s; grace stays a fixed 60 s
+
+Answer: (open)
+
+## 2026-11-21 19:11 ticket 22
+
+How is the AT-22 mismatch produced?
+
+Assumed: A hand-built payment.succeeded with amount = total - 1 or currency HUF; no new magic email
+
+Answer: (open)
+
+## 2026-11-21 19:17 ticket 22
+
+Does anything enforce the grace boundary exactly?
+
+Assumed: No: an on-time capture delivered just after the grace still confirms if the 15 s sweeper has not reached the order; documented as best-effort; AT-18 means 'the sweeper has already expired the order'
+
+Answer: (open)

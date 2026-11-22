@@ -93,18 +93,29 @@ function stopAll(code) {
     if (child.exitCode !== null) {
       continue;
     }
-    // With a shell in between (Windows), only killing the whole tree stops next and tsx.
+    // A shell sits between us and pnpm, next and tsx, so signalling the shell alone would leave
+    // them running and holding their ports: stop the whole tree (Windows) or process group (POSIX).
     if (isWindows) {
       spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
     } else {
-      child.kill("SIGINT");
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+        // The group is already gone.
+      }
     }
   }
   process.exitCode = code;
 }
 
 function run(name, command, port) {
-  const child = spawn(command, { cwd: root, env: { ...env, PORT: port }, shell: true });
+  // On POSIX each service leads its own process group so stopAll can signal all of it.
+  const child = spawn(command, {
+    cwd: root,
+    env: { ...env, PORT: port },
+    shell: true,
+    detached: !isWindows,
+  });
   const prefix = `[${name}] `;
   const forward = (stream, target) => {
     let pending = "";

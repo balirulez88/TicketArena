@@ -36,10 +36,22 @@ Requires Node 24, pnpm 12 (`corepack enable pnpm`) and Docker (for the test serv
 
 ```bash
 pnpm install
-cp .env.example .env          # fill in Neon + Upstash credentials
-pnpm db:generate              # generate the Prisma client
-pnpm dev                      # http://localhost:3000
-pnpm infra:up                 # Postgres 17, Redis 7, NATS JetStream (docker compose)
+pnpm dev:local                # the whole system locally: http://localhost:3000
+```
+
+`pnpm dev:local` starts the docker compose services (Postgres 17, Redis 7 with its
+Upstash-compatible REST proxy, NATS JetStream), applies the migrations, seeds the catalog, and
+runs the web app and the worker together until Ctrl+C. The worker is what admits buyers from the
+waiting room, relays the outbox, takes the mock payments and sends notifications, so a purchase
+completes only with it running; `pnpm dev` alone starts just the web app. The first run writes
+`.env.dev` (git-ignored) with values matching `docker-compose.yml` and fresh secrets, including
+the `/admin` password. The services keep running afterwards: `pnpm infra:down` stops them,
+`pnpm infra:reset` also wipes their data. Other ports: `PORT=3001 WORKER_PORT=8081 pnpm dev:local`, or set them in `.env.dev`.
+
+Tests:
+
+```bash
+pnpm infra:up                 # the same compose services
 cp .env.test.example .env.test
 pnpm check                    # lint + typecheck + unit and integration tests
 ```

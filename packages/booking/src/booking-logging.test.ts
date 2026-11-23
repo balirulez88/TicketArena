@@ -1,20 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "@ticketarena/contracts";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { type Buyer, createBookingService } from "./booking-service";
+import { describe, expect, test } from "vitest";
+import { bookingTestBed, freshBuyer } from "./testing";
 
 const database = setupTestDatabase();
-let prisma: PrismaClient | undefined;
-
-function db(): PrismaClient {
-  prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
-  return prisma;
-}
-
-const NOW = new Date("2027-03-01T12:00:00.000Z");
-const alice: Buyer = { sessionId: "a".repeat(32), buyerKey: "a".repeat(32) };
+const { freeSeats, service } = bookingTestBed(database);
 
 type Bindings = Record<string, unknown>;
 
@@ -35,29 +26,14 @@ function recordingLogger() {
   return { logger: make({}), lines };
 }
 
-beforeAll(async () => {
-  await seedCatalog(db(), NOW);
-});
-
-afterAll(async () => {
-  await prisma?.$disconnect();
-});
-
 describe("booking logging", () => {
   test("every line about a booking carries its correlationId, holdId and, once placed, orderId", async () => {
     const { logger, lines } = recordingLogger();
-    const booking = createBookingService({
-      db: db(),
-      clock: { now: () => NOW },
-      newId: randomUUID,
-      logger,
-    });
-    const event = await db().event.findFirstOrThrow({ where: { demo: true } });
-    const seat = await db().seat.findFirstOrThrow({
-      where: { eventId: event.id, status: "AVAILABLE" },
-    });
+    const alice = freshBuyer();
+    const booking = service({ logger });
+    const { eventId, seatIds } = await freeSeats(1);
 
-    const hold = await booking.holdSeats(alice, event.id, [seat.id]);
+    const hold = await booking.holdSeats(alice, eventId, seatIds);
     const held = lines.length;
     const order = await booking.placeOrder(
       alice,
@@ -78,17 +54,10 @@ describe("booking logging", () => {
 
   test("a replayed placeOrder logs no 'order placed' line and returns the original order view", async () => {
     const { logger, lines } = recordingLogger();
-    const booking = createBookingService({
-      db: db(),
-      clock: { now: () => NOW },
-      newId: randomUUID,
-      logger,
-    });
-    const event = await db().event.findFirstOrThrow({ where: { demo: true } });
-    const seat = await db().seat.findFirstOrThrow({
-      where: { eventId: event.id, status: "AVAILABLE" },
-    });
-    const hold = await booking.holdSeats(alice, event.id, [seat.id]);
+    const alice = freshBuyer();
+    const booking = service({ logger });
+    const { eventId, seatIds } = await freeSeats(1);
+    const hold = await booking.holdSeats(alice, eventId, seatIds);
     const key = randomUUID();
     const contact = { email: "alice@example.com" };
 

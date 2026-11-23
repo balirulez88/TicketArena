@@ -1,13 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { createBookingService, DEFAULT_BOOKING_TIMEOUTS } from "@ticketarena/booking";
-import { occupy, postgresErrorOf, testTrigger, waitFor } from "@ticketarena/booking/testing";
-import { silentLogger } from "@ticketarena/contracts";
 import {
-  createPrismaClient,
-  type PrismaClient,
-  type PrismaClientOptions,
-  seedCatalog,
-} from "@ticketarena/db";
+  block,
+  failureOf,
+  freeSeats,
+  NOW,
+  occupy,
+  postgresErrorOf,
+  testClients,
+  waitUntilBlocked,
+  withClient,
+  withTrigger,
+} from "@ticketarena/booking/testing";
+import { silentLogger } from "@ticketarena/contracts";
+import { type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { TRPCError } from "@trpc/server";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
@@ -22,25 +28,12 @@ import {
 import { createCaller } from "./_app";
 
 const database = setupTestDatabase();
-const NOW = new Date("2027-03-01T12:00:00.000Z");
+const { db, open } = testClients(database);
 const CONTACT = { email: "buyer@example.com" };
 
 beforeAll(async () => {
-  await withClient({}, (db) => seedCatalog(db, NOW));
+  await withClient(database, (seeding) => seedCatalog(seeding, NOW));
 });
-
-/** Every test builds and disconnects its own clients; none is shared across tests. */
-async function withClient<T>(
-  options: Partial<PrismaClientOptions>,
-  work: (db: PrismaClient) => Promise<T>,
-): Promise<T> {
-  const db = createPrismaClient({ connectionString: database.url, driver: "pg", ...options });
-  try {
-    return await work(db);
-  } finally {
-    await db.$disconnect();
-  }
-}
 
 function contextFor(db: PrismaClient, principal: Principal): TRPCContext {
   const unused = (what: string) => () => {
@@ -68,86 +61,93 @@ function contextFor(db: PrismaClient, principal: Principal): TRPCContext {
 }
 
 /** A guest with a live hold on one free demo seat, made through the booking service itself. */
-async function guestWithHold(db: PrismaClient) {
+async function guestWithHold(client: PrismaClient) {
   const sessionId = randomUUID().replaceAll("-", "");
   const principal: Principal = { kind: "guest", sessionId };
-  const event = await db.event.findFirstOrThrow({ where: { demo: true } });
-  const seat = await db.seat.findFirstOrThrow({
-    where: { eventId: event.id, status: "AVAILABLE" },
-  });
+  const { eventId, seatIds } = await freeSeats(client, 1);
   const hold = await createBookingService({
-    db,
+    db: client,
     clock: { now: () => NOW },
     newId: randomUUID,
-  }).holdSeats({ sessionId, buyerKey: sessionId }, event.id, [seat.id]);
+  }).holdSeats({ sessionId, buyerKey: sessionId }, eventId, seatIds);
   return { principal, hold };
 }
 
 describe("booking.placeOrder errors", () => {
   test("a saturated database is TOO_MANY_REQUESTS with BOOKING_BUSY", async () => {
-    const { principal, hold } = await withClient({}, guestWithHold);
-    await withClient({ poolMax: 1, acquireTimeoutMs: 300 }, async (db) => {
-      // occupy opens the pool's only connection itself, retrying a slow first connect, so the
-      // short acquire timeout below only ever meets a full pool.
-      const occupation = await occupy(db);
-      let error: unknown;
-      try {
-        error = await createCaller(contextFor(db, principal))
-          .booking.placeOrder({ holdId: hold.id, contact: CONTACT, idempotencyKey: randomUUID() })
-          .catch((e: unknown) => e);
-      } finally {
-        await occupation.release();
-      }
+    const { principal, hold } = await guestWithHold(db());
+    const tight = open({ poolMax: 1, acquireTimeoutMs: 300 });
+    // occupy opens the pool's only connection itself, retrying a slow first connect, so the
+    // short acquire timeout below only ever meets a full pool.
+    const occupation = await occupy(tight);
+    let error: unknown;
+    try {
+      error = await failureOf(
+        createCaller(contextFor(tight, principal)).booking.placeOrder({
+          holdId: hold.id,
+          contact: CONTACT,
+          idempotencyKey: randomUUID(),
+        }),
+      );
+    } finally {
+      await occupation.release();
+    }
 
-      expect(error).toBeInstanceOf(TRPCError);
-      expect(error).toMatchObject({
-        code: "TOO_MANY_REQUESTS",
-        message: expect.stringMatching(/^BOOKING_BUSY/),
-        cause: { code: "BOOKING_BUSY" },
-      });
+    expect(error).toBeInstanceOf(TRPCError);
+    expect(error).toMatchObject({
+      code: "TOO_MANY_REQUESTS",
+      message: expect.stringMatching(/^BOOKING_BUSY/),
+      cause: { code: "BOOKING_BUSY" },
     });
   });
 
   test("a statement cancelled by another session is INTERNAL_SERVER_ERROR with 57014 in its cause", async () => {
-    await withClient({}, async (db) => {
-      const { principal, hold } = await guestWithHold(db);
-      const idempotencyKey = randomUUID();
-      const trigger = await testTrigger(db, {
+    const { principal, hold } = await guestWithHold(db());
+    const idempotencyKey = randomUUID();
+    const lockKey = Math.floor(Math.random() * 1_000_000_000);
+    // placeOrder's order insert waits on a lock the test holds, until the test cancels it.
+    await withTrigger(
+      db(),
+      {
         table: "orders",
         timing: "BEFORE INSERT",
         when: `NEW."idempotencyKey" = '${idempotencyKey}'`,
-        body: "PERFORM pg_sleep(4);",
-      });
-      try {
-        const call = createCaller(contextFor(db, principal)).booking.placeOrder({
-          holdId: hold.id,
-          contact: CONTACT,
-          idempotencyKey,
-        });
-        call.catch(() => undefined);
-        const pid = await waitFor(
-          "placeOrder's backend sleeping in its order insert",
-          async () =>
-            (
-              await db.$queryRaw<{ pid: number }[]>`
-                SELECT pid FROM pg_stat_activity
-                WHERE datname = current_database() AND wait_event = 'PgSleep'`
-            )[0]?.pid,
-          { against: call },
+        body: `PERFORM pg_advisory_xact_lock(${lockKey});`,
+      },
+      async () => {
+        const blocker = await block(
+          db(),
+          (tx) => tx.$executeRaw`SELECT pg_advisory_xact_lock(${lockKey})`,
+          { what: "the test's latch lock" },
         );
-        await db.$queryRaw`SELECT pg_cancel_backend(${pid}::int)`;
+        try {
+          const call = createCaller(contextFor(db(), principal)).booking.placeOrder({
+            holdId: hold.id,
+            contact: CONTACT,
+            idempotencyKey,
+          });
+          call.catch(() => undefined);
+          const [waiting] = await waitUntilBlocked(db(), blocker.pid, {
+            what: "placeOrder's order insert waiting on the test's lock",
+            against: call,
+          });
+          if (waiting === undefined) {
+            throw new Error("no backend waits on the test's lock");
+          }
+          await db().$queryRaw`SELECT pg_cancel_backend(${waiting.pid}::int)`;
 
-        const error = await call.catch((e: unknown) => e);
+          const error = await failureOf(call);
 
-        expect(error).toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
-        expect(postgresErrorOf(error)).toEqual({
-          code: "57014",
-          message: "canceling statement due to user request",
-        });
-      } finally {
-        await trigger.remove();
-      }
-    });
+          expect(error).toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
+          expect(postgresErrorOf(error)).toEqual({
+            code: "57014",
+            message: "canceling statement due to user request",
+          });
+        } finally {
+          await blocker.release();
+        }
+      },
+    );
   }, 20_000);
 });
 
@@ -168,32 +168,31 @@ describe("booking service timeouts", () => {
         resHeaders: new Headers(),
       });
       const sessionId = randomUUID().replaceAll("-", "");
-      const event = await runtime.db.event.findFirstOrThrow({ where: { demo: true } });
-      const seat = await runtime.db.seat.findFirstOrThrow({
-        where: { eventId: event.id, status: "AVAILABLE" },
-      });
-      const table = `settings_${randomUUID().replaceAll("-", "")}`;
-      await runtime.db.$executeRawUnsafe(`CREATE TABLE ${table} (lock text, statement text)`);
-      const trigger = await testTrigger(runtime.db, {
-        table: "seats",
-        timing: "AFTER UPDATE",
-        when: `NEW.id = '${seat.id}'::uuid`,
-        body: `INSERT INTO ${table} VALUES (current_setting('lock_timeout'), current_setting('statement_timeout'));`,
-      });
-      try {
-        await bookingServiceFor({ ...ctx, now: () => NOW }).holdSeats(
-          { sessionId, buyerKey: sessionId },
-          event.id,
-          [seat.id],
-        );
+      const { eventId, seatIds } = await freeSeats(runtime.db, 1);
+      const event = { id: eventId };
+      const seat = { id: seatIds[0] ?? "" };
+      await withTrigger(
+        runtime.db,
+        {
+          table: "seats",
+          timing: "AFTER UPDATE",
+          when: `NEW.id = '${seat.id}'::uuid`,
+          scratch: "lock text, statement text",
+          body: `INSERT INTO $scratch VALUES (current_setting('lock_timeout'), current_setting('statement_timeout'));`,
+        },
+        async (trigger) => {
+          await bookingServiceFor({ ...ctx, now: () => NOW }).holdSeats(
+            { sessionId, buyerKey: sessionId },
+            event.id,
+            [seat.id],
+          );
 
-        const recorded = await runtime.db.$queryRawUnsafe<unknown[]>(
-          `SELECT lock, statement FROM ${table}`,
-        );
-        expect(recorded).toEqual([{ lock: "1234ms", statement: "4321ms" }]);
-      } finally {
-        await trigger.remove();
-      }
+          const recorded = await runtime.db.$queryRawUnsafe<unknown[]>(
+            `SELECT lock, statement FROM ${trigger.scratch}`,
+          );
+          expect(recorded).toEqual([{ lock: "1234ms", statement: "4321ms" }]);
+        },
+      );
     } finally {
       await runtime.db.$disconnect();
     }

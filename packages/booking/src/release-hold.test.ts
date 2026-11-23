@@ -1,29 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
-import {
-  type Buyer,
-  createBookingService,
-  HoldNotActiveError,
-  HoldNotFoundError,
-} from "./booking-service";
+import { beforeEach, describe, expect, test } from "vitest";
+import { type Buyer, HoldNotActiveError, HoldNotFoundError } from "./booking-service";
+import { bookingTestBed, freshBuyer, NOW } from "./testing";
 
 const database = setupTestDatabase();
-let prisma: PrismaClient | undefined;
+const { db, freeSeats, service } = bookingTestBed(database);
 
-function db(): PrismaClient {
-  prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
-  return prisma;
-}
-
-const NOW = new Date("2027-03-01T12:00:00.000Z");
 const contact = { email: "alice@example.com" };
-
-function freshBuyer(): Buyer {
-  const key = randomUUID().replaceAll("-", "");
-  return { sessionId: key, buyerKey: key };
-}
 
 // Fresh per test: the buyer limit counts a buyer's seats across the shared database.
 let alice: Buyer = freshBuyer();
@@ -34,29 +18,11 @@ beforeEach(() => {
   bob = freshBuyer();
 });
 
-function service(now = NOW) {
-  return createBookingService({ db: db(), clock: { now: () => now }, newId: randomUUID });
-}
-
 async function heldSeats(count: number) {
-  const event = await db().event.findFirstOrThrow({ where: { demo: true } });
-  const seats = await db().seat.findMany({
-    where: { eventId: event.id, status: "AVAILABLE" },
-    orderBy: { id: "asc" },
-    take: count,
-  });
-  const seatIds = seats.map((seat) => seat.id);
-  const hold = await service().holdSeats(alice, event.id, seatIds);
-  return { hold, eventId: event.id, seatIds };
+  const { eventId, seatIds } = await freeSeats(count);
+  const hold = await service().holdSeats(alice, eventId, seatIds);
+  return { hold, eventId, seatIds };
 }
-
-beforeAll(async () => {
-  await seedCatalog(db(), NOW);
-});
-
-afterAll(async () => {
-  await prisma?.$disconnect();
-});
 
 describe("releaseHold", () => {
   test("marks the hold RELEASED and frees its seats", async () => {
@@ -104,11 +70,7 @@ describe("releaseHold", () => {
     }
     // Simulates a lazy takeover: the seat already belongs to another hold.
     const other = await service().holdSeats(bob, hold.eventId, [
-      (
-        await db().seat.findFirstOrThrow({
-          where: { eventId: hold.eventId, status: "AVAILABLE" },
-        })
-      ).id,
+      (await freeSeats(1, { eventId: hold.eventId })).seatIds[0] ?? "",
     ]);
     await db().seat.update({ where: { id: takenOver }, data: { holdId: other.id } });
 

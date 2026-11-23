@@ -1,10 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test } from "vitest";
 import {
   type Buyer,
-  createBookingService,
   HoldExpiredError,
   HoldNotActiveError,
   HoldNotFoundError,
@@ -15,46 +13,31 @@ import {
   requestHash,
   SeatUnavailableError,
 } from "./booking-service";
+import {
+  block,
+  bookingTestBed,
+  failureOf,
+  freshBuyer,
+  NOW,
+  rowLock,
+  waitUntilBlocked,
+} from "./testing";
 
 const database = setupTestDatabase();
-let prisma: PrismaClient | undefined;
+const { db, service, at, freeSeats } = bookingTestBed(database);
 
-function db(): PrismaClient {
-  prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
-  return prisma;
-}
-
-const NOW = new Date("2027-03-01T12:00:00.000Z");
 // Fresh per test: the buyer limit counts a buyer's seats across the shared database.
-let alice: Buyer = { sessionId: "a".repeat(32), buyerKey: "a".repeat(32) };
+let alice: Buyer = freshBuyer();
 
 beforeEach(() => {
-  const key = randomUUID().replaceAll("-", "");
-  alice = { sessionId: key, buyerKey: key };
+  alice = freshBuyer();
 });
 const contact = { email: "alice@example.com" };
 
-function service(now = NOW) {
-  return createBookingService({ db: db(), clock: { now: () => now }, newId: randomUUID });
-}
-
 async function heldSeat() {
-  const event = await db().event.findFirstOrThrow({ where: { demo: true } });
-  const seat = await db().seat.findFirstOrThrow({
-    where: { eventId: event.id, status: "AVAILABLE" },
-    orderBy: { id: "asc" },
-  });
-  const hold = await service().holdSeats(alice, event.id, [seat.id]);
-  return { hold, seatId: seat.id };
-}
-
-/** True once a placeOrder in this database waits on a seat row lock. */
-async function waitingOnSeatLock(): Promise<boolean> {
-  const rows = await db().$queryRaw<{ waiting: number }[]>`
-    SELECT count(*)::int AS waiting FROM pg_stat_activity
-    WHERE datname = current_database() AND wait_event_type = 'Lock'
-      AND query LIKE '%FROM seats WHERE id = ANY%'`;
-  return (rows[0]?.waiting ?? 0) > 0;
+  const { eventId, seatIds } = await freeSeats(1);
+  const hold = await service().holdSeats(alice, eventId, seatIds);
+  return { hold, seatId: seatIds[0] ?? "" };
 }
 
 describe("requestHash", () => {
@@ -76,20 +59,12 @@ describe("requestHash", () => {
   });
 });
 
-beforeAll(async () => {
-  await seedCatalog(db(), NOW);
-});
-
-afterAll(async () => {
-  await prisma?.$disconnect();
-});
-
 describe("placeOrder", () => {
   test("turns a valid hold into a PENDING_PAYMENT order due 5 minutes after the clock reading", async () => {
     const { hold, seatId } = await heldSeat();
     const placedAt = new Date("2027-03-01T12:02:00.000Z");
 
-    const order = await service(placedAt).placeOrder(alice, hold.id, contact, randomUUID());
+    const order = await at(placedAt).placeOrder(alice, hold.id, contact, randomUUID());
 
     expect(order).toMatchObject({
       holdId: hold.id,
@@ -139,7 +114,7 @@ describe("placeOrder", () => {
     const key = randomUUID();
     const first = await service().placeOrder(alice, hold.id, contact, key);
 
-    const replay = await service(new Date("2027-03-01T13:00:00.000Z")).placeOrder(
+    const replay = await at(new Date("2027-03-01T13:00:00.000Z")).placeOrder(
       alice,
       hold.id,
       { phone: undefined, ...contact },
@@ -205,17 +180,13 @@ describe("placeOrder", () => {
     const other = await heldSeat();
     const key = randomUUID();
     const winnerId = randomUUID();
-    let loser: Promise<OrderView> | undefined;
-
-    await db().$transaction(
-      async (tx) => {
-        // Holding the seat lock parks the loser after its in-transaction duplicate check.
-        await tx.$queryRaw`SELECT id FROM seats WHERE id = ${seatId}::uuid FOR UPDATE`;
-        loser = service().placeOrder(alice, hold.id, contact, key);
-        await expect.poll(waitingOnSeatLock, { timeout: 5000 }).toBe(true);
-        // The winner commits the same (sessionId, idempotencyKey) and request hash meanwhile.
-        // It references another hold so its foreign-key check does not wait on the loser.
-        await tx.order.create({
+    // Holding the seat lock parks the loser after its in-transaction duplicate check; on release
+    // the blocker first commits the winner: the same (sessionId, idempotencyKey) and request hash.
+    // It references another hold so its foreign-key check does not wait on the loser.
+    const blocker = await block(db(), rowLock("seats", [seatId]), {
+      what: "the seat lock",
+      afterRelease: (tx) =>
+        tx.order.create({
           data: {
             id: winnerId,
             holdId: other.hold.id,
@@ -230,13 +201,16 @@ describe("placeOrder", () => {
             correlationId: other.hold.correlationId,
             createdAt: NOW,
           },
-        });
-      },
-      { timeout: 10_000 },
-    );
-
-    if (loser === undefined) {
-      throw new Error("the losing placeOrder never started");
+        }),
+    });
+    const loser: Promise<OrderView> = service().placeOrder(alice, hold.id, contact, key);
+    try {
+      await waitUntilBlocked(db(), blocker.pid, {
+        what: "the losing placeOrder waiting on the seat lock",
+        against: loser,
+      });
+    } finally {
+      await blocker.release();
     }
     const order = await loser;
 
@@ -252,7 +226,7 @@ describe("placeOrder", () => {
 
   test("hides a hold from anyone but its owner", async () => {
     const { hold } = await heldSeat();
-    const bob: Buyer = { sessionId: "b".repeat(32), buyerKey: "b".repeat(32) };
+    const bob = freshBuyer();
 
     await expect(service().placeOrder(bob, hold.id, contact, randomUUID())).rejects.toBeInstanceOf(
       HoldNotFoundError,
@@ -266,7 +240,7 @@ describe("placeOrder", () => {
     const { hold, seatId } = await heldSeat();
 
     await expect(
-      service(hold.holdExpiresAt).placeOrder(alice, hold.id, contact, randomUUID()),
+      at(hold.holdExpiresAt).placeOrder(alice, hold.id, contact, randomUUID()),
     ).rejects.toBeInstanceOf(HoldExpiredError);
     const seat = await db().seat.findUniqueOrThrow({ where: { id: seatId } });
     expect(seat.status).toBe("HELD");
@@ -284,7 +258,7 @@ describe("placeOrder", () => {
   test("getOrder returns the order to its owner only", async () => {
     const { hold } = await heldSeat();
     const order = await service().placeOrder(alice, hold.id, contact, randomUUID());
-    const bob: Buyer = { sessionId: "b".repeat(32), buyerKey: "b".repeat(32) };
+    const bob = freshBuyer();
 
     expect(await service().getOrder(alice, order.id)).toEqual(order);
     expect(await service().getOrder(bob, order.id)).toBeNull();
@@ -306,38 +280,89 @@ describe("placeOrder acceptance: lock order and consistency", () => {
     }
   }
 
-  test("reads the clock only after the hold and its seats are locked", async () => {
-    const { hold, seatId } = await heldSeat();
-    let locked: boolean[] = [];
-    const probing = createBookingService({
-      db: db(),
-      newId: randomUUID,
-      clock: {
+  // As for holdSeats (TD-016): every clock read is stamped, synchronously, with a flag the
+  // blocker sets only after Postgres shows placeOrder waiting on its lock, immediately before it
+  // commits. A read taken before that lock is granted happens before the flag.
+  test.each(["holds", "seats"] as const)(
+    "reads the clock only after the hold and its seats are locked: after the %s lock",
+    async (table) => {
+      const { hold, seatId } = await heldSeat();
+      let committing = false;
+      const reads: boolean[] = [];
+      const clock = {
         now: () => {
-          // Synchronous clock: record the probes' promises and resolve them afterwards.
-          pending = Promise.all([isLocked("holds", hold.id), isLocked("seats", seatId)]);
+          reads.push(committing);
           return NOW;
         },
-      },
-    });
-    let pending: Promise<boolean[]> = Promise.resolve([]);
+      };
+      const blocker = await block(db(), rowLock(table, [table === "holds" ? hold.id : seatId]), {
+        what: `the ${table} lock`,
+      });
+      const placing = service({ clock }).placeOrder(alice, hold.id, contact, randomUUID());
+      try {
+        await waitUntilBlocked(db(), blocker.pid, {
+          what: `placeOrder waiting on the ${table} lock`,
+          against: placing,
+        });
+      } finally {
+        committing = true;
+        await blocker.release();
+      }
+      await placing;
 
-    await probing.placeOrder(alice, hold.id, contact, randomUUID());
-    locked = await pending;
-
-    expect(locked).toEqual([true, true]);
-  });
+      expect(reads.length).toBeGreaterThan(0);
+      expect(reads).toEqual(reads.map(() => true));
+    },
+  );
 
   test("locks the hold before the seats", async () => {
     const { hold, seatId } = await heldSeat();
-    let started: Promise<unknown> = Promise.resolve();
-    await db().$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM seats WHERE id = ${seatId}::uuid FOR UPDATE`;
-      started = service().placeOrder(alice, hold.id, contact, randomUUID());
+    const blocker = await block(db(), rowLock("seats", [seatId]), { what: "the seat lock" });
+    const started = service().placeOrder(alice, hold.id, contact, randomUUID());
+    try {
       // placeOrder now waits on the seat lock; it must already own the hold lock.
-      await expect.poll(() => isLocked("holds", hold.id), { timeout: 5000 }).toBe(true);
-    });
+      await waitUntilBlocked(db(), blocker.pid, {
+        what: "placeOrder waiting on the seat lock",
+        against: started,
+      });
+      expect(await isLocked("holds", hold.id)).toBe(true);
+    } finally {
+      await blocker.release();
+    }
     await expect(started).resolves.toBeDefined();
+  });
+
+  // TD-018: the order.placed row is the last write. Its envelope id comes from newId; a fixed
+  // newId returning the id of the hold's own seat.held row makes that insert fail after the order,
+  // hold and seat writes. One seat, so the order's single line can take that id too.
+  test("a failure after the writes have begun leaves no order, the hold HELD and its seats unchanged", async () => {
+    const { eventId, seatIds } = await freeSeats(1);
+    const hold = await service().holdSeats(alice, eventId, seatIds);
+    const [held] = await db().outboxEvent.findMany({ where: { aggregateId: hold.id } });
+    if (held === undefined) {
+      throw new Error("the hold wrote no seat.held row");
+    }
+    const seatsBefore = await db().seat.findMany({
+      where: { id: { in: seatIds } },
+      orderBy: { id: "asc" },
+    });
+
+    const failure = await failureOf(
+      service({ newId: () => held.id }).placeOrder(alice, hold.id, contact, randomUUID()),
+    );
+
+    expect(failure).toMatchObject({ code: "P2002", meta: { modelName: "OutboxEvent" } });
+    expect(await db().order.count({ where: { holdId: hold.id } })).toBe(0);
+    expect(await db().order.count({ where: { id: held.id } })).toBe(0);
+    expect(
+      await db().outboxEvent.count({
+        where: { eventType: "order.placed", payload: { path: ["holdId"], equals: hold.id } },
+      }),
+    ).toBe(0);
+    expect((await db().hold.findUniqueOrThrow({ where: { id: hold.id } })).status).toBe("HELD");
+    expect(
+      await db().seat.findMany({ where: { id: { in: seatIds } }, orderBy: { id: "asc" } }),
+    ).toEqual(seatsBefore);
   });
 
   test("refuses when a held seat lost its holdId", async () => {

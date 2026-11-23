@@ -1,33 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test } from "vitest";
 import {
   type Buyer,
   type Contact,
-  createBookingService,
   LimitExceededError,
   SeatUnavailableError,
 } from "./booking-service";
+import { block, bookingTestBed, freshBuyer, NOW, rowLock, settledUnlessBlocked } from "./testing";
 
 const database = setupTestDatabase();
-let prisma: PrismaClient | undefined;
+const { db, at, freeSeats } = bookingTestBed(database);
 
-function db(): PrismaClient {
-  prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
-  return prisma;
-}
-
-const NOW = new Date("2027-03-01T12:00:00.000Z");
 const ONE_MINUTE = 60_000;
 const SETTLEMENT_GRACE_MS = 60_000;
-const NO_WAIT_BUDGET_MS = 1_500;
 const contact: Contact = { email: "alice@example.com", phone: "+36301234567" };
-
-function freshBuyer(): Buyer {
-  const key = randomUUID().replaceAll("-", "");
-  return { sessionId: key, buyerKey: key };
-}
 
 let alice: Buyer = freshBuyer();
 let bob: Buyer = freshBuyer();
@@ -37,31 +24,13 @@ beforeEach(() => {
   bob = freshBuyer();
 });
 
-function at(when: Date) {
-  return createBookingService({ db: db(), clock: { now: () => when }, newId: randomUUID });
-}
-
 function plus(when: Date, ms: number): Date {
   return new Date(when.getTime() + ms);
 }
 
-async function demoEventId(): Promise<string> {
-  return (await db().event.findFirstOrThrow({ where: { demo: true } })).id;
-}
-
-async function freeSeatIds(eventId: string, count: number): Promise<string[]> {
-  const seats = await db().seat.findMany({
-    where: { eventId, status: "AVAILABLE" },
-    orderBy: { id: "asc" },
-    take: count,
-  });
-  return seats.map((seat) => seat.id);
-}
-
 /** Alice holds `count` seats at NOW and places the order at `placedAt`. */
 async function aliceOrders(count = 1, placedAt = plus(NOW, ONE_MINUTE)) {
-  const eventId = await demoEventId();
-  const seatIds = await freeSeatIds(eventId, count);
+  const { eventId, seatIds } = await freeSeats(count);
   const hold = await at(NOW).holdSeats(alice, eventId, seatIds);
   const order = await at(placedAt).placeOrder(alice, hold.id, contact, randomUUID());
   return {
@@ -88,52 +57,6 @@ function orderStatus(id: string) {
 function expiredEvents(orderId: string) {
   return db().outboxEvent.findMany({ where: { aggregateId: orderId, eventType: "order.expired" } });
 }
-
-/** Resolves with the outcome, or "blocked" if the call is still waiting after the budget. */
-function settleWithin<T>(call: Promise<T>) {
-  return Promise.race([
-    call.then(
-      (value) => ({ value }),
-      (error: unknown) => ({ error }),
-    ),
-    new Promise<"blocked">((resolve) => setTimeout(resolve, NO_WAIT_BUDGET_MS, "blocked")),
-  ]);
-}
-
-/** Holds a row lock on the order in another transaction until `release` is called. */
-async function lockOrderElsewhere(orderId: string) {
-  let open: () => void = () => undefined;
-  const gate = new Promise<void>((resolve) => {
-    open = resolve;
-  });
-  let locked: () => void = () => undefined;
-  const lockTaken = new Promise<void>((resolve) => {
-    locked = resolve;
-  });
-  const transaction = db().$transaction(
-    async (tx) => {
-      await tx.$queryRaw`SELECT id FROM orders WHERE id = ${orderId}::uuid FOR UPDATE`;
-      locked();
-      await gate;
-    },
-    { timeout: 30_000 },
-  );
-  await lockTaken;
-  return {
-    release: async () => {
-      open();
-      await transaction;
-    },
-  };
-}
-
-beforeAll(async () => {
-  await seedCatalog(db(), NOW);
-});
-
-afterAll(async () => {
-  await prisma?.$disconnect();
-});
 
 describe("sweepExpired and orders", () => {
   test("at paymentDeadline + 60s expires the order, frees its seats and writes order.expired with the contact", async () => {
@@ -187,12 +110,13 @@ describe("sweepExpired and orders", () => {
 
   test("skips an order locked by another transaction without waiting; its seats stay IN_CHECKOUT", async () => {
     const { seatIds, hold, order, expiresAt } = await aliceOrders();
-    const lock = await lockOrderElsewhere(order.id);
+    const lock = await block(db(), rowLock("orders", [order.id]), { what: "the order lock" });
     try {
-      const outcome = await settleWithin(at(expiresAt).sweepExpired());
+      const outcome = await settledUnlessBlocked(db(), lock.pid, at(expiresAt).sweepExpired());
 
       expect(outcome).not.toBe("blocked");
-      expect(outcome).not.toMatchObject({ error: expect.anything() });
+      expect(outcome).not.toMatchObject({ status: "rejected" });
+      expect(outcome).toMatchObject({ status: "fulfilled" });
       expect(outcome).not.toMatchObject({ value: { expiredOrderIds: [order.id] } });
     } finally {
       await lock.release();
@@ -220,8 +144,7 @@ describe("sweepExpired and orders", () => {
 
 describe("AT-10: checkout keeps seats", () => {
   test("IN_CHECKOUT seats outlive the hold expiry and are freed only at paymentDeadline + grace", async () => {
-    const eventId = await demoEventId();
-    const seatIds = await freeSeatIds(eventId, 1);
+    const { eventId, seatIds } = await freeSeats(1);
     const hold = await at(NOW).holdSeats(alice, eventId, seatIds);
     // Placed one minute before the hold would expire: the payment deadline lies beyond it.
     const order = await at(plus(hold.holdExpiresAt, -ONE_MINUTE)).placeOrder(
@@ -255,7 +178,7 @@ describe("AT-10: checkout keeps seats", () => {
 describe("AT-04: no double counting", () => {
   test("after the order expires, the buyer's usage drops", async () => {
     const { eventId, expiresAt } = await aliceOrders(4);
-    const more = await freeSeatIds(eventId, 3);
+    const more = (await freeSeats(3, { eventId })).seatIds;
     await expect(
       at(plus(NOW, 2 * ONE_MINUTE)).holdSeats(alice, eventId, more),
     ).rejects.toBeInstanceOf(LimitExceededError);

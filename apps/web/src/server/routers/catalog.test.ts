@@ -1,22 +1,19 @@
 import { DEFAULT_BOOKING_TIMEOUTS } from "@ticketarena/booking";
+import { NOW, testClients, withClient } from "@ticketarena/booking/testing";
 import { silentLogger } from "@ticketarena/contracts";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { TRPCError } from "@trpc/server";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test } from "vitest";
 import { createCaller } from "./_app";
 
+// Runs in declaration order and shuffled (vitest.config.ts): no test may rely on another's writes.
 const database = setupTestDatabase();
-let prisma: PrismaClient | undefined;
-
-function db(): PrismaClient {
-  prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
-  return prisma;
-}
+const { db } = testClients(database);
 
 function caller() {
   return createCaller({
-    now: () => new Date("2027-03-01T12:00:00.000Z"),
+    now: () => NOW,
     principal: { kind: "guest", sessionId: "0123456789abcdef0123456789abcdef" },
     isAdmin: false,
     bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
@@ -44,12 +41,16 @@ function caller() {
 const UNKNOWN_ID = "00000000-0000-4000-8000-000000000000";
 
 beforeAll(async () => {
-  await seedCatalog(db(), new Date("2027-03-01T12:00:00.000Z"));
+  await withClient(database, (seeding) => seedCatalog(seeding, NOW));
 });
 
-afterAll(async () => {
-  await prisma?.$disconnect();
-});
+/** Every seat of the event back to the seeded state, so a test asserts only what it set up. */
+async function resetSeats(eventId: string): Promise<void> {
+  await db().seat.updateMany({
+    where: { eventId },
+    data: { status: "AVAILABLE", holdId: null, claimBuyerKey: null },
+  });
+}
 
 describe("events.list", () => {
   test("lists seeded events by on-sale time with their venue and one demo event", async () => {
@@ -106,12 +107,14 @@ describe("seats.map", () => {
   test("returns every seat of the event with status, section, row, number and section price", async () => {
     const [first] = await caller().events.list();
     const eventId = first?.id ?? "";
+    await resetSeats(eventId);
     const seatCount = await db().seat.count({ where: { eventId } });
 
     const map = await caller().seats.map({ eventId });
 
     expect(map.eventId).toBe(eventId);
     expect(map.seats).toHaveLength(seatCount);
+    expect(map.seats.filter((seat) => seat.status !== "AVAILABLE")).toEqual([]);
     expect(map.seats[0]).toEqual({
       id: expect.any(String),
       section: expect.any(String),
@@ -126,12 +129,22 @@ describe("seats.map", () => {
   test("reflects a seat that is no longer available", async () => {
     const [first] = await caller().events.list();
     const eventId = first?.id ?? "";
-    const seat = await db().seat.findFirstOrThrow({ where: { eventId } });
+    await resetSeats(eventId);
+    // Chosen explicitly: the last seat in map order.
+    const seat = (await caller().seats.map({ eventId })).seats.at(-1);
+    if (seat === undefined) {
+      throw new Error("the event has no seats");
+    }
     await db().seat.update({ where: { id: seat.id }, data: { status: "SOLD" } });
 
-    const map = await caller().seats.map({ eventId });
+    try {
+      const map = await caller().seats.map({ eventId });
 
-    expect(map.seats.find((candidate) => candidate.id === seat.id)?.status).toBe("SOLD");
+      expect(map.seats.find((candidate) => candidate.id === seat.id)?.status).toBe("SOLD");
+      expect(map.seats.filter((candidate) => candidate.status === "SOLD")).toHaveLength(1);
+    } finally {
+      await resetSeats(eventId);
+    }
   });
 
   test("an unknown event id is NOT_FOUND", async () => {

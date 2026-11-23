@@ -4,6 +4,7 @@ import { neonConfig } from "@neondatabase/serverless";
 import { createPrismaClient, type DatabaseDriver } from "@ticketarena/db";
 import { describe, expect, test } from "vitest";
 import { BookingBusyError, type BookingMetric, createBookingService } from "./booking-service";
+import { recordingMetrics } from "./testing";
 
 // pg-pool's (and the Neon pool's) wording when opening a connection outlives
 // `connectionTimeoutMillis`; a connection failure, unlike the queue timeout that means saturation.
@@ -37,17 +38,12 @@ async function silentListener(): Promise<{ port: number; close(): Promise<void> 
 /** Holds through a service whose database never answers; the outcome, with how long it took. */
 async function holdAgainst(connectionString: string, driver: DatabaseDriver) {
   const db = createPrismaClient({ connectionString, driver, acquireTimeoutMs: ACQUIRE_TIMEOUT_MS });
-  const counted: BookingMetric[] = [];
-  const service = createBookingService({
+  const recorder = recordingMetrics<BookingMetric>();
+  const booking = createBookingService({
     db,
     clock: { now: () => new Date() },
     newId: randomUUID,
-    metrics: {
-      increment: (metric) => {
-        counted.push(metric);
-        return Promise.resolve();
-      },
-    },
+    metrics: recorder.metrics,
   });
   const startedAt = Date.now();
   let timer: NodeJS.Timeout | undefined;
@@ -59,13 +55,13 @@ async function holdAgainst(connectionString: string, driver: DatabaseDriver) {
   });
   try {
     const error = await Promise.race([
-      service.holdSeats({ sessionId: "s", buyerKey: "s" }, randomUUID(), [randomUUID()]).then(
+      booking.holdSeats({ sessionId: "s", buyerKey: "s" }, randomUUID(), [randomUUID()]).then(
         () => new Error("the hold succeeded against a silent server"),
         (e: unknown) => e,
       ),
       deadline,
     ]);
-    return { error, elapsedMs: Date.now() - startedAt, counted };
+    return { error, elapsedMs: Date.now() - startedAt, counted: recorder.names() };
   } finally {
     clearTimeout(timer);
     await db.$disconnect().catch(() => undefined);

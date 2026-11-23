@@ -4,50 +4,36 @@ import {
   orderExpiredPayloadSchema,
   paymentRefundRequestedPayloadSchema,
 } from "@ticketarena/contracts";
-import {
-  createPrismaClient,
-  type PrismaClient,
-  seedCatalog,
-  type TransactionClient,
-} from "@ticketarena/db";
+import type { TransactionClient } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { type Buyer, createBookingService } from "./booking-service";
+import { describe, expect, test } from "vitest";
+import type { Buyer } from "./booking-service";
 import { createPaymentSagaHandler, type SagaMetric } from "./payment-saga";
+import {
+  block,
+  bookingTestBed,
+  freshBuyer,
+  latch,
+  NOW,
+  recordingMetrics,
+  rowLock,
+  waitForPg,
+  waitUntilBlocked,
+} from "./testing";
 
 const database = setupTestDatabase();
-let prisma: PrismaClient | undefined;
+const { db, at, freeSeats } = bookingTestBed(database);
 
-function db(): PrismaClient {
-  prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
-  return prisma;
-}
-
-const PLACED_AT = new Date("2027-03-01T12:00:00.000Z");
+const PLACED_AT = NOW;
 const ON_TIME = new Date("2027-03-01T12:04:00.000Z");
 const LATE = new Date("2027-03-01T12:05:01.000Z");
-const alice: Buyer = { sessionId: "a".repeat(32), buyerKey: "a".repeat(32) };
 const saga = createPaymentSagaHandler({ clock: { now: () => ON_TIME }, newId: randomUUID });
 
-beforeAll(async () => {
-  await seedCatalog(db(), PLACED_AT);
-});
-
-afterAll(async () => {
-  await prisma?.$disconnect();
-});
-
-async function pendingOrder(buyer: Buyer = alice) {
-  const event = await db().event.findFirstOrThrow({ where: { demo: true } });
-  const seat = await db().seat.findFirstOrThrow({
-    where: { eventId: event.id, status: "AVAILABLE" },
-    orderBy: { id: "asc" },
-  });
-  const booking = createBookingService({
-    db: db(),
-    clock: { now: () => PLACED_AT },
-    newId: randomUUID,
-  });
+async function pendingOrder(buyer: Buyer = freshBuyer()) {
+  const { eventId, seatIds } = await freeSeats(1);
+  const seat = { id: seatIds[0] ?? "" };
+  const event = { id: eventId };
+  const booking = at(PLACED_AT);
   const hold = await booking.holdSeats(buyer, event.id, [seat.id]);
   const order = await booking.placeOrder(
     buyer,
@@ -113,11 +99,7 @@ function refundRequestsFor(paymentId: string) {
 /** An order the sweeper expired at its deadline plus grace; its seat is free again. */
 async function expiredOrder(buyer: Buyer) {
   const pending = await pendingOrder(buyer);
-  const sweeper = createBookingService({
-    db: db(),
-    clock: { now: () => new Date(pending.order.paymentDeadline.getTime() + 61_000) },
-    newId: randomUUID,
-  });
+  const sweeper = at(new Date(pending.order.paymentDeadline.getTime() + 61_000));
   await sweeper.sweepExpired();
   return pending;
 }
@@ -171,10 +153,7 @@ describe("payment saga: payment.succeeded", () => {
   });
 
   test("leaves neither CONFIRMED nor the APPLIED row when a failure follows the ledger insert", async () => {
-    const { order, seatId } = await pendingOrder({
-      sessionId: "b".repeat(32),
-      buyerKey: "b".repeat(32),
-    });
+    const { order, seatId } = await pendingOrder(freshBuyer());
     const { message } = paymentSucceeded(order);
 
     await expect(
@@ -197,7 +176,7 @@ describe("payment saga: payment.succeeded", () => {
   });
 
   test("changes nothing when the same payment is delivered again under a new event id", async () => {
-    const { order } = await pendingOrder({ sessionId: "c".repeat(32), buyerKey: "c".repeat(32) });
+    const { order } = await pendingOrder(freshBuyer());
     const first = paymentSucceeded(order);
     const second = {
       ...first.message,
@@ -213,10 +192,7 @@ describe("payment saga: payment.succeeded", () => {
   });
 
   test("expires the order on a capture after the deadline, frees its seats and requests a refund in one transaction", async () => {
-    const { order, seatId } = await pendingOrder({
-      sessionId: "d".repeat(32),
-      buyerKey: "d".repeat(32),
-    });
+    const { order, seatId } = await pendingOrder(freshBuyer());
     const { paymentId, message } = paymentSucceeded(order, { capturedAt: LATE.toISOString() });
     const { emit, emitted } = recordingEmit();
 
@@ -273,10 +249,7 @@ describe("payment saga: payment.succeeded", () => {
   });
 
   test("rolls the late-capture expiry back when the refund request cannot be written", async () => {
-    const { order, seatId } = await pendingOrder({
-      sessionId: "p".repeat(32),
-      buyerKey: "p".repeat(32),
-    });
+    const { order, seatId } = await pendingOrder(freshBuyer());
     const { message } = paymentSucceeded(order, { capturedAt: LATE.toISOString() });
 
     await expect(
@@ -354,14 +327,8 @@ describe("payment saga: payment.succeeded", () => {
     const duplicate = {
       data: JSON.stringify({ ...JSON.parse(first.message.data), id: randomUUID() }),
     };
-    let release: () => void = () => undefined;
-    const released = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let requested: () => void = () => undefined;
-    const firstRequested = new Promise<void>((resolve) => {
-      requested = resolve;
-    });
+    const released = latch();
+    const firstRequested = latch();
 
     // The first transaction writes its refund request and then stays open, so the duplicate
     // runs while that request is still uncommitted and invisible to it.
@@ -370,34 +337,39 @@ describe("payment saga: payment.succeeded", () => {
         saga(tx, first.message, {
           emit: async (event) => {
             await outboxEmit(tx)(event);
-            requested();
-            await released;
+            firstRequested.open();
+            await released.opened;
           },
         }),
       { timeout: 30_000 },
     );
-    await firstRequested;
+    winner.catch(() => undefined);
+    await Promise.race([firstRequested.opened, winner]);
     const racer = db().$transaction((tx) => saga(tx, duplicate, { emit: outboxEmit(tx) }), {
       timeout: 30_000,
     });
-    // Wait (by condition, not by time) until the duplicate is blocked behind the first.
-    for (;;) {
-      const [waiting] = await db().$queryRaw<{ count: bigint }[]>`
-        SELECT count(*) AS "count" FROM pg_stat_activity
-        WHERE "datname" = current_database() AND "wait_event_type" = 'Lock'`;
-      if ((waiting?.count ?? 0n) > 0n) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 20));
+    try {
+      // Until the duplicate is blocked behind the first (by Postgres state, not by time).
+      await waitForPg(
+        "the duplicate waiting on a lock",
+        async () => {
+          const [waiting] = await db().$queryRaw<{ count: bigint }[]>`
+            SELECT count(*) AS "count" FROM pg_stat_activity
+            WHERE "datname" = current_database() AND "wait_event_type" = 'Lock'`;
+          return (waiting?.count ?? 0n) > 0n ? true : undefined;
+        },
+        { against: Promise.race([racer, winner]) },
+      );
+    } finally {
+      released.open();
     }
-    release();
     await Promise.all([winner, racer]);
 
     expect(await refundRequestsFor(first.paymentId)).toHaveLength(1);
   });
 
   test("requests a refund for a payment whose amount differs from the order total rather than confirming it", async () => {
-    const { order } = await pendingOrder({ sessionId: "f".repeat(32), buyerKey: "f".repeat(32) });
+    const { order } = await pendingOrder(freshBuyer());
     const { paymentId, message } = paymentSucceeded(order, { amount: order.totalMinor + 1 });
     const { emit, emitted } = recordingEmit();
 
@@ -415,7 +387,7 @@ describe("payment saga: payment.succeeded", () => {
   });
 
   test("requests a refund for a new payment on an already confirmed order rather than applying it twice", async () => {
-    const { order } = await pendingOrder({ sessionId: "g".repeat(32), buyerKey: "g".repeat(32) });
+    const { order } = await pendingOrder(freshBuyer());
     await db().$transaction((tx) => saga(tx, paymentSucceeded(order).message, recordingEmit()));
     const second = paymentSucceeded(order);
     const { emit, emitted } = recordingEmit();
@@ -438,10 +410,7 @@ describe("payment saga: payment.succeeded", () => {
   });
 
   test("never treats a zero-row seat update as success: a seat no longer IN_CHECKOUT rolls the confirmation back", async () => {
-    const { order, seatId } = await pendingOrder({
-      sessionId: "h".repeat(32),
-      buyerKey: "h".repeat(32),
-    });
+    const { order, seatId } = await pendingOrder(freshBuyer());
     await db().seat.update({ where: { id: seatId }, data: { status: "AVAILABLE" } });
     const { message } = paymentSucceeded(order);
 
@@ -455,7 +424,7 @@ describe("payment saga: payment.succeeded", () => {
   });
 
   test("reads the clock once per transaction and stamps order.confirmed with that T", async () => {
-    const { order } = await pendingOrder({ sessionId: "i".repeat(32), buyerKey: "i".repeat(32) });
+    const { order } = await pendingOrder(freshBuyer());
     let reads = 0;
     const tickingSaga = createPaymentSagaHandler({
       clock: { now: () => new Date(ON_TIME.getTime() + 1_000 * reads++) },
@@ -469,10 +438,7 @@ describe("payment saga: payment.succeeded", () => {
     expect(emitted).toMatchObject([{ occurredAt: ON_TIME.toISOString() }]);
   });
   test("reads T only after the order's seat locks are held (ADR 0005)", async () => {
-    const { order, seatId } = await pendingOrder({
-      sessionId: "j".repeat(32),
-      buyerKey: "j".repeat(32),
-    });
+    const { order, seatId } = await pendingOrder(freshBuyer());
     let reads = 0;
     const lockedSaga = createPaymentSagaHandler({
       clock: {
@@ -483,42 +449,23 @@ describe("payment saga: payment.succeeded", () => {
       },
       newId: randomUUID,
     });
-    let release: () => void = () => undefined;
-    const released = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let seatLocked: () => void = () => undefined;
-    const locked = new Promise<void>((resolve) => {
-      seatLocked = resolve;
-    });
-    // Another transaction holds the seat row lock, so the saga must block on it.
-    const holder = db().$transaction(
-      async (tx) => {
-        await tx.$queryRaw`SELECT "id" FROM "seats" WHERE "id" = ${seatId}::uuid FOR UPDATE`;
-        seatLocked();
-        await released;
-      },
-      { timeout: 30_000 },
-    );
-    await locked;
+    // A blocker session holds the seat row lock, so the saga must block on it.
+    const holder = await block(db(), rowLock("seats", [seatId]), { what: "the seat lock" });
 
     const confirming = db().$transaction(
       (tx) => lockedSaga(tx, paymentSucceeded(order).message, recordingEmit()),
       { timeout: 30_000 },
     );
-    // Wait (by condition, not by time) until the saga is blocked on the seat lock.
-    for (;;) {
-      const [waiting] = await db().$queryRaw<{ count: bigint }[]>`
-        SELECT count(*) AS "count" FROM pg_stat_activity
-        WHERE "datname" = current_database() AND "wait_event_type" = 'Lock' AND "query" ILIKE '%FROM "seats"%FOR UPDATE%'`;
-      if ((waiting?.count ?? 0n) > 0n) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 20));
+    let readsWhileBlocked: number | undefined;
+    try {
+      await waitUntilBlocked(db(), holder.pid, {
+        what: "the saga waiting on the seat lock",
+        against: confirming,
+      });
+      readsWhileBlocked = reads;
+    } finally {
+      await holder.release();
     }
-    const readsWhileBlocked = reads;
-    release();
-    await holder;
     await confirming;
 
     expect(readsWhileBlocked).toBe(0);
@@ -547,24 +494,9 @@ function paymentFailed(orderId: string, final: boolean) {
   };
 }
 
-function recordingMetrics() {
-  const counted: { metric: string; eventId: string }[] = [];
-  return {
-    counted,
-    metrics: {
-      increment: async (metric: SagaMetric, eventId: string) => {
-        counted.push({ metric, eventId });
-      },
-    },
-  };
-}
-
 describe("payment saga: payment.failed", () => {
   test("cancels a PENDING_PAYMENT order on a final failure, frees its seats and emits order.cancelled in one transaction", async () => {
-    const { order, seatId } = await pendingOrder({
-      sessionId: "k".repeat(32),
-      buyerKey: "k".repeat(32),
-    });
+    const { order, seatId } = await pendingOrder(freshBuyer());
     const { emit, emitted } = recordingEmit();
 
     const outcome = await db().$transaction((tx) =>
@@ -599,10 +531,7 @@ describe("payment saga: payment.failed", () => {
   });
 
   test("rolls the cancellation back when the outbox write fails: the order stays open and its seats stay in checkout", async () => {
-    const { order, seatId } = await pendingOrder({
-      sessionId: "l".repeat(32),
-      buyerKey: "l".repeat(32),
-    });
+    const { order, seatId } = await pendingOrder(freshBuyer());
 
     await expect(
       db().$transaction((tx) =>
@@ -623,11 +552,8 @@ describe("payment saga: payment.failed", () => {
   });
 
   test("leaves the order and seats alone on a non-final failure, writes no ledger row and counts the failed attempt", async () => {
-    const { order, seatId, eventId } = await pendingOrder({
-      sessionId: "m".repeat(32),
-      buyerKey: "m".repeat(32),
-    });
-    const { counted, metrics } = recordingMetrics();
+    const { order, seatId, eventId } = await pendingOrder(freshBuyer());
+    const { counted, metrics } = recordingMetrics<SagaMetric>();
     const countingSaga = createPaymentSagaHandler({
       clock: { now: () => ON_TIME },
       newId: randomUUID,
@@ -652,7 +578,7 @@ describe("payment saga: payment.failed", () => {
   });
 
   test("still settles a non-final failure when the metric cannot be recorded", async () => {
-    const { order } = await pendingOrder({ sessionId: "n".repeat(32), buyerKey: "n".repeat(32) });
+    const { order } = await pendingOrder(freshBuyer());
     const failingSaga = createPaymentSagaHandler({
       clock: { now: () => ON_TIME },
       newId: randomUUID,
@@ -669,10 +595,7 @@ describe("payment saga: payment.failed", () => {
   });
 
   test("does not cancel a confirmed order on a final failure", async () => {
-    const { order, seatId } = await pendingOrder({
-      sessionId: "o".repeat(32),
-      buyerKey: "o".repeat(32),
-    });
+    const { order, seatId } = await pendingOrder(freshBuyer());
     await db().$transaction((tx) => saga(tx, paymentSucceeded(order).message, recordingEmit()));
     const { emit, emitted } = recordingEmit();
 
@@ -701,11 +624,7 @@ describe("payment saga: payment.succeeded on a settled order", () => {
   ] as const)(
     "requests a refund for a capture (%s) on an EXPIRED order and never reclaims its free seats (AT-20)",
     async (_when, capturedAt, reason) => {
-      const char = reason === "late_delivery" ? "q" : "r";
-      const { order, seatId } = await expiredOrder({
-        sessionId: char.repeat(32),
-        buyerKey: char.repeat(32),
-      });
+      const { order, seatId } = await expiredOrder(freshBuyer());
       const { paymentId, message } = paymentSucceeded(order, {
         capturedAt: capturedAt.toISOString(),
       });
@@ -744,10 +663,7 @@ describe("payment saga: payment.succeeded on a settled order", () => {
   );
 
   test("requests a refund for a capture on a CANCELLED order and leaves its seats alone", async () => {
-    const { order, seatId } = await pendingOrder({
-      sessionId: "s".repeat(32),
-      buyerKey: "s".repeat(32),
-    });
+    const { order, seatId } = await pendingOrder(freshBuyer());
     await db().$transaction((tx) => saga(tx, paymentFailed(order.id, true), recordingEmit()));
     const { paymentId, message } = paymentSucceeded(order);
     const { emit, emitted } = recordingEmit();
@@ -767,7 +683,7 @@ describe("payment saga: payment.succeeded on a settled order", () => {
   });
 
   test("requests one refund when the same payment reaches a settled order twice", async () => {
-    const { order } = await expiredOrder({ sessionId: "t".repeat(32), buyerKey: "t".repeat(32) });
+    const { order } = await expiredOrder(freshBuyer());
     const first = paymentSucceeded(order, { capturedAt: LATE.toISOString() });
     const duplicate = {
       data: JSON.stringify({ ...JSON.parse(first.message.data), id: randomUUID() }),
@@ -783,11 +699,8 @@ describe("payment saga: payment.succeeded on a settled order", () => {
   });
 
   test("counts late_delivery_refund for an on-time capture delivered after the order expired", async () => {
-    const { order, eventId } = await expiredOrder({
-      sessionId: "u".repeat(32),
-      buyerKey: "u".repeat(32),
-    });
-    const { counted, metrics } = recordingMetrics();
+    const { order, eventId } = await expiredOrder(freshBuyer());
+    const { counted, metrics } = recordingMetrics<SagaMetric>();
     const countingSaga = createPaymentSagaHandler({
       clock: { now: () => ON_TIME },
       newId: randomUUID,
@@ -841,10 +754,7 @@ function ledgerOf(orderId: string) {
 
 describe("payment saga: payment.refunded", () => {
   test("moves a REFUND_REQUESTED ledger row to REFUNDED, leaves the order alone and emits nothing", async () => {
-    const { order, paymentId } = await refundRequestedOrder({
-      sessionId: "v".repeat(32),
-      buyerKey: "v".repeat(32),
-    });
+    const { order, paymentId } = await refundRequestedOrder(freshBuyer());
     const { emit, emitted } = recordingEmit();
 
     const outcome = await db().$transaction((tx) =>
@@ -860,10 +770,7 @@ describe("payment saga: payment.refunded", () => {
   });
 
   test("moves a MANUAL_REVIEW ledger row to REFUNDED", async () => {
-    const { order, paymentId } = await refundRequestedOrder({
-      sessionId: "w".repeat(32),
-      buyerKey: "w".repeat(32),
-    });
+    const { order, paymentId } = await refundRequestedOrder(freshBuyer());
     await db().orderPayment.update({
       where: { paymentId },
       data: { disposition: "MANUAL_REVIEW" },
@@ -877,7 +784,7 @@ describe("payment saga: payment.refunded", () => {
   });
 
   test("records the refund of an amount mismatch on a still PENDING_PAYMENT order", async () => {
-    const { order } = await pendingOrder({ sessionId: "x".repeat(32), buyerKey: "x".repeat(32) });
+    const { order } = await pendingOrder(freshBuyer());
     const mismatch = paymentSucceeded(order, { amount: order.totalMinor + 1 });
     await db().$transaction((tx) => saga(tx, mismatch.message, recordingEmit()));
 
@@ -895,10 +802,7 @@ describe("payment saga: payment.refunded", () => {
   });
 
   test("acks a repeated payment.refunded without changing the ledger again", async () => {
-    const { order, paymentId } = await refundRequestedOrder({
-      sessionId: "y".repeat(32),
-      buyerKey: "y".repeat(32),
-    });
+    const { order, paymentId } = await refundRequestedOrder(freshBuyer());
     for (let delivery = 0; delivery < 2; delivery += 1) {
       const outcome = await db().$transaction((tx) =>
         saga(tx, paymentRefunded(order.id, paymentId), recordingEmit()),
@@ -910,10 +814,7 @@ describe("payment saga: payment.refunded", () => {
   });
 
   test("returns poison for a payment.refunded whose paymentId is not in the order's ledger", async () => {
-    const { order, paymentId } = await refundRequestedOrder({
-      sessionId: "z".repeat(32),
-      buyerKey: "z".repeat(32),
-    });
+    const { order, paymentId } = await refundRequestedOrder(freshBuyer());
 
     const outcome = await db().$transaction((tx) =>
       saga(tx, paymentRefunded(order.id, randomUUID()), recordingEmit()),

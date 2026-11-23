@@ -1,45 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { type Buyer, createBookingService } from "./index";
+import { describe, expect, test } from "vitest";
+import type { BookingMetric } from "./booking-service";
+import {
+  type Blocker,
+  block,
+  bookingTestBed,
+  buyer,
+  buyerLock,
+  NOW,
+  recordingMetrics,
+  waitUntilBlocked,
+} from "./testing";
 
 const database = setupTestDatabase();
-let prisma: PrismaClient | undefined;
-
-function db(): PrismaClient {
-  prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
-  return prisma;
-}
-
-const NOW = new Date("2027-03-01T12:00:00.000Z");
-
-function buyer(n: number): Buyer {
-  const key = n.toString(16).padStart(32, "0");
-  return { sessionId: key, buyerKey: key };
-}
-
-beforeAll(async () => {
-  await seedCatalog(db(), NOW);
-});
-
-afterAll(async () => {
-  await prisma?.$disconnect();
-});
-
-async function freeSeats(count: number) {
-  const event = await db().event.findFirstOrThrow({ where: { demo: true } });
-  const seats = await db().seat.findMany({
-    where: { eventId: event.id, status: "AVAILABLE" },
-    orderBy: { id: "asc" },
-    take: count,
-  });
-  return { eventId: event.id, seatIds: seats.map((seat) => seat.id) };
-}
-
-function service() {
-  return createBookingService({ db: db(), clock: { now: () => NOW }, newId: randomUUID });
-}
+const { db, at, freeSeats, service } = bookingTestBed(database);
 
 describe("buyer limit", () => {
   test("two parallel 4-seat holds by one buyer: one wins, one is LIMIT_EXCEEDED", async () => {
@@ -78,18 +53,8 @@ describe("buyer limit", () => {
 
 describe("buyer limit counting", () => {
   test("a refused limit is counted as limit_exceeded", async () => {
-    const counted: string[] = [];
-    const counting = createBookingService({
-      db: db(),
-      clock: { now: () => NOW },
-      newId: randomUUID,
-      metrics: {
-        increment: (metric) => {
-          counted.push(metric);
-          return Promise.resolve();
-        },
-      },
-    });
+    const recorder = recordingMetrics<BookingMetric>();
+    const counting = service({ metrics: recorder.metrics });
     const first = await freeSeats(4);
     await counting.holdSeats(buyer(20), first.eventId, first.seatIds);
     const more = await freeSeats(3);
@@ -97,17 +62,13 @@ describe("buyer limit counting", () => {
     await expect(counting.holdSeats(buyer(20), more.eventId, more.seatIds)).rejects.toMatchObject({
       code: "LIMIT_EXCEEDED",
     });
-    expect(counted).toEqual(["hold_ok", "limit_exceeded"]);
+    expect(recorder.names()).toEqual(["hold_ok", "limit_exceeded"]);
   });
 
   test("seats of an expired hold no longer count", async () => {
     const first = await freeSeats(6);
     await service().holdSeats(buyer(21), first.eventId, first.seatIds);
-    const later = createBookingService({
-      db: db(),
-      clock: { now: () => new Date(NOW.getTime() + 11 * 60_000) },
-      newId: randomUUID,
-    });
+    const later = at(new Date(NOW.getTime() + 11 * 60_000));
     const more = await freeSeats(1);
 
     const hold = await later.holdSeats(buyer(21), more.eventId, more.seatIds);
@@ -173,56 +134,17 @@ describe("overlapping multi-seat holds (AT-02)", () => {
 
 describe("buyer lock order (ADR 0005)", () => {
   /**
-   * Holds the buyer's advisory lock in a foreign transaction until `release` is called, so the
-   * service's requests for that buyer queue behind it where the test can observe them.
+   * Resolves once `count` requests wait behind `lock` on the buyer lock (the only lock it holds).
+   * Postgres reports the wait itself, so no timing assumption is involved. A request that skipped
+   * the buyer lock never shows up and the wait fails at its deadline; one that fails or finishes
+   * first ends the wait at once.
    */
-  async function holdBuyerLock(eventId: string, buyerKey: string) {
-    let release: () => void = () => undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
+  const queuedOnBuyerLock = (lock: Blocker, count: number, against: Promise<unknown>) =>
+    waitUntilBlocked(db(), lock.pid, {
+      what: `${count} request(s) queued on the buyer lock`,
+      against,
+      count,
     });
-    let locked: (pid: number) => void = () => undefined;
-    const acquired = new Promise<number>((resolve) => {
-      locked = resolve;
-    });
-    const finished = db().$transaction(
-      async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`${eventId}:${buyerKey}`}, 0))`;
-        const [backend] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
-        if (backend === undefined) {
-          throw new Error("pg_backend_pid() returned no row");
-        }
-        locked(backend.pid);
-        await gate;
-      },
-      { timeout: 30_000 },
-    );
-    const lockerPid = await acquired;
-    return {
-      /**
-       * Resolves once `count` backends wait, behind this transaction, on an advisory lock: the
-       * buyer lock. Postgres reports the wait itself, so no timing assumption is involved. A
-       * request that skipped the buyer lock never shows up here and the poll times out.
-       */
-      waitForBuyerLockWaiters: (count: number) =>
-        expect
-          .poll(
-            async () => {
-              const [row] = await db().$queryRaw<{ waiting: bigint }[]>`
-                SELECT count(DISTINCT pid) AS waiting FROM pg_locks
-                WHERE locktype = 'advisory' AND NOT granted
-                  AND ${lockerPid}::int = ANY(pg_blocking_pids(pid))`;
-              return Number(row?.waiting ?? 0);
-            },
-            { timeout: 10_000 },
-          )
-          .toBe(count),
-      release: async () => {
-        release();
-        await finished;
-      },
-    };
-  }
 
   /** NOWAIT fails at once if a request queued on the buyer lock already row-locked any of these. */
   function lockRowsNowait(holdIds: string[], seatIds: string[]) {
@@ -237,12 +159,14 @@ describe("buyer lock order (ADR 0005)", () => {
 
   test("holdSeats waits on the buyer lock before touching any seat row", async () => {
     const { eventId, seatIds } = await freeSeats(2);
-    const lock = await holdBuyerLock(eventId, buyer(30).buyerKey);
+    const lock = await block(db(), buyerLock(eventId, buyer(30).buyerKey), {
+      what: "the buyer lock",
+    });
 
     // Settled up front so a failed check below cannot leave the request's rejection unhandled.
     const outcome = Promise.allSettled([service().holdSeats(buyer(30), eventId, seatIds)]);
     try {
-      await lock.waitForBuyerLockWaiters(1);
+      await queuedOnBuyerLock(lock, 1, outcome);
       expect(await lockRowsNowait([], seatIds)).toEqual({ holds: 0, seats: 2 });
     } finally {
       await lock.release();
@@ -253,13 +177,15 @@ describe("buyer lock order (ADR 0005)", () => {
   test("placeOrder waits on the buyer lock before locking the hold or its seats", async () => {
     const { eventId, seatIds } = await freeSeats(1);
     const hold = await service().holdSeats(buyer(31), eventId, seatIds);
-    const lock = await holdBuyerLock(eventId, buyer(31).buyerKey);
+    const lock = await block(db(), buyerLock(eventId, buyer(31).buyerKey), {
+      what: "the buyer lock",
+    });
 
     const outcome = Promise.allSettled([
       service().placeOrder(buyer(31), hold.id, { email: "a@example.com" }, randomUUID()),
     ]);
     try {
-      await lock.waitForBuyerLockWaiters(1);
+      await queuedOnBuyerLock(lock, 1, outcome);
       expect(await lockRowsNowait([hold.id], seatIds)).toEqual({ holds: 1, seats: 1 });
     } finally {
       await lock.release();
@@ -272,8 +198,12 @@ describe("buyer lock order (ADR 0005)", () => {
 
   // TD-026: a hold and an order of one buyer, in flight together, queue on the buyer lock before
   // taking any row lock, so each decides on the other's committed result. Each case fixes which
-  // request queues first (Postgres grants the waiters of one advisory lock in arrival order), so
-  // both orders run, and both must give the same outcome.
+  // request queues first, so both orders run, and both must give the same outcome.
+  // TD-079: Postgres grants the waiters of one advisory lock in arrival order, but does not
+  // document it, so each case also checks which request went first. Both read the clock right
+  // after taking their locks (ADR 0005's linearization point), and the second can take the buyer
+  // lock only once the first has committed or rolled back: the order of those two reads is the
+  // order in which the requests committed.
   test.each([
     { held: 1, more: 1, refused: false, queuedFirst: "order" },
     { held: 1, more: 1, refused: false, queuedFirst: "hold" },
@@ -286,14 +216,32 @@ describe("buyer lock order (ADR 0005)", () => {
       const first = await freeSeats(held);
       const hold = await service().holdSeats(who, first.eventId, first.seatIds);
       const extra = await freeSeats(more);
-      const lock = await holdBuyerLock(first.eventId, who.buyerKey);
+      const lock = await block(db(), buyerLock(first.eventId, who.buyerKey), {
+        what: "the buyer lock",
+      });
 
+      // Every clock read of either request, in one sequence; each request's last read is the one
+      // it takes after its locks.
+      const reads: ("order" | "hold")[] = [];
+      const clockOf = (request: "order" | "hold") => ({
+        now: () => {
+          reads.push(request);
+          return NOW;
+        },
+      });
       const startOrder = () =>
         Promise.allSettled([
-          service().placeOrder(who, hold.id, { email: "a@example.com" }, randomUUID()),
+          service({ clock: clockOf("order") }).placeOrder(
+            who,
+            hold.id,
+            { email: "a@example.com" },
+            randomUUID(),
+          ),
         ]);
       const startHold = () =>
-        Promise.allSettled([service().holdSeats(who, extra.eventId, extra.seatIds)]);
+        Promise.allSettled([
+          service({ clock: clockOf("hold") }).holdSeats(who, extra.eventId, extra.seatIds),
+        ]);
       const started: {
         order?: ReturnType<typeof startOrder>;
         hold?: ReturnType<typeof startHold>;
@@ -301,14 +249,14 @@ describe("buyer lock order (ADR 0005)", () => {
       try {
         if (queuedFirst === "order") {
           started.order = startOrder();
-          await lock.waitForBuyerLockWaiters(1);
+          await queuedOnBuyerLock(lock, 1, started.order);
           started.hold = startHold();
         } else {
           started.hold = startHold();
-          await lock.waitForBuyerLockWaiters(1);
+          await queuedOnBuyerLock(lock, 1, started.hold);
           started.order = startOrder();
         }
-        await lock.waitForBuyerLockWaiters(2);
+        await queuedOnBuyerLock(lock, 2, Promise.race([started.order, started.hold]));
         expect(await lockRowsNowait([hold.id], [...first.seatIds, ...extra.seatIds])).toEqual({
           holds: 1,
           seats: held + more,
@@ -319,6 +267,9 @@ describe("buyer lock order (ADR 0005)", () => {
       const [placed] = (await started.order) ?? [];
       const [again] = (await started.hold) ?? [];
 
+      expect(reads.lastIndexOf(queuedFirst)).toBeLessThan(
+        reads.lastIndexOf(queuedFirst === "order" ? "hold" : "order"),
+      );
       expect(placed).toMatchObject({ status: "fulfilled", value: { status: "PENDING_PAYMENT" } });
       expect(
         await db().seat.count({ where: { id: { in: first.seatIds }, status: "IN_CHECKOUT" } }),

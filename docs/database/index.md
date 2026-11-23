@@ -230,8 +230,29 @@ names for `23505`/`42703`, which the classifier does not read).
 Tests fill a one-connection pool with `occupy` (`@ticketarena/booking/testing`, never the package's
 main entry): it resolves after a query has run inside the occupying transaction, and retries any
 failure before that point, up to a deadline, because a short acquire timeout also bounds opening
-the pool's first connection. The same subpath has the lock and wait helpers the timeout tests use
-(`block`, `blockedBy`, `waitFor`, `latch`, `testTrigger`).
+the pool's first connection. The same subpath holds every other helper the real-Postgres tests
+share, so no test file keeps its own copy:
+
+- Lifecycle: `testClients(database)` gives each test its own client (`db()`), plus any extra
+  clients it `open(options)`s, and disconnects them all after the test; `withClient` scopes a
+  client to one piece of work (seeding in `beforeAll`). `bookingTestBed(database)` seeds the
+  catalog and adds `service(deps)`, `at(when)` and `freeSeats(count)`. No client outlives a test.
+- Fixtures: `NOW`, `buyer(n)`, `freshBuyer()`, `freeSeats`, `recordingMetrics`, `failureOf`, and
+  `slowStart` (the one injected delay, of an occupier's start).
+- Synchronisation by Postgres state, never by time: `block(db, lock)` holds `buyerLock(...)` or
+  `rowLock(table, ids)` in a blocker session until `release()`, with named deadlines on taking
+  and on holding the lock, and reports the blocker's own failure on release;
+  `waitUntilBlocked`/`blockedBy` read `pg_blocking_pids`; `waitForPg(what, probe, { against })`
+  polls a condition to a named deadline and stops at once when the call under test settles;
+  `settledUnlessBlocked` tells a call that finished from one Postgres shows blocked; `latch()`.
+- `withTrigger(db, spec, body)` installs a uniquely named trigger (with an optional scratch table
+  and a call counter that survives rollback) and drops every object it made, even when the body
+  throws.
+
+`packages/db` cannot import these (booking depends on it), so `seed.test.ts` opens and
+disconnects a client inside each test. `catalog.test.ts` and `seed.test.ts` also run with their
+tests shuffled under a fixed seed (a `*-shuffled` Vitest project in each package's config), which
+proves they do not depend on each other's writes.
 
 ### Demo reset
 

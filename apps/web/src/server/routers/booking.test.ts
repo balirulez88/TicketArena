@@ -1,8 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { DEFAULT_BOOKING_TIMEOUTS } from "@ticketarena/booking";
-import { type OccupyOptions, occupy } from "@ticketarena/booking/testing";
+import {
+  freeSeats,
+  NOW,
+  type OccupyOptions,
+  occupy,
+  slowStart,
+  testClients,
+  withClient,
+} from "@ticketarena/booking/testing";
 import { silentLogger } from "@ticketarena/contracts";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase, setupTestRedis } from "@ticketarena/test-infra";
 import { createRedisQueueStore } from "@ticketarena/waiting-room";
 import { SignJWT } from "jose";
@@ -15,14 +23,8 @@ import { createCaller } from "./_app";
 const database = setupTestDatabase();
 const redis = setupTestRedis();
 const redisClient = createClient({ url: redis.url });
-let prisma: PrismaClient | undefined;
+const { db, open } = testClients(database);
 
-function db(): PrismaClient {
-  prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
-  return prisma;
-}
-
-const NOW = new Date("2027-03-01T12:00:00.000Z");
 // Fresh per test: the buyer limit counts a buyer's seats across the shared database.
 let alice: Principal = { kind: "guest", sessionId: "a".repeat(32) };
 const bob: Principal = { kind: "guest", sessionId: "b".repeat(32) };
@@ -73,33 +75,27 @@ async function demoEventId(): Promise<string> {
   return (await db().event.findFirstOrThrow({ where: { demo: true } })).id;
 }
 
-async function availableSeat() {
-  const event = await db().event.findFirstOrThrow({ where: { demo: true } });
-  const seat = await db().seat.findFirstOrThrow({
-    where: { eventId: event.id, status: "AVAILABLE" },
-  });
-  return { eventId: event.id, seatId: seat.id };
-}
+beforeAll(async () => {
+  await redisClient.connect();
+  await withClient(database, (seeding) => seedCatalog(seeding, NOW));
+});
 
 beforeEach(async () => {
   alice = { kind: "guest", sessionId: randomUUID().replaceAll("-", "") };
-  await admit(alice, await demoEventId());
+  const eventId = await demoEventId();
+  await admit(alice, eventId);
+  // Re-joining keeps an admission; bob is admitted with the test's own client.
+  await admit(bob, eventId);
 });
 
-beforeAll(async () => {
-  await redisClient.connect();
-  await seedCatalog(db(), NOW);
-  await admit(bob, await demoEventId());
-});
-
-afterAll(async () => {
+afterAll(() => {
   redisClient.destroy();
-  await prisma?.$disconnect();
 });
 
 describe("booking.holdSeats", () => {
   test("holds a seat and returns the hold with its expiry", async () => {
-    const { eventId, seatId } = await availableSeat();
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const seatId = seatIds[0] ?? "";
 
     const hold = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatId] });
 
@@ -115,7 +111,8 @@ describe("booking.holdSeats", () => {
   });
 
   test("a seat that is already held is CONFLICT naming SEAT_UNAVAILABLE and the seat id", async () => {
-    const { eventId, seatId } = await availableSeat();
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const seatId = seatIds[0] ?? "";
     await caller(alice).booking.holdSeats({ eventId, seatIds: [seatId] });
 
     await expect(
@@ -128,9 +125,8 @@ describe("booking.holdSeats", () => {
 
   test("before the event's on-sale is PRECONDITION_FAILED naming NOT_ON_SALE, and nothing is held", async () => {
     const upcoming = await db().event.findFirstOrThrow({ where: { demo: false } });
-    const seat = await db().seat.findFirstOrThrow({
-      where: { eventId: upcoming.id, status: "AVAILABLE" },
-    });
+    const { seatIds } = await freeSeats(db(), 1, { eventId: upcoming.id });
+    const seat = { id: seatIds[0] ?? "" };
     // No real path admits before the on-sale; an admission from a clock past the queue close,
     // presented earlier, shows the refusal holds whatever admission the buyer has.
     await admit(alice, upcoming.id, upcoming.queueClosesAt);
@@ -147,7 +143,7 @@ describe("booking.holdSeats", () => {
   });
 
   test("rejects a malformed seat id naming the field", async () => {
-    const { eventId } = await availableSeat();
+    const { eventId } = await freeSeats(db(), 1);
 
     await expect(
       caller(alice).booking.holdSeats({ eventId, seatIds: ["nope"] }),
@@ -157,7 +153,7 @@ describe("booking.holdSeats", () => {
 
 describe("booking.holdSeats seat-count boundary", () => {
   test("rejects zero and seven seat ids as BAD_REQUEST naming seatIds", async () => {
-    const { eventId } = await availableSeat();
+    const { eventId } = await freeSeats(db(), 1);
     const seven = Array.from({ length: 7 }, () => randomUUID());
 
     for (const seatIds of [[], seven]) {
@@ -169,30 +165,18 @@ describe("booking.holdSeats seat-count boundary", () => {
   });
 
   test("holds six seats of one event in one call", async () => {
-    const event = await db().event.findFirstOrThrow({ where: { demo: true } });
-    const seats = await db().seat.findMany({
-      where: { eventId: event.id, status: "AVAILABLE" },
-      take: 6,
-    });
+    const { eventId, seatIds } = await freeSeats(db(), 6);
 
-    const hold = await caller(alice).booking.holdSeats({
-      eventId: event.id,
-      seatIds: seats.map((seat) => seat.id),
-    });
+    const hold = await caller(alice).booking.holdSeats({ eventId, seatIds });
 
     expect(hold.seatIds).toHaveLength(6);
   });
 
   test("a hold past the six-seat buyer limit is CONFLICT naming LIMIT_EXCEEDED and holds nothing", async () => {
     const event = await db().event.findFirstOrThrow({ where: { demo: true } });
-    const seats = await db().seat.findMany({
-      where: { eventId: event.id, status: "AVAILABLE" },
-      orderBy: { id: "asc" },
-      take: 7,
-    });
-    const [extra, ...six] = seats.map((seat) => seat.id);
-    if (extra === undefined || six.length !== 6) {
-      throw new Error(`the demo event needs 7 free seats, found ${seats.length}`);
+    const [extra, ...six] = (await freeSeats(db(), 7, { eventId: event.id })).seatIds;
+    if (extra === undefined) {
+      throw new Error("the demo event needs 7 free seats");
     }
     await caller(alice).booking.holdSeats({ eventId: event.id, seatIds: six });
 
@@ -213,9 +197,8 @@ describe("booking.holdSeats seat-count boundary", () => {
   test("seats of another event are CONFLICT and nothing is held", async () => {
     const demo = await db().event.findFirstOrThrow({ where: { demo: true } });
     const other = await db().event.findFirstOrThrow({ where: { demo: false } });
-    const foreign = await db().seat.findFirstOrThrow({
-      where: { eventId: other.id, status: "AVAILABLE" },
-    });
+    const { seatIds } = await freeSeats(db(), 1, { eventId: other.id });
+    const foreign = { id: seatIds[0] ?? "" };
 
     await expect(
       caller(alice).booking.holdSeats({ eventId: demo.id, seatIds: [foreign.id] }),
@@ -228,14 +211,16 @@ describe("booking.holdSeats seat-count boundary", () => {
 
 describe("booking.getHold", () => {
   test("returns the hold to its owner", async () => {
-    const { eventId, seatId } = await availableSeat();
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const seatId = seatIds[0] ?? "";
     const hold = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatId] });
 
     expect(await caller(alice).booking.getHold({ holdId: hold.id })).toEqual(hold);
   });
 
   test("is NOT_FOUND for anyone but the owner", async () => {
-    const { eventId, seatId } = await availableSeat();
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const seatId = seatIds[0] ?? "";
     const hold = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatId] });
 
     await expect(caller(bob).booking.getHold({ holdId: hold.id })).rejects.toMatchObject({
@@ -246,7 +231,8 @@ describe("booking.getHold", () => {
 
 describe("booking.releaseHold", () => {
   test("releases the owner's hold and another buyer can hold the seat at once", async () => {
-    const { eventId, seatId } = await availableSeat();
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const seatId = seatIds[0] ?? "";
     const hold = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatId] });
 
     const released = await caller(alice).booking.releaseHold({ holdId: hold.id });
@@ -258,7 +244,8 @@ describe("booking.releaseHold", () => {
   });
 
   test("is NOT_FOUND for anyone but the owner and CONFLICT for a hold no longer HELD", async () => {
-    const { eventId, seatId } = await availableSeat();
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const seatId = seatIds[0] ?? "";
     const hold = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatId] });
 
     await expect(caller(bob).booking.releaseHold({ holdId: hold.id })).rejects.toMatchObject({
@@ -283,7 +270,8 @@ describe("booking.placeOrder / getOrder", () => {
   const contact = { email: "alice@example.com" };
 
   async function heldHold() {
-    const { eventId, seatId } = await availableSeat();
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const seatId = seatIds[0] ?? "";
     return caller(alice).booking.holdSeats({ eventId, seatIds: [seatId] });
   }
 
@@ -373,13 +361,10 @@ describe("booking.placeOrder / getOrder", () => {
 
 describe("booking.holdSeats saturation", () => {
   async function expectHoldRefusedAsBusy(occupyOptions?: OccupyOptions): Promise<void> {
-    const { eventId, seatId } = await availableSeat();
-    const tight = createPrismaClient({
-      connectionString: database.url,
-      driver: "pg",
-      poolMax: 1,
-      acquireTimeoutMs: 100,
-    });
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const seatId = seatIds[0] ?? "";
+    const tight = open({ poolMax: 1, acquireTimeoutMs: 100 });
+    // TD-071: the pool is full only once occupy has signalled that its query ran.
     const occupation = await occupy(tight, occupyOptions);
     try {
       await expect(
@@ -407,7 +392,6 @@ describe("booking.holdSeats saturation", () => {
       ).rejects.toMatchObject({ code: "TOO_MANY_REQUESTS", message: /BOOKING_BUSY/ });
     } finally {
       await occupation.release();
-      await tight.$disconnect();
     }
   }
 
@@ -416,9 +400,7 @@ describe("booking.holdSeats saturation", () => {
   });
 
   test("the request waits for an occupier that is slow to start", async () => {
-    await expectHoldRefusedAsBusy({
-      beforeStart: () => new Promise((resolve) => setTimeout(resolve, 150)),
-    });
+    await expectHoldRefusedAsBusy({ beforeStart: slowStart });
   });
 });
 
@@ -428,7 +410,8 @@ describe("booking.holdSeats admission (AT-40)", () => {
   }
 
   async function expectForbidden(principal: Principal, now: Date = NOW): Promise<void> {
-    const { eventId, seatId } = await availableSeat();
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const seatId = seatIds[0] ?? "";
     await expect(
       caller(principal, now).booking.holdSeats({ eventId, seatIds: [seatId] }),
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
@@ -500,7 +483,8 @@ describe("booking.holdSeats admission (AT-40)", () => {
   test("with a valid admission holds the seats", async () => {
     const carol = guest();
     await admit(carol, await demoEventId());
-    const { eventId, seatId } = await availableSeat();
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const seatId = seatIds[0] ?? "";
 
     await expect(
       caller(carol).booking.holdSeats({ eventId, seatIds: [seatId] }),
@@ -512,7 +496,8 @@ describe("booking.placeOrder without admission (AT-41)", () => {
   const minutes = (count: number) => new Date(NOW.getTime() + count * 60_000);
 
   test("succeeds after the admission expired while the hold is valid", async () => {
-    const { eventId, seatId } = await availableSeat();
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const seatId = seatIds[0] ?? "";
     // Admitted at NOW (beforeEach), held at +25 min: the hold runs to +35, the admission to +30.
     const hold = await caller(alice, minutes(25)).booking.holdSeats({
       eventId,
@@ -532,7 +517,8 @@ describe("booking.placeOrder without admission (AT-41)", () => {
   });
 
   test("fails for a hold owned by another buyer, even an admitted one", async () => {
-    const { eventId, seatId } = await availableSeat();
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const seatId = seatIds[0] ?? "";
     const hold = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatId] });
 
     await expect(

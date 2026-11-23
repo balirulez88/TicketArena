@@ -602,3 +602,35 @@ Should the 3s acquire timeout apply only to booking queries?
 Assumed: It applies to the whole production web Prisma client (one pool); deadlock_retry is a new BookingMetric not shown on the admin dashboard
 
 Answer: (open)
+
+## 2026-11-23 12:42 ticket 55
+
+TD-016 asks its Resolution in docs/technical-debt.md to state the flag mechanism and argument, but the register is frozen
+
+Assumed: Register untouched; the mechanism and soundness argument go in a WHY comment at the clock-after-lock test and in the commit message
+
+Answer: (open)
+
+## 2026-11-23 13:51 ticket 55
+
+TD-079 asks to compare database-clock commit timestamps; track_commit_timestamp is off and a refused hold writes no row
+
+Assumed: Proved by the order of reads from the injected clock (reads.lastIndexOf(queuedFirst) < reads.lastIndexOf(other)) per test.each case
+
+Answer: (open)
+
+## 2026-11-23 13:51 ticket 55
+
+How does TD-006 run shuffled in the gate?
+
+Assumed: Separate web-shuffled / db-shuffled Vitest projects for catalog.test.ts and seed.test.ts with root sequence.seed 3; admin-demo.test.ts is order-dependent when shuffled (pre-existing) and stays out of the shuffled project
+
+Answer: (open)
+
+## 2026-11-23 13:51 ticket 55
+
+seed.test.ts cannot import @ticketarena/booking/testing (booking depends on db)
+
+Assumed: seed.test.ts opens and closes its own client per test and keeps its own NOW
+
+Answer: (open)

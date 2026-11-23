@@ -2,6 +2,8 @@
 export interface ConnectableClient {
   connect(): Promise<unknown>;
   destroy(): void;
+  /** True while the connection is up and its handshake has completed. */
+  readonly isReady: boolean;
 }
 
 export interface LazyConnectionOptions<C extends ConnectableClient> {
@@ -60,9 +62,15 @@ async function withDeadline<T>(work: Promise<T>, ms: number, what: string): Prom
  *   reconnecting in the background) and the next call builds a new one;
  * - a command without a reply within `commandTimeoutMs` destroys the client too: its connection
  *   no longer answers, and later commands would only queue behind the lost reply. Client-level
- *   timeouts do not cover this: node-redis stops timing a command once it is written.
- * Reconnecting an established connection and refusing commands while it is down are the
- * client's own job (`create` configures it).
+ *   timeouts do not cover this: node-redis stops timing a command once it is written;
+ * - a client found not ready (its connection dropped) is replaced before the command runs.
+ * Every connect, the first and each reconnect, is therefore a fresh `connect()` under
+ * `connectTimeoutMs`. The client must not reconnect by itself (`create` disables it): node-redis
+ * bounds only the TCP connect of its own reconnects, so a handshake that never answers would
+ * leave it offline indefinitely, failing every command at once.
+ *
+ * An error reply, even during the handshake (e.g. WRONGPASS), is rethrown as is: Redis was
+ * reached and refused, which callers must not mistake for an outage (ADR 0008 amendment).
  */
 export function createLazyConnection<C extends ConnectableClient>(
   options: LazyConnectionOptions<C>,
@@ -96,7 +104,7 @@ export function createLazyConnection<C extends ConnectableClient>(
         if (current === attempt) {
           current = undefined;
         }
-        throw new RedisUnavailableError(error);
+        throw options.isServerReply(error) ? error : new RedisUnavailableError(error);
       });
       current = attempt;
     }
@@ -105,15 +113,22 @@ export function createLazyConnection<C extends ConnectableClient>(
 
   return {
     async run(command) {
-      const client = connected();
-      const ready = await client;
+      let client = connected();
+      let ready = await client;
+      if (!ready.isReady) {
+        discard(client);
+        client = connected();
+        ready = await client;
+      }
       try {
         return await withDeadline(command(ready), options.commandTimeoutMs, "command");
       } catch (error) {
-        if (error instanceof DeadlineError) {
-          discard(client);
+        if (options.isServerReply(error)) {
+          throw error;
         }
-        throw options.isServerReply(error) ? error : new RedisUnavailableError(error);
+        // No reply in time, or the connection went down: either way this client is done.
+        discard(client);
+        throw new RedisUnavailableError(error);
       }
     },
     close() {

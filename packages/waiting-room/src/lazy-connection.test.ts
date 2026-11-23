@@ -11,13 +11,13 @@ const TIMEOUT_MS = 2000;
 // Generous against a slow CI machine, yet far below the 30 s test timeout a hang would hit.
 const BOUND_MS = 15_000;
 
-function lazy() {
+function lazy(url: () => string = () => standIn.url) {
   let created = 0;
   const connection = createLazyConnection({
     create: () => {
       created += 1;
       const client = createClient({
-        url: standIn.url,
+        url: url(),
         disableOfflineQueue: true,
         // A failed first connect ends `connect()` instead of retrying, as in the apps.
         socket: { reconnectStrategy: false },
@@ -94,6 +94,45 @@ describe("createLazyConnection", () => {
     await standIn.setMode("forward");
     expect(await run((client) => client.ping())).toBe("PONG");
     expect(created()).toBe(2);
+  });
+
+  test("after a dropped connection, a reconnect whose handshake never answers fails at the connect timeout and is replaced", async () => {
+    await standIn.setMode("forward");
+    const { run, created } = lazy();
+    await run((client) => client.ping());
+
+    await standIn.setMode("closed");
+    const dropped = await timed(() => run((client) => client.ping()));
+    expect(dropped.error).toBeInstanceOf(RedisUnavailableError);
+    const beforeReconnect = created();
+
+    await standIn.setMode("silent");
+    const { error, elapsedMs } = await timed(() => run((client) => client.ping()));
+
+    expect(error).toBeInstanceOf(RedisUnavailableError);
+    expect(elapsedMs).toBeGreaterThanOrEqual(TIMEOUT_MS - 50);
+    expect(elapsedMs).toBeLessThan(BOUND_MS);
+    expect(created()).toBe(beforeReconnect + 1);
+    await expect.poll(() => standIn.openConnections()).toBe(0);
+
+    await standIn.setMode("forward");
+    expect(await run((client) => client.ping())).toBe("PONG");
+  });
+
+  test("an error reply during the handshake (a wrong password) is Redis answering, rethrown as is", async () => {
+    await standIn.setMode("forward");
+    const { run } = lazy(() => {
+      const url = new URL(standIn.url);
+      url.username = "no-such-user";
+      url.password = "wrong";
+      return url.toString();
+    });
+
+    const { error } = await timed(() => run((client) => client.ping()));
+
+    expect(error).toBeInstanceOf(ErrorReply);
+    expect(error).not.toBeInstanceOf(RedisUnavailableError);
+    expect(String(error)).toMatch(/WRONGPASS/);
   });
 
   test("close destroys the client and a later command connects a new one", async () => {

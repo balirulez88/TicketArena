@@ -45,10 +45,10 @@ A Redis csak a queue sorrendjét és az admissiont dönti el, a székek állapot
 
 A kiesést valódi TCP stand-innel teszteljük, nem mockkal: a mock nem tudja megmutatni, hogy a kiírt parancs után a node-redis elhallgat.
 
-## Nyitott kompromisszumok (a review-ból)
+## A PR-review két HIGH hibája és a javításuk
 
-- A handshake alatti error reply (pl. auth hiba) most kiesésnek számít, így fail open lehet belőle.
-- Egy elakadt reconnect esetleg nem dobja el a klienst.
+- **Handshake alatti error reply:** a hibás jelszó (`WRONGPASS`) korábban kiesésnek számított, így a revokáció-ellenőrzés kimaradhatott. Most a handshake hibaválasza is változatlanul továbbmegy, és a kapu zárva marad.
+- **Elakadt reconnect:** a node-redis saját reconnectje csak a TCP connectet korlátozta, a handshake-et nem, így a kliens örökre offline maradhatott. Most a node-redis nem reconnectel. A lazy connection eldobja a nem kész klienst, és újat épít a connect-határidő alatt.
 
 ## Interjúkérdések
 
@@ -56,4 +56,4 @@ A kiesést valódi TCP stand-innel teszteljük, nem mockkal: a mock nem tudja me
 2. **Miért kell saját command timeout?** A node-redis timeout leáll, ha a parancs már a socketen van. A `withDeadline` ezt lefedi, és a kliens eldobásával a lecsúszott válasz nem blokkolja a következő parancsokat.
 3. **Hogyan különbözteted meg a kiesést a Redis válaszától?** `ErrorReply` = a szerver válaszolt, ezt változatlanul dobjuk (fail closed). Minden más hiba `RedisUnavailableError`. A `false` válasz sosem kiesés.
 4. **Miért stand-in a mock helyett?** A hibamódok (refused, néma, megszakadt) a TCP szintjén élnek. A projekt szabálya is, hogy a saját modulokat nem mockoljuk.
-5. **Mi marad kockázat?** A kiesés alatt visszavont token 30 percig él, és a két review-megjegyzés (handshake error reply, elakadt reconnect) még nyitott.
+5. **Mi marad kockázat?** A kiesés alatt visszavont token 30 percig él. Ez tudatosan vállalt kockázat.

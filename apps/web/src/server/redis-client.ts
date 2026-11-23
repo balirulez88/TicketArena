@@ -18,25 +18,21 @@ export interface BoundedRedisConfig {
 /**
  * The web app's node-redis client, connected on first use and bounded (`createLazyConnection`):
  * an outage fails a call with `RedisUnavailableError` within the timeouts, never hangs it.
- * Commands are never queued while disconnected (`disableOfflineQueue`): once connected, a lost
- * connection is re-established by node-redis while calls fail at once.
+ * Commands are never queued while disconnected (`disableOfflineQueue`), and a lost connection is
+ * replaced by the lazy connection on the next call, never re-established by node-redis itself.
  */
 export function createBoundedRedis(config: BoundedRedisConfig) {
   return createLazyConnection({
     create: () => {
-      let ready = false;
       const client = createClient({
         url: config.url,
         disableOfflineQueue: true,
         socket: {
           connectTimeout: config.timeouts.connectTimeoutMs,
-          // Before the first `ready` a failed attempt ends `connect()` (false), so the lazy
-          // connection destroys the client; afterwards node-redis reconnects with a capped backoff.
-          reconnectStrategy: (retries) => (ready ? Math.min(50 * 2 ** retries, 2000) : false),
+          // node-redis bounds only the TCP connect of its own reconnects, not the handshake; the
+          // lazy connection reconnects instead, under its connect deadline.
+          reconnectStrategy: false,
         },
-      });
-      client.on("ready", () => {
-        ready = true;
       });
       // Without a listener node-redis rethrows socket errors as uncaught exceptions.
       client.on("error", (error: unknown) => {

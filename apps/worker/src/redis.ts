@@ -36,19 +36,15 @@ export interface WorkerRedis {
 export function createWorkerRedis(config: WorkerRedisConfig): WorkerRedis {
   const connection = createLazyConnection({
     create: () => {
-      let ready = false;
       const client = createClient({
         url: config.url,
         disableOfflineQueue: true,
         socket: {
           connectTimeout: config.timeouts.connectTimeoutMs,
-          // Before the first `ready` a failed attempt ends `connect()` (false), so the lazy
-          // connection destroys the client; afterwards node-redis reconnects with a capped backoff.
-          reconnectStrategy: (retries) => (ready ? Math.min(50 * 2 ** retries, 2000) : false),
+          // node-redis bounds only the TCP connect of its own reconnects, not the handshake; the
+          // lazy connection reconnects instead, under its connect deadline.
+          reconnectStrategy: false,
         },
-      });
-      client.on("ready", () => {
-        ready = true;
       });
       // Without a listener node-redis rethrows socket errors as uncaught exceptions.
       client.on("error", (error: unknown) => {

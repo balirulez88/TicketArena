@@ -214,11 +214,14 @@ outage fails fast where Redis is needed and leaves everything else running.
   worker: `createWorkerRedis`) goes through `createLazyConnection`: connected on first use,
   connect bounded by `REDIS_CONNECT_TIMEOUT_MS` (default 2000) and each command by
   `REDIS_COMMAND_TIMEOUT_MS` (default 1000), validated at each app's boundary (`parseQueueEnv`,
-  `parseWorkerEnv`). `disableOfflineQueue` refuses commands at once while an established
-  connection is down (node-redis reconnects it with a backoff capped at 2 s). A first connect that
-  fails, or a command with no reply in time, destroys the client; the next call builds a new one.
+  `parseWorkerEnv`). `disableOfflineQueue` refuses commands at once while a connection is down.
+  node-redis never reconnects by itself (`reconnectStrategy: false`): it would bound only the TCP
+  connect, so a reconnect whose handshake never answers would leave the client offline for good.
+  Instead a failed connect, a command with no reply in time, a lost connection, or a client found
+  not ready destroys the client, and the next call connects a new one under the connect bound.
   The command bound is the lazy connection's own: node-redis stops timing a command once it is
-  written, so a hung server would otherwise hold it forever.
+  written, so a hung server would otherwise hold it forever. An error reply, also during the
+  handshake (e.g. `WRONGPASS`), is Redis answering and is rethrown as is, never as an outage.
 - **Queue procedures:** `queue.join`, `queue.status` and `queue.leave` fail with
   `SERVICE_UNAVAILABLE` ("The waiting room is unavailable right now") within those bounds. No
   admission is issued meanwhile: the ticker cannot admit, and `status` mints no token.

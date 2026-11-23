@@ -121,6 +121,26 @@ describe("createLazyQueueStore during a Redis outage", () => {
     expect(elapsedMs).toBeLessThan(BOUND_MS);
   });
 
+  test("after a dropped connection, a reconnect whose handshake never answers fails within the connect timeout and recovers", async () => {
+    await standIn.setMode("forward");
+    const store = await outageStore()();
+    const eventId = randomUUID();
+    await store.join(eventId, "a", { kind: "SEQUENCE" }, new Date());
+
+    await standIn.setMode("closed");
+    await expect(store.position(eventId, "a")).rejects.toBeInstanceOf(RedisUnavailableError);
+    await standIn.setMode("silent");
+    const { error, elapsedMs } = await timed(() => store.position(eventId, "a"));
+
+    expect(error).toBeInstanceOf(RedisUnavailableError);
+    expect(elapsedMs).toBeGreaterThanOrEqual(TIMEOUT_MS - 50);
+    expect(elapsedMs).toBeLessThan(BOUND_MS);
+    await expect.poll(() => standIn.openConnections()).toBe(0);
+
+    await standIn.setMode("forward");
+    expect(await store.position(eventId, "a")).toBe(1);
+  });
+
   test("a connected client queues no command while Redis is down and works again once it is back", async () => {
     const errors: string[] = [];
     const logger: Logger = {

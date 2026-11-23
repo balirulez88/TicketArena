@@ -339,4 +339,28 @@ describe("with Redis reachable, the revocation lookup decides", () => {
     expect(seatStatus).toBe("AVAILABLE");
     expect(logs.some((line) => line.message.includes("revocation check skipped"))).toBe(false);
   });
+
+  test("a Redis that refuses the handshake (wrong password) answered: a revoked token still fails, never skipped", async () => {
+    const { principal, eventId } = await admitted();
+    await caller(principal).queue.leave({ eventId });
+    const wrongPassword = new URL(standIn.url);
+    wrongPassword.username = "no-such-user";
+    wrongPassword.password = "wrong";
+    queueStore = createLazyQueueStore({
+      readEnv: () => ({
+        REDIS_URL: wrongPassword.toString(),
+        REDIS_CONNECT_TIMEOUT_MS: String(REDIS_TIMEOUT_MS),
+        REDIS_COMMAND_TIMEOUT_MS: String(REDIS_TIMEOUT_MS),
+      }),
+      logger,
+      prefix: `${standIn.prefix}${randomUUID()}:`,
+    });
+
+    const { value: hold, error, seatStatus } = await holdOne(principal, eventId);
+
+    expect(hold).toBeUndefined();
+    expect(error).toBeDefined();
+    expect(seatStatus).toBe("AVAILABLE");
+    expect(logs.some((line) => line.message.includes("revocation check skipped"))).toBe(false);
+  });
 });

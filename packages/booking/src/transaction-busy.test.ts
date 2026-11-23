@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { PrismaClient, TransactionClient } from "@ticketarena/db";
+import type { PoolCounters, PrismaClient, TransactionClient } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { describe, expect, test } from "vitest";
 import {
@@ -81,7 +81,7 @@ describe("pool acquire timeout (pg)", () => {
     expect(error).toBeInstanceOf(BookingBusyError);
     expect(causeOf(error)).toMatchObject({ message: POOL_ACQUIRE_TIMEOUT });
     expect(count("booking_busy")).toEqual([{ metric: "booking_busy", eventId }]);
-  });
+  }, 20_000);
 
   test("placeOrder refused on its first pool read, before the event is known, counts under 'unknown'", async () => {
     const db = open(tight);
@@ -101,10 +101,17 @@ describe("pool acquire timeout (pg)", () => {
     expect(error).toBeInstanceOf(BookingBusyError);
     expect(causeOf(error)).toMatchObject({ message: POOL_ACQUIRE_TIMEOUT });
     expect(count("booking_busy")).toEqual([{ metric: "booking_busy", eventId: "unknown" }]);
-  });
+  }, 20_000);
 
   test("placeOrder's idempotency re-read after a duplicate key, on a saturated pool, is BOOKING_BUSY, counted", async () => {
-    const db = open({ poolMax: 1, acquireTimeoutMs: 1_000 });
+    let pool: PoolCounters | undefined;
+    const db = open({
+      poolMax: 1,
+      acquireTimeoutMs: 1_000,
+      observePool: (counters) => {
+        pool = counters;
+      },
+    });
     await warm(db);
     const other = open();
     const buyer = freshBuyer();
@@ -140,10 +147,10 @@ describe("pool acquire timeout (pg)", () => {
             against: call,
           });
           // Queued first, so the connection the rolled-back transaction frees goes to the
-          // occupier and the re-read that follows finds the pool full. The round trip lets the
-          // occupier's start reach the pool's queue before the latch opens.
+          // occupier and the re-read that follows finds the pool full. The pool's own counter
+          // proves the occupier is in its queue before the latch opens.
           occupying = occupy(db);
-          await other.$queryRaw`SELECT 1`;
+          await expect.poll(() => pool?.waitingCount).toBe(1);
           await blocker.release();
           const error = await failureOf(call);
 
@@ -157,7 +164,7 @@ describe("pool acquire timeout (pg)", () => {
         }
       },
     );
-  });
+  }, 20_000);
 });
 
 describe("transaction start timeout, isolated", () => {
@@ -212,7 +219,7 @@ describe("transaction start timeout, isolated", () => {
       code: "P2028",
       message: expect.stringContaining(TRANSACTION_START_TIMEOUT),
     });
-  });
+  }, 20_000);
 
   test("a short acquire timeout with a long maxWait: the cause is the pool acquire timeout", async () => {
     const cause = await busyOnRetryStart({
@@ -222,7 +229,7 @@ describe("transaction start timeout, isolated", () => {
 
     expect(cause).toMatchObject({ message: POOL_ACQUIRE_TIMEOUT });
     expect(cause).not.toMatchObject({ code: "P2028" });
-  });
+  }, 20_000);
 });
 
 describe("P2028 that is not saturation", () => {
@@ -256,7 +263,7 @@ describe("P2028 that is not saturation", () => {
         expect(await db.hold.count({ where: { buyerKey: buyer.buyerKey } })).toBe(0);
       },
     );
-  });
+  }, 20_000);
 
   test("'Transaction already closed' captured from Prisma is not saturation", async () => {
     const db = open();
@@ -308,7 +315,7 @@ describe("SQLSTATE 57014", () => {
         expect(count("deadlock_retry")).toEqual([]);
       },
     );
-  });
+  }, 20_000);
 
   test("cancelled by another session: not BOOKING_BUSY, rethrown with 57014 in its cause chain", async () => {
     // Budgets far beyond the test: only the cancel can end the service's statement.

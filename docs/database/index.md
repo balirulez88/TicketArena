@@ -169,7 +169,9 @@ and `connectBooking` build one `BookingRuntime` (the Prisma client plus that sam
 request context takes `ctx.db` and the required `ctx.bookingTimeouts` from it, and the booking
 services (`bookingServiceFor(ctx)`) always run `ctx.bookingTimeouts`. `createPrismaClient` applies `acquireTimeoutMs` to
 both drivers (`connectionTimeoutMillis` of the `pg` pool and of the Neon pool); the web client uses
-`BOOKING_ACQUIRE_TIMEOUT_MS` = 3 s.
+`BOOKING_ACQUIRE_TIMEOUT_MS` = 3 s. For `pg` it builds the pool itself and hands it to the adapter
+(which ends it on `$disconnect`), so a test can read the pool's `waitingCount` through
+`observePool` and prove a caller is queued instead of guessing with a round trip.
 
 Budget: the Prisma interactive-transaction `timeout` is (lock waits on the longest path, 3 for
 `placeOrder`: buyer advisory lock, hold row, seat rows) × `lock_timeout` + `statement_timeout` +

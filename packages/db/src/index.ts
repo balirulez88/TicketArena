@@ -1,5 +1,6 @@
 import { PrismaNeon } from "@prisma/adapter-neon";
 import { PrismaPg } from "@prisma/adapter-pg";
+import { Pool } from "pg";
 import { type Prisma, PrismaClient } from "./generated/prisma/client";
 
 export type {
@@ -35,6 +36,17 @@ export interface PrismaClientOptions {
   readonly acquireTimeoutMs?: number;
   /** Interactive-transaction start wait and total runtime, in ms (Prisma defaults 2000/5000). */
   readonly transaction?: { readonly maxWaitMs: number; readonly timeoutMs: number };
+  /**
+   * Handed the `pg` pool's live counters once it exists (`pg` only). Lets a test see that a caller
+   * is queued for a connection instead of guessing with a round trip.
+   */
+  readonly observePool?: (pool: PoolCounters) => void;
+}
+
+/** Live counters of a `pg` pool; each read is current. */
+export interface PoolCounters {
+  /** Callers waiting for a pooled connection. */
+  readonly waitingCount: number;
 }
 
 /**
@@ -49,6 +61,7 @@ export function createPrismaClient({
   poolMax,
   acquireTimeoutMs,
   transaction,
+  observePool,
 }: PrismaClientOptions): PrismaClient {
   if (connectionString.trim() === "") {
     throw new Error("createPrismaClient: connectionString must be a non-empty Postgres URL");
@@ -57,14 +70,18 @@ export function createPrismaClient({
   // connection and also the opening of a new one, so neither driver can wait indefinitely.
   const timeout =
     acquireTimeoutMs === undefined ? {} : { connectionTimeoutMillis: acquireTimeoutMs };
-  const adapter =
-    driver === "neon"
-      ? new PrismaNeon({ connectionString, ...timeout })
-      : new PrismaPg({
-          connectionString,
-          ...(poolMax === undefined ? {} : { max: poolMax }),
-          ...timeout,
-        });
+  const pgPool = () => {
+    // Built here rather than by the adapter so its counters can be observed; the adapter still
+    // owns it and ends it on `$disconnect`.
+    const pool = new Pool({
+      connectionString,
+      ...(poolMax === undefined ? {} : { max: poolMax }),
+      ...timeout,
+    });
+    observePool?.(pool);
+    return new PrismaPg(pool, { disposeExternalPool: true });
+  };
+  const adapter = driver === "neon" ? new PrismaNeon({ connectionString, ...timeout }) : pgPool();
   return new PrismaClient({
     adapter,
     ...(transaction === undefined

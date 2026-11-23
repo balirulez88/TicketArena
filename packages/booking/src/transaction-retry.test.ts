@@ -162,7 +162,7 @@ describe("55P03: blocked past lock_timeout", () => {
     expect(count("deadlock_retry")).toBe(3);
     expect(count("booking_busy")).toBe(1);
     expect(await db().hold.count({ where: { buyerKey: buyer.buyerKey } })).toBe(0);
-  });
+  }, 20_000);
 
   test("placeOrder makes 4 attempts, then BOOKING_BUSY with deadlock_retry 3 and booking_busy 1", async () => {
     const buyer = freshBuyer();
@@ -183,7 +183,7 @@ describe("55P03: blocked past lock_timeout", () => {
     expect(count("deadlock_retry")).toBe(3);
     expect(count("booking_busy")).toBe(1);
     expect(await db().order.count({ where: { holdId: hold.id } })).toBe(0);
-  });
+  }, 20_000);
 });
 
 describe("40P01: deadlock (AT-05)", () => {

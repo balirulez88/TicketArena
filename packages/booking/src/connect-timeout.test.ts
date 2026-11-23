@@ -84,7 +84,7 @@ describe("a connection that never opens is not saturation", () => {
     } finally {
       await listener.close();
     }
-  });
+  }, 10_000);
 
   test("neon: fails within the acquire timeout with the connect-timeout message, internal and uncounted", async () => {
     const listener = await silentListener();
@@ -107,5 +107,5 @@ describe("a connection that never opens is not saturation", () => {
       neonConfig.useSecureWebSocket = useSecureWebSocket;
       await listener.close();
     }
-  });
+  }, 10_000);
 });

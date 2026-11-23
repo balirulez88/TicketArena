@@ -554,3 +554,19 @@ What do refund notifications contain and how are the consumers named?
 Assumed: Templates refund-initiated and refund-completed only (email always, SMS with a phone); consumers notification-refund-requested and notification-refunded
 
 Answer: Accepted (2026-11-22): refund-initiated and refund-completed; email always, SMS with a phone; consumers notification-refund-requested and notification-refunded.
+
+## 2026-11-23 11:33 ticket 50
+
+The last criterion asks to mark TD-053/062/065/072 RESOLVED in docs/technical-debt.md, but CLAUDE.md declares that register frozen (not updated by runs) and CI checks it for changes.
+
+Assumed: Leave docs/technical-debt.md untouched; the commit message names each TD and the tests that prove it, so a human can close the entries
+
+Answer: (open)
+
+## 2026-11-23 11:43 ticket 50
+
+What does the Payment consumer do with order.placed redelivered under a new event id for an order that already has a payment attempt (TD-053)?
+
+Assumed: Idempotent skip: acked, processed_messages row committed, no second attempt and no second payment.succeeded/failed (createMany skipDuplicates on orderId+attemptNo). An invalid order.placed payload stays a thrown parse error, nak'd on the ADR 0011 schedule
+
+Answer: (open)

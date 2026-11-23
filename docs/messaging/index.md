@@ -123,7 +123,10 @@ because a durable consumer takes one filter subject. A refund event without a co
 channel (EMAIL; SMS when a phone was given) it first commits a `PENDING` `notification.notifications`
 row in its own transaction (via the injected `prisma`), calls the provider with
 `idempotencyKey = notification id`, then marks it `SENT` in the handler's transaction. A failed send
-leaves the `PENDING` row; redelivery resumes it with the same key. Unique `(sourceEventId, channel)`
+leaves the `PENDING` row; redelivery resumes it with the same key. All channels share one
+transaction, so when the SMS send fails after the EMAIL was sent, the EMAIL's `SENT` update rolls
+back too: the redelivered message offers the EMAIL again under its key (the provider's dedupe keeps
+it to one delivery) and then sends the SMS. Unique `(sourceEventId, channel)`
 plus the consumer's `processed_messages` keep a redelivered or `+dup@` event at one record per
 channel (AT-43, for all five kinds). Dedupe is by event id: a refund request re-emitted under a new
 event id (the planned reconciler) would be a new source event and send a second `refund-initiated`.
@@ -146,7 +149,12 @@ the attempt captures (`CAPTURED`, `payment.succeeded`) when the draw is below `s
 attempt of the order is `ATTEMPTING` or `CAPTURED`. The check reads committed attempts only, which
 suffices while the MVP records only attempt 1. It is not safe under concurrent attempts: adding
 retries requires serializing attempts per order in every branch first. A `+dup@` email emits the
-result twice under distinct event ids.
+result twice under distinct event ids. An `order.placed` repeated under a new event id gets past
+`processed_messages`; the attempt insert skips the existing `(orderId, attemptNo)` row instead, so the
+repeat is acked as handled with no second attempt and no second result (the first attempt's result
+already went out with it). A concurrent repeat waits on the uncommitted row, then skips it. An
+`order.placed` whose payload fails its schema writes nothing and is `nak`ed on the ADR 0011 delay
+schedule, redelivered without end until the DLQ gate exists.
 
 **Provider latency runs outside the transaction**, in the runner's `beforeTransaction` step, i.e.
 before dedupe-and-capture (TD-051). Awaited inside the runner's transaction it would hold a pooled

@@ -13,3 +13,4 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [19: Refund obligation késői capture esetén](19-refund-obligation-for-late-capture.md): `REFUND_REQUESTED` ledger + outbox egy tranzakcióban, AT-20, ismeretlen order refund advisory lockkal
 - [20: Refund execution](20-refund-execution.md): `payment.refunds` PK + `ON CONFLICT DO NOTHING`, emit csak ha írt sort, ledger `REFUNDED` feltételes update-tel, AT-23
 - [21: Refund értesítések](21-refund-notifications.md): egy handler öt esemény-típusra, `sourceEventId` dedupe, contact nélküli refund ack, AT-43
+- [50: Payment-flow tesztizoláció és redelivery](50-payment-flow-test-isolation-and-redelivery-coverage.md): `createMany skipDuplicates` az `(orderId, attemptNo)` kulcson, race teszt table lockkal és `pg_stat_activity`-vel, stream izoláció, `nak` utáni redelivery

@@ -6,7 +6,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-23 on devflow/run-202611231133 (run 202611231133)
 
 **Reprioritized:** 2026-11-22, by the maintainer in the review of PR #15: moved ahead of the MVP scope cut of 2026-11-18. Refund notifications (ticket 21) shipped before this ticket, although TD-062 and TD-065 named it as their prerequisite, so the redelivery coverage they rely on, above all an SMS failure after a sent email followed by a redelivery, is still unproven. Run it next.
 

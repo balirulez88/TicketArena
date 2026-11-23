@@ -38,11 +38,16 @@ describe("setupRedisStandIn", () => {
   });
 
   it("in silent mode accepts connections but never answers", async () => {
+    // The previous test's connections may not have closed yet; counting them would let the poll
+    // below pass before this socket is accepted, and a late accept in forward mode answers.
+    await expect.poll(() => standIn.openConnections()).toBe(0);
     await standIn.setMode("silent");
     const socket = connect(Number(new URL(standIn.url).port), "127.0.0.1");
     const answered = new Promise<boolean>((resolve) => {
       socket.once("data", () => resolve(true));
       socket.once("close", () => resolve(false));
+      // Windows drops a destroyed connection with a reset rather than a FIN: still no answer.
+      socket.once("error", () => resolve(false));
     });
     await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
     socket.write("*1\r\n$4\r\nPING\r\n");

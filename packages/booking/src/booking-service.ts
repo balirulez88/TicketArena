@@ -107,7 +107,8 @@ export interface BookingService {
     idempotencyKey: string,
   ): Promise<OrderView>;
   /**
-   * Gives a `HELD` hold back: `NOT_FOUND` unless the buyer owns it, `HOLD_NOT_ACTIVE` otherwise.
+   * Gives a `HELD` hold back: `NOT_FOUND` unless the buyer owns it, `HOLD_EXPIRED` once
+   * `holdExpiresAt <= T` (swept or not, as for `placeOrder`), `HOLD_NOT_ACTIVE` otherwise.
    * The returned view lists the seats this release freed. The buyer's waiting-room slot is not
    * touched: releasing a hold does not end shopping.
    */
@@ -1182,9 +1183,7 @@ export function createBookingService({
         if (hold === undefined || hold.buyerKey !== buyer.buyerKey) {
           throw new HoldNotFoundError(holdId);
         }
-        if (hold.status !== "HELD") {
-          throw new HoldNotActiveError(holdId, hold.status);
-        }
+        assertHeld(holdId, hold.status);
         // Only seats still carrying this holdId: a seat taken over by another hold is not ours
         // to free. The hold row lock serializes this with placeOrder on the same hold.
         const seats = await tx.$queryRaw<{ id: string }[]>`
@@ -1193,6 +1192,11 @@ export function createBookingService({
           ORDER BY id FOR UPDATE`;
         const seatIds = seats.map((seat) => seat.id);
         const releasedAt = clock.now();
+        // Same rule as placeOrder: an expired hold is refused whether or not it was swept. An
+        // unswept one stays HELD so the sweeper frees its seats and writes hold.expired.
+        if (isExpiredAt(hold.holdExpiresAt, releasedAt)) {
+          throw new HoldExpiredError(holdId);
+        }
 
         await tx.hold.update({ where: { id: holdId }, data: { status: "RELEASED" } });
         await tx.seat.updateMany({

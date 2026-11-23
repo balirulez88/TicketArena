@@ -126,9 +126,12 @@ the unique-constraint race (`P2002`) rolls back and re-reads the winner's order.
 order, one set of lines and one `order.placed` row exist, and only the request that created the
 order logs "order placed" (the transaction returns a result tagged `created` or `replayed`). `holdId` is unique on `orders`, so a hold yields at most one order.
 
-Releasing: `booking.releaseHold` (owner only, else `NOT_FOUND`) gives back a `HELD` hold; any
-other status is `HOLD_NOT_ACTIVE` (tRPC `CONFLICT`). An expired but unswept hold is still `HELD`
-and can be released. One transaction with the same lock order as `placeOrder` (buyer lock, hold
+Releasing: `booking.releaseHold` (owner only, else `NOT_FOUND`) gives back a `HELD` hold while
+`T < holdExpiresAt`. Its refusals match `placeOrder`'s: a hold the sweeper already moved to
+`EXPIRED`, or a `HELD` one with `holdExpiresAt <= T` (not yet swept), is `HOLD_EXPIRED` (tRPC
+`PRECONDITION_FAILED`); any other status (`RELEASED`, `ORDERED`) is `HOLD_NOT_ACTIVE` (tRPC
+`CONFLICT`). An expired, unswept hold is left `HELD` with no `hold.released` row, so the sweeper
+frees its seats and writes `hold.expired`; the seats end up `AVAILABLE` either way. One transaction with the same lock order as `placeOrder` (buyer lock, hold
 `FOR UPDATE`, then the seats still `HELD` with this `holdId` `ORDER BY id FOR UPDATE`) sets the
 hold `RELEASED`, sets exactly those seats `AVAILABLE` with `holdId` and `claimBuyerKey` cleared (a
 seat taken over by another hold is left alone), and writes a `hold.released` outbox row. The
@@ -137,7 +140,7 @@ Releasing a hold does not end shopping: the buyer's waiting-room slot is untouch
 arrives in ticket 30; only `placeOrder`, leaving or reaping end it).
 
 Expiry: one `T` per transaction and one rule everywhere, a hold is valid iff `T < holdExpiresAt`
-(snapshot, lazy takeover, buyer limit, `placeOrder`, sweeper). `BookingService.sweepExpired()` is
+(snapshot, lazy takeover, buyer limit, `placeOrder`, `releaseHold`, sweeper). `BookingService.sweepExpired()` is
 the sweeper's step: per transaction (batches of 100, repeated until a short batch) it reads `T`,
 claims `HELD` holds with `holdExpiresAt <= T` `FOR UPDATE SKIP LOCKED`, locks the seats still `HELD`
 with those `holdId`s `ORDER BY id FOR UPDATE`, sets the holds `EXPIRED` and those seats `AVAILABLE`

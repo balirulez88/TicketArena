@@ -1,11 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { beforeEach, describe, expect, test } from "vitest";
-import { type Buyer, HoldNotActiveError, HoldNotFoundError } from "./booking-service";
+import {
+  type Buyer,
+  HoldExpiredError,
+  HoldNotActiveError,
+  HoldNotFoundError,
+} from "./booking-service";
 import { bookingTestBed, freshBuyer, NOW } from "./testing";
 
 const database = setupTestDatabase();
-const { db, freeSeats, service } = bookingTestBed(database);
+const { db, at, freeSeats, service } = bookingTestBed(database);
 
 const contact = { email: "alice@example.com" };
 
@@ -132,5 +137,45 @@ describe("releaseHold", () => {
     expect(
       await db().outboxEvent.count({ where: { aggregateId: hold.id, eventType: "hold.released" } }),
     ).toBe(1);
+  });
+
+  test("refuses an expired hold the sweeper has not reached with HOLD_EXPIRED and changes nothing", async () => {
+    const { hold, seatIds } = await heldSeats(2);
+
+    await expect(at(hold.holdExpiresAt).releaseHold(alice, hold.id)).rejects.toBeInstanceOf(
+      HoldExpiredError,
+    );
+
+    // Left HELD for the sweeper, which frees the seats and writes hold.expired.
+    expect(await service().getHold(alice, hold.id)).toMatchObject({ status: "HELD", seatIds });
+    const seats = await db().seat.findMany({ where: { id: { in: seatIds } } });
+    expect(seats.map((seat) => [seat.status, seat.holdId])).toEqual([
+      ["HELD", hold.id],
+      ["HELD", hold.id],
+    ]);
+    expect(
+      await db().outboxEvent.count({ where: { aggregateId: hold.id, eventType: "hold.released" } }),
+    ).toBe(0);
+  });
+
+  test("refuses a hold the sweeper already expired with HOLD_EXPIRED", async () => {
+    const { hold } = await heldSeats(1);
+    await at(hold.holdExpiresAt).sweepExpired();
+
+    await expect(
+      at(new Date(hold.holdExpiresAt.getTime() + 1)).releaseHold(alice, hold.id),
+    ).rejects.toBeInstanceOf(HoldExpiredError);
+    expect(await service().getHold(alice, hold.id)).toMatchObject({ status: "EXPIRED" });
+  });
+
+  test("releases a hold one millisecond before holdExpiresAt", async () => {
+    const { hold, seatIds } = await heldSeats(1);
+
+    const released = await at(new Date(hold.holdExpiresAt.getTime() - 1)).releaseHold(
+      alice,
+      hold.id,
+    );
+
+    expect(released).toMatchObject({ id: hold.id, status: "RELEASED", seatIds });
   });
 });

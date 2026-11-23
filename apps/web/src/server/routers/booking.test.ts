@@ -258,6 +258,18 @@ describe("booking.releaseHold", () => {
     });
   });
 
+  test("HOLD_EXPIRED is a PRECONDITION_FAILED, as for placeOrder", async () => {
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const hold = await caller(alice).booking.holdSeats({ eventId, seatIds });
+
+    await expect(
+      caller(alice, hold.holdExpiresAt).booking.releaseHold({ holdId: hold.id }),
+    ).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+      message: expect.stringContaining("HOLD_EXPIRED"),
+    });
+  });
+
   test("rejects a malformed hold id naming the field", async () => {
     await expect(caller(alice).booking.releaseHold({ holdId: "nope" })).rejects.toMatchObject({
       code: "BAD_REQUEST",

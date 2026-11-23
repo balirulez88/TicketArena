@@ -156,7 +156,8 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
   lapses (30 min, fixed) meanwhile. "Hold n seats" sends the selection to `booking.holdSeats`; on success the selection is
   emptied and the hold (the mutation's result) shows as a "Your hold" region: its seats, a
   `role="timer"` countdown to the server's `holdExpiresAt` measured on the visitor's clock (the
-  server alone decides expiry), and "Release seats" (`booking.releaseHold`). When the countdown
+  server alone decides expiry), and "Release seats" (`booking.releaseHold`; a release refused with
+  `HOLD_EXPIRED` drops the hold with the same "Your hold expired" alert). When the countdown
   reaches zero with no checkout in doubt, the hold is dropped from the page with a "Your hold
   expired" alert; nothing is sent, as the server already treats it as expired. A checkout in doubt
   at that moment is reconciled first (see Checkout). A failed background refresh of the seat map

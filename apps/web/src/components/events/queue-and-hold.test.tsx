@@ -64,6 +64,8 @@ let joinAnswer: Answer;
 /** queue.status answers in order; the last one repeats. */
 let statusAnswers: Answer[];
 let holdAnswer: Answer;
+/** booking.releaseHold's answer; `null` releases the held seats. */
+let releaseAnswer: Answer | null;
 let seatsHeld = false;
 let calls: { procedure: string; input: unknown }[];
 
@@ -112,7 +114,7 @@ async function fakeApi(
       return respond(holdAnswer);
     case "booking.releaseHold":
       seatsHeld = false;
-      return respond({ data: { ...heldHold(), status: "RELEASED" } });
+      return respond(releaseAnswer ?? { data: { ...heldHold(), status: "RELEASED" } });
     default:
       return respond({
         error: { code: "NOT_FOUND", httpStatus: 404, message: `No procedure ${procedure}` },
@@ -174,6 +176,7 @@ beforeEach(() => {
   joinAnswer = QUEUED_AT(3, 1);
   statusAnswers = [NOT_QUEUED];
   holdAnswer = { data: heldHold() };
+  releaseAnswer = null;
   seatsHeld = false;
   calls = [];
   // Time is the faked boundary; it still advances on its own so Testing Library can wait.
@@ -388,6 +391,20 @@ describe("Hold countdown and release", () => {
 
     await screen.findByText(/Seats released/);
     expect(callsTo("booking.releaseHold").map((call) => call.input)).toEqual([{ holdId: HOLD_ID }]);
+    expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
+  });
+
+  test("a release refused with HOLD_EXPIRED ends the hold and says it expired", async () => {
+    releaseAnswer = {
+      error: { code: "PRECONDITION_FAILED", httpStatus: 412, message: `HOLD_EXPIRED: ${HOLD_ID}` },
+    };
+    await admittedWithBothSeatsSelected();
+    fireEvent.click(screen.getByRole("button", { name: "Hold 2 seats" }));
+    const hold = await screen.findByRole("region", { name: "Your hold" });
+
+    fireEvent.click(within(hold).getByRole("button", { name: "Release seats" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Your hold expired");
     expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
   });
 });

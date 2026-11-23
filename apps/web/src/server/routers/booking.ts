@@ -139,7 +139,7 @@ export const bookingRouter = createTRPCRouter({
       return hold;
     }),
 
-  // Owner-only and HELD-only; does not touch the buyer's waiting-room slot.
+  // Owner-only and only while the hold is HELD and unexpired; does not touch the buyer's waiting-room slot.
   releaseHold: publicProcedure
     .input(releaseHoldInput)
     .output(holdOutput)
@@ -149,6 +149,13 @@ export const bookingRouter = createTRPCRouter({
       } catch (error) {
         if (error instanceof HoldNotFoundError) {
           throw new TRPCError({ code: "NOT_FOUND", message: error.message, cause: error });
+        }
+        if (error instanceof HoldExpiredError) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: error.message,
+            cause: error,
+          });
         }
         if (error instanceof HoldNotActiveError) {
           throw new TRPCError({ code: "CONFLICT", message: error.message, cause: error });

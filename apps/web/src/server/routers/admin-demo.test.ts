@@ -3,9 +3,11 @@ import {
   createRedisBookingMetrics,
   createRedisBookingMetricsReader,
   createRedisBookingMetricsReset,
+  DEFAULT_BOOKING_TIMEOUTS,
 } from "@ticketarena/booking";
+import { freeSeats, NOW, testClients, withClient } from "@ticketarena/booking/testing";
 import { silentLogger } from "@ticketarena/contracts";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase, setupTestRedis, setupTestUpstash } from "@ticketarena/test-infra";
 import { createRedisQueueStore } from "@ticketarena/waiting-room";
 import { createClient } from "redis";
@@ -22,23 +24,15 @@ const redis = setupTestRedis();
 const upstash = setupTestUpstash();
 const redisClient = createClient({ url: redis.url });
 const upstashClient = createUpstashMetricsClient({ url: upstash.url, token: upstash.token });
-let prisma: PrismaClient | undefined;
-
-function db(): PrismaClient {
-  prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
-  return prisma;
-}
-
-const NOW = new Date("2027-03-01T12:00:00.000Z");
+const { db } = testClients(database);
 
 beforeAll(async () => {
   await redisClient.connect();
-  await seedCatalog(db(), NOW);
+  await withClient(database, (seeding) => seedCatalog(seeding, NOW));
 });
 
 afterAll(async () => {
   redisClient.destroy();
-  await prisma?.$disconnect();
 });
 
 const queueStore = () => createRedisQueueStore(redisClient, { prefix: redis.prefix });
@@ -62,6 +56,7 @@ function caller(overrides: Partial<TRPCContext> = {}) {
     now,
     principal,
     isAdmin: true,
+    bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
     db: db(),
     logger: silentLogger,
     metrics: () => createRedisBookingMetrics(redisClient, metricsPrefix),
@@ -155,15 +150,12 @@ describe("admin.resetDemo", () => {
   test("a demo order awaiting payment refuses the reset with PRECONDITION_FAILED", async () => {
     const { demo } = await events();
     const buyer = guest();
-    const [seat] = await db().seat.findMany({
-      where: { eventId: demo.id, status: "AVAILABLE" },
-      take: 1,
-    });
+    const [seatId] = (await freeSeats(db(), 1, { eventId: demo.id })).seatIds;
     await caller({ principal: buyer }).queue.join({ eventId: demo.id });
     await caller({ principal: buyer }).queue.status({ eventId: demo.id });
     const hold = await caller({ principal: buyer }).booking.holdSeats({
       eventId: demo.id,
-      seatIds: [seat?.id ?? ""],
+      seatIds: [seatId ?? ""],
     });
     const order = await caller({ principal: buyer }).booking.placeOrder({
       holdId: hold.id,

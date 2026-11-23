@@ -4,7 +4,9 @@
 
 **Blocked by:** 13, 14
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-23 on devflow/run-202611231133 (run 202611231133)
 
 - [ ] Releasing a `HELD` hold whose `holdExpiresAt <= T` (not yet swept) gives `HOLD_EXPIRED` and changes nothing: the hold stays `HELD` for the sweeper, no `hold.released` event is written.
 - [ ] Releasing a hold the sweeper already moved to `EXPIRED` gives `HOLD_EXPIRED`.

@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { DEFAULT_BOOKING_TIMEOUTS } from "@ticketarena/booking";
+import { freeSeats, NOW, testClients, withClient } from "@ticketarena/booking/testing";
 import { silentLogger } from "@ticketarena/contracts";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase, setupTestRedis } from "@ticketarena/test-infra";
 import {
   createQueueService,
@@ -18,23 +20,17 @@ import { createCaller } from "./_app";
 const database = setupTestDatabase();
 const redis = setupTestRedis();
 const redisClient = createClient({ url: redis.url });
-let prisma: PrismaClient | undefined;
+const { db } = testClients(database);
 
-function db(): PrismaClient {
-  prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
-  return prisma;
-}
-
-const SEEDED_AT = new Date("2027-03-01T12:00:00.000Z");
+const SEEDED_AT = NOW;
 
 beforeAll(async () => {
   await redisClient.connect();
-  await seedCatalog(db(), SEEDED_AT);
+  await withClient(database, (seeding) => seedCatalog(seeding, SEEDED_AT));
 });
 
 afterAll(async () => {
   redisClient.destroy();
-  await prisma?.$disconnect();
 });
 
 // One queue namespace per test, so the seeded event can be reused without sharing positions.
@@ -56,6 +52,7 @@ function caller(principal: Principal, now: Date, random: Random = { next: () => 
     now: () => now,
     principal,
     isAdmin: false,
+    bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
     db: db(),
     logger: silentLogger,
     metrics: () => ({ increment: async () => undefined }),
@@ -308,7 +305,8 @@ describe("admission slots", () => {
     const { eventId, afterOnSale } = await scheduledEvent();
     const alice = guest();
     await admitted(eventId, afterOnSale, alice);
-    const seat = await db().seat.findFirstOrThrow({ where: { eventId, status: "AVAILABLE" } });
+    const { seatIds } = await freeSeats(db(), 1, { eventId });
+    const seat = { id: seatIds[0] ?? "" };
 
     await caller(alice, later(afterOnSale, 60_000)).booking.holdSeats({
       eventId,
@@ -322,7 +320,8 @@ describe("admission slots", () => {
     const { eventId, afterOnSale } = await scheduledEvent();
     const alice = guest();
     const { ticker, jti } = await admitted(eventId, afterOnSale, alice);
-    const seat = await db().seat.findFirstOrThrow({ where: { eventId, status: "AVAILABLE" } });
+    const { seatIds } = await freeSeats(db(), 1, { eventId });
+    const seat = { id: seatIds[0] ?? "" };
     const hold = await caller(alice, afterOnSale).booking.holdSeats({
       eventId,
       seatIds: [seat.id],
@@ -342,12 +341,14 @@ describe("admission slots", () => {
   test("placing an order succeeds even when the queue store is unavailable", async () => {
     const { eventId, afterOnSale } = await scheduledEvent();
     const alice = guest();
-    const seat = await db().seat.findFirstOrThrow({ where: { eventId, status: "AVAILABLE" } });
+    const { seatIds } = await freeSeats(db(), 1, { eventId });
+    const seat = { id: seatIds[0] ?? "" };
     const unavailable = (now: Date) =>
       createCaller({
         now: () => now,
         principal: alice,
         isAdmin: false,
+        bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
         db: db(),
         logger: silentLogger,
         metrics: () => ({ increment: async () => undefined }),

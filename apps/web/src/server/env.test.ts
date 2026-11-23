@@ -170,9 +170,24 @@ describe("parseQueueEnv", () => {
   test("accepts a redis or rediss URL and ignores unrelated variables", () => {
     expect(parseQueueEnv({ REDIS_URL: "redis://localhost:6379", SESSION_SECRET: "x" })).toEqual({
       REDIS_URL: "redis://localhost:6379",
+      REDIS_CONNECT_TIMEOUT_MS: 2000,
+      REDIS_COMMAND_TIMEOUT_MS: 1000,
     });
     expect(parseQueueEnv({ REDIS_URL: "rediss://example.upstash.io:6379" }).REDIS_URL).toBe(
       "rediss://example.upstash.io:6379",
+    );
+  });
+
+  test("reads the Redis timeouts and names one that is not a positive integer", () => {
+    const url = { REDIS_URL: "redis://localhost:6379" };
+    expect(
+      parseQueueEnv({ ...url, REDIS_CONNECT_TIMEOUT_MS: "500", REDIS_COMMAND_TIMEOUT_MS: "250" }),
+    ).toMatchObject({ REDIS_CONNECT_TIMEOUT_MS: 500, REDIS_COMMAND_TIMEOUT_MS: 250 });
+    expect(() => parseQueueEnv({ ...url, REDIS_CONNECT_TIMEOUT_MS: "0" })).toThrow(
+      /REDIS_CONNECT_TIMEOUT_MS/,
+    );
+    expect(() => parseQueueEnv({ ...url, REDIS_COMMAND_TIMEOUT_MS: "soon" })).toThrow(
+      /REDIS_COMMAND_TIMEOUT_MS/,
     );
   });
 

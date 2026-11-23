@@ -8,7 +8,9 @@
 
 **Blocked by:** 54
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-23 on devflow/run-202611231133 (run 202611231133)
 
 Scope: every test file under `packages/booking/src/` and `apps/web/src/server/` that opens a Postgres client, including the files ticket 54 added, plus `packages/db/src/seed.test.ts` for TD-006. Each criterion names its test and the sabotage that test must catch.
 

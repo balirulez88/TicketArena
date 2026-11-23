@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
+import {
+  BOOKING_ACQUIRE_TIMEOUT_MS,
+  type BookingTimeouts,
+  bookingTransactionOptions,
+  DEFAULT_BOOKING_TIMEOUTS,
+} from "@ticketarena/booking";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { issueSessionCookieValue } from "./identity/identity";
-import { createTRPCContext } from "./trpc";
+import { composeBooking, createTRPCContext } from "./trpc";
 
 const secret = "s".repeat(32);
 const requestWith = (cookie?: string) =>
@@ -121,5 +127,38 @@ describe("createTRPCContext admission tokens", () => {
     const ctx = await contextFor(requestWith());
 
     await expect(ctx.admissionTokens.issue(admission)).rejects.toThrow(/ADMISSION_SECRET/);
+  });
+});
+
+describe("booking composition", () => {
+  test("the client's transaction options and the booking service's timeouts come from one value", () => {
+    const timeouts: BookingTimeouts = {
+      lockTimeoutMs: 1_234,
+      statementTimeoutMs: 4_321,
+      retries: 2,
+    };
+    const env = {
+      DATABASE_URL: "postgresql://u:p@db.example.com/x",
+      DATABASE_DRIVER: "pg",
+    } as const;
+
+    const composed = composeBooking(env, timeouts);
+
+    expect(composed.timeouts).toBe(timeouts);
+    expect(composed.client).toEqual({
+      connectionString: env.DATABASE_URL,
+      driver: "pg",
+      acquireTimeoutMs: BOOKING_ACQUIRE_TIMEOUT_MS,
+      transaction: bookingTransactionOptions(timeouts),
+    });
+  });
+
+  test("the request context carries the production default timeouts", async () => {
+    const ctx = await contextFor(requestWith());
+
+    expect(ctx.bookingTimeouts).toBe(DEFAULT_BOOKING_TIMEOUTS);
+    expect(
+      composeBooking({ DATABASE_URL: "postgresql://x", DATABASE_DRIVER: "neon" }).timeouts,
+    ).toBe(DEFAULT_BOOKING_TIMEOUTS);
   });
 });

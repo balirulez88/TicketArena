@@ -56,3 +56,18 @@ the queue must be enforced by the backend, not by the UI.
   `queueClosesAt` the queue applies. From `queueClosesAt`, `join` admits at once, without the
   token bucket and `maxActive`. Independently, `holdSeats` refuses every hold before the event's
   `onSaleAt`, and the ticker admits no one before it. Recorded in `.devflow/questions.md`.
+- **2026-11-23, Redis outage (ticket 63; ticket 31's third question in `.devflow/questions.md`):**
+  `admittedProcedure` fails open on revocation only. It always checks the signature, that the
+  algorithm is HS256 (any other, `none` included, is refused), `exp`, `sub` against the current
+  session and `eid` against the requested event; a token failing any of these is `FORBIDDEN`
+  whether Redis is up or not. Only when Redis cannot be reached (a connection failure or the
+  bounded command timeout, never a `false` answer) is the `jti` lookup in the admitted set
+  skipped and the call let through, with a warning that names the event and never the token.
+  Consequences: during an outage a revoked admission token (slot freed by leave, order or
+  reaping) stays usable until its fixed `exp`, at most 30 minutes after admission; the outage
+  issues no new admission, because `queue.join` and `queue.status` need Redis and fail fast
+  (`SERVICE_UNAVAILABLE`) without minting a token; and seat correctness is unaffected, because
+  seat state lives in Postgres (ADR 0005) and a hold is still decided there under row locks.
+  Every Redis client the apps create bounds its connect and its commands and queues nothing
+  while disconnected, so the outage fails Redis calls fast instead of hanging requests, and the
+  worker starts its relay, consumers and sweeper without Redis.

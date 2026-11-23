@@ -1,34 +1,20 @@
-import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
+import type { PrismaClient } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
-import { afterEach, describe, expect, test } from "vitest";
-import { occupy } from "./index";
+import { describe, expect, test } from "vitest";
+import { occupy, slowStart, testClients } from "./index";
 
 const database = setupTestDatabase();
-const opened: PrismaClient[] = [];
-
-function client(pool: { poolMax?: number; acquireTimeoutMs?: number } = {}): PrismaClient {
-  const created = createPrismaClient({ connectionString: database.url, driver: "pg", ...pool });
-  opened.push(created);
-  return created;
-}
+const { db, open } = testClients(database);
 
 function tightPool(): PrismaClient {
-  return client({ poolMax: 1, acquireTimeoutMs: 100 });
+  return open({ poolMax: 1, acquireTimeoutMs: 100 });
 }
 
 async function backendState(pid: number): Promise<string | undefined> {
-  const rows = await client().$queryRaw<{ state: string }[]>`
+  const rows = await db().$queryRaw<{ state: string }[]>`
     SELECT state FROM pg_stat_activity WHERE pid = ${pid}::int`;
   return rows[0]?.state;
 }
-
-// Longer than the 50 ms the saturation tests used to sleep: a caller that does not wait for the
-// signal runs ahead of the occupier.
-const slowStart = () => new Promise<void>((resolve) => setTimeout(resolve, 150));
-
-afterEach(async () => {
-  await Promise.all(opened.splice(0).map((created) => created.$disconnect()));
-});
 
 describe("occupy", () => {
   test("resolves only when Postgres shows its backend inside an open transaction", async () => {
@@ -81,7 +67,7 @@ describe("occupy", () => {
 
   test("fails at its deadline, naming what it waited for", async () => {
     // No acquire timeout: only occupy's own deadline can end this wait.
-    const tight = client({ poolMax: 1 });
+    const tight = open({ poolMax: 1 });
     const first = await occupy(tight);
 
     await expect(occupy(tight, { deadlineMs: 300 })).rejects.toThrow(

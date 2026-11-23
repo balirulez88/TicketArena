@@ -1,4 +1,11 @@
 export { createScheduleAdmissionPolicy } from "./admission-policy";
+export {
+  type ConnectableClient,
+  createLazyConnection,
+  type LazyConnection,
+  type LazyConnectionOptions,
+  RedisUnavailableError,
+} from "./lazy-connection";
 export type {
   Admission,
   AdmissionLimits,

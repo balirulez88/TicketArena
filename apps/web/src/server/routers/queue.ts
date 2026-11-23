@@ -3,7 +3,9 @@ import {
   createQueueService,
   createScheduleAdmissionPolicy,
   type QueueService,
+  RedisUnavailableError,
 } from "@ticketarena/waiting-room";
+import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { createTRPCRouter, publicProcedure, type TRPCContext } from "../trpc";
 import { eventNotFound } from "./event-not-found";
@@ -53,6 +55,25 @@ export async function queueServiceFor(
   });
 }
 
+/**
+ * A Redis outage fails a queue call fast (the client's timeouts bound it) and says so, instead of
+ * an opaque internal error: the page can tell the buyer to retry. Nothing is admitted meanwhile.
+ */
+async function orUnavailable<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    if (error instanceof RedisUnavailableError) {
+      throw new TRPCError({
+        code: "SERVICE_UNAVAILABLE",
+        message: "The waiting room is unavailable right now; try again shortly",
+        cause: error,
+      });
+    }
+    throw error;
+  }
+}
+
 /** Queue membership is per session (ADR 0008: the admission token's `sub` is the session id). */
 export const queueRouter = createTRPCRouter({
   join: publicProcedure
@@ -66,7 +87,9 @@ export const queueRouter = createTRPCRouter({
       if (event === null) {
         throw eventNotFound(input.eventId);
       }
-      return (await queueServiceFor(ctx)).join(event, ctx.principal.sessionId);
+      return orUnavailable(async () =>
+        (await queueServiceFor(ctx)).join(event, ctx.principal.sessionId),
+      );
     }),
 
   // Minting here, on the poll after admission, is what hands the ticker's admission to the
@@ -77,7 +100,9 @@ export const queueRouter = createTRPCRouter({
     .output(statusOutput)
     .query(async ({ ctx, input }) => {
       const sessionId = ctx.principal.sessionId;
-      const result = await (await queueServiceFor(ctx)).status(input.eventId, sessionId);
+      const result = await orUnavailable(async () =>
+        (await queueServiceFor(ctx)).status(input.eventId, sessionId),
+      );
       if (result.status !== "ADMITTED") {
         return result;
       }
@@ -88,7 +113,9 @@ export const queueRouter = createTRPCRouter({
   leave: publicProcedure
     .input(queueInput)
     .output(leaveOutput)
-    .mutation(async ({ ctx, input }) =>
-      (await queueServiceFor(ctx)).leave(input.eventId, ctx.principal.sessionId),
+    .mutation(({ ctx, input }) =>
+      orUnavailable(async () =>
+        (await queueServiceFor(ctx)).leave(input.eventId, ctx.principal.sessionId),
+      ),
     ),
 });

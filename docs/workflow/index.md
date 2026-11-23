@@ -97,6 +97,9 @@ Upstash adapters.
     committed migration SQL; clones and template builds are serialized by a Postgres advisory
     lock. The clone is dropped after the file.
   - `setupTestRedis()`: a unique key prefix, deleted after the file.
+  - `setupRedisStandIn(mode)`: a local TCP stand-in in front of the test Redis, on one fixed port,
+    that a test switches between `forward`, `silent` (accepts, never answers) and `closed`
+    (refused) to test Redis outages on a real client; a unique key prefix, deleted after the file.
   - `setupTestUpstash()`: the REST endpoint, its token, a unique key prefix (deleted through the
     endpoint after the file) and `command(args)` for raw commands.
   - `setupTestNats()`: a unique stream-name prefix and root subject token; streams deleted after.

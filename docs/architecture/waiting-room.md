@@ -6,28 +6,33 @@ Decisions: [ADR 0002](../adr/0002-redis-waiting-room.md), [ADR 0008](../adr/0008
 Code: `packages/waiting-room` (module), `apps/web/src/server/routers/queue.ts` (API),
 `apps/web/src/server/queue-store.ts` (wiring), `apps/web/src/server/admission-token.ts` and
 `admittedProcedure` in `apps/web/src/server/trpc.ts` (admission token),
-`apps/worker/src/admission.ts` (ticker and reaper).
+`apps/worker/src/admission.ts` (ticker and reaper), `apps/web/src/server/redis-client.ts` and
+`apps/worker/src/redis.ts` (bounded Redis clients).
 
 Built so far: join, status and leave, with fair ordering; admission from the queue head by a
 worker ticker (token bucket plus `maxActive`), active slots with heartbeats, and slot freeing on
 leave, order placed and reaping, which revokes the admission `jti`; immediate admission once the
 queue has closed; the signed admission token (JWT cookie) minted on the admitted session's
 status poll; and `booking.holdSeats` gated by it (`admittedProcedure`); all on two
-interchangeable `QueueStore` adapters (node-redis and Upstash REST).
+interchangeable `QueueStore` adapters (node-redis and Upstash REST). A Redis outage is bounded:
+queue calls fail fast, the admission check skips only the revocation lookup, and booking and the
+worker keep running.
 
 ## Module surface
 
-| Export                                     | Role                                                                                                                                                      |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `QueueService`                             | `join`, `status`, `leave`, `heartbeat`, `admitTick(event, limits)`, `reap`, `releaseSlot`, `isAdmitted(eventId, jti)`, `counts`                           |
-| `QueueStore` (port)                        | `join`, `position` (1-based), `leave`, `admit`, `admitImmediately`, `admission`, `heartbeat`, `releaseSlot`, `reap`, `isAdmitted`, `counts`, `clearEvent` |
-| `AdmissionLimits`                          | `{ admitRate, maxActive }` per tick; the worker supplies them from its configuration                                                                      |
-| `SLOT_IDLE_TIMEOUT_MS`, `ADMISSION_TTL_MS` | 90 s idle before reaping; 30 min admission validity from admission (fixed)                                                                                |
-| `createRedisQueueStore`                    | node-redis adapter over the narrow `RedisQueueClient` (`eval`, `zRank`); options: `prefix`                                                                |
-| `createUpstashQueueStore`                  | Upstash REST adapter (`fetch`); options: `url`, `token`, `prefix`, `timeoutMs` (default 2000)                                                             |
-| `AdmissionPolicy` (port)                   | `phase(event, now)`: a `QueuePhase`, `NOT_OPEN`, `ACTIVE` or `CLOSED`                                                                                     |
-| `createScheduleAdmissionPolicy`            | MVP policy: `NOT_OPEN` before `queueOpensAt`, `ACTIVE` from it (inclusive) to `queueClosesAt` (exclusive), `CLOSED` from then on                          |
-| `Clock`, `Random`, `newId`                 | Injected; the module never reads the system clock, `Math.random` or a UUID source. `Random.next()` returns `[0, 1)`; `newId` makes admission `jti`s       |
+| Export                                     | Role                                                                                                                                                                                                                                                                        |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QueueService`                             | `join`, `status`, `leave`, `heartbeat`, `admitTick(event, limits)`, `reap`, `releaseSlot`, `isAdmitted(eventId, jti)`, `counts`                                                                                                                                             |
+| `QueueStore` (port)                        | `join`, `position` (1-based), `leave`, `admit`, `admitImmediately`, `admission`, `heartbeat`, `releaseSlot`, `reap`, `isAdmitted`, `counts`, `clearEvent`                                                                                                                   |
+| `AdmissionLimits`                          | `{ admitRate, maxActive }` per tick; the worker supplies them from its configuration                                                                                                                                                                                        |
+| `SLOT_IDLE_TIMEOUT_MS`, `ADMISSION_TTL_MS` | 90 s idle before reaping; 30 min admission validity from admission (fixed)                                                                                                                                                                                                  |
+| `createRedisQueueStore`                    | node-redis adapter over the narrow `RedisQueueClient` (`eval`, `zRank`); options: `prefix`                                                                                                                                                                                  |
+| `createLazyConnection`                     | One client per process, connected on first use; bounds the connect (`connectTimeoutMs`) and each command (`commandTimeoutMs`), destroys a client whose connect fails or whose command gets no reply in time and builds a new one on the next use; `run(command)`, `close()` |
+| `RedisUnavailableError`                    | Thrown by `createLazyConnection` when Redis cannot be reached (connect failed or timed out, client offline, no reply in time); a Redis error reply is rethrown as is                                                                                                        |
+| `createUpstashQueueStore`                  | Upstash REST adapter (`fetch`); options: `url`, `token`, `prefix`, `timeoutMs` (default 2000)                                                                                                                                                                               |
+| `AdmissionPolicy` (port)                   | `phase(event, now)`: a `QueuePhase`, `NOT_OPEN`, `ACTIVE` or `CLOSED`                                                                                                                                                                                                       |
+| `createScheduleAdmissionPolicy`            | MVP policy: `NOT_OPEN` before `queueOpensAt`, `ACTIVE` from it (inclusive) to `queueClosesAt` (exclusive), `CLOSED` from then on                                                                                                                                            |
+| `Clock`, `Random`, `newId`                 | Injected; the module never reads the system clock, `Math.random` or a UUID source. `Random.next()` returns `[0, 1)`; `newId` makes admission `jti`s                                                                                                                         |
 
 `QueueStore.join` returns a `JoinOutcome`: `{ status: "QUEUED", position }` or
 `{ status: "ADMITTED" }` when the member holds a slot.
@@ -162,8 +167,7 @@ CI start. Adapter-specific tests cover the stored key layout and scores, and for
   authorized by ownership of the hold or order, so an admission that expires mid-checkout breaks
   nothing.
 - **Redis decides only order:** losing the queue degrades fairness, never seat correctness
-  (seat state lives in Postgres, ADR 0005). It does stop new holds: the admitted-set check fails
-  closed.
+  (seat state lives in Postgres, ADR 0005). See [Redis outage](#redis-outage).
 
 ## API and wiring
 
@@ -175,10 +179,12 @@ unknown event) and hands it to the policy; `NOT_OPEN` is returned to the client 
 `ctx.queueStore()`. `booking.holdSeats` and `booking.placeOrder` build the same service for the
 heartbeat and the slot release.
 
-`ctx.queueStore()` (`createLazyQueueStore`) validates `REDIS_URL` (`redis://` or `rediss://`,
-`parseQueueEnv`) on first call, connects one node-redis client per process and reuses it. A bad
-value fails only the queue procedures, naming the variable, is logged once and is not re-read; a
-failed connection is retried on the next call. Context creation never reads `REDIS_URL`.
+`ctx.queueStore()` (`createLazyQueueStore`) validates `REDIS_URL` (`redis://` or `rediss://`) and
+the Redis timeouts (`parseQueueEnv`) on first call and returns one store per process over the
+bounded node-redis client of `createBoundedRedis` (`apps/web/src/server/redis-client.ts`). A bad
+value fails only the queue procedures, naming the variable, is logged once and is not re-read.
+Context creation never reads `REDIS_URL`. Redis is first contacted by the first store call; see
+[Redis outage](#redis-outage) for how its failures are bounded.
 
 ## Admission and slots
 
@@ -192,11 +198,52 @@ the queue service built in `main.ts` on the same keys as the web app (no prefix)
   `now − 90 s`) or whose admission expired (30 min after admission, fixed).
 
 Each loop runs at start and then its interval after each pass ends; a failed pass is logged and
-retried. Heartbeats come from `queue.status` polls and from `booking.holdSeats` (the admitted
-call). `booking.placeOrder` frees the buyer's slot for the hold's event after the order has
-committed. Both are best-effort in the booking router: a Redis failure is logged and never fails
-the hold or the order (seat and order state live in Postgres, ADR 0005); a slot left behind is
-reaped once it goes idle or its admission expires.
+retried, so a Redis outage only pauses admission and reaping (see [Redis outage](#redis-outage)).
+Heartbeats come from `queue.status` polls and from `booking.holdSeats` (the admitted call).
+`booking.placeOrder` frees the buyer's slot for the hold's event after the order has committed.
+Both are best-effort in the booking router: a Redis failure is logged (within the client's
+bounds) and never fails the hold or the order (seat and order state live in Postgres, ADR 0005);
+a slot left behind is reaped once it goes idle or its admission expires.
+
+## Redis outage
+
+Redis decides only queue order and admission (ADR 0005, ADR 0008 amendment of 2026-11-23), so an
+outage fails fast where Redis is needed and leaves everything else running.
+
+- **Bounded clients:** every node-redis client the apps create (web: `createBoundedRedis`;
+  worker: `createWorkerRedis`) goes through `createLazyConnection`: connected on first use,
+  connect bounded by `REDIS_CONNECT_TIMEOUT_MS` (default 2000) and each command by
+  `REDIS_COMMAND_TIMEOUT_MS` (default 1000), validated at each app's boundary (`parseQueueEnv`,
+  `parseWorkerEnv`). `disableOfflineQueue` refuses commands at once while a connection is down.
+  node-redis never reconnects by itself (`reconnectStrategy: false`): it would bound only the TCP
+  connect, so a reconnect whose handshake never answers would leave the client offline for good.
+  Instead a failed connect, a command with no reply in time, a lost connection, or a client found
+  not ready destroys the client, and the next call connects a new one under the connect bound.
+  The command bound is the lazy connection's own: node-redis stops timing a command once it is
+  written, so a hung server would otherwise hold it forever. An error reply, also during the
+  handshake (e.g. `WRONGPASS`), is Redis answering and is rethrown as is, never as an outage.
+- **Queue procedures:** `queue.join`, `queue.status` and `queue.leave` fail with
+  `SERVICE_UNAVAILABLE` ("The waiting room is unavailable right now") within those bounds. No
+  admission is issued meanwhile: the ticker cannot admit, and `status` mints no token.
+- **Admission check fails open on revocation only:** `admittedProcedure` always checks the
+  signature, HS256 (any other algorithm, `none` included, is refused), `exp`, `sub` and `eid`.
+  Only a `RedisUnavailableError` from the `isAdmitted` lookup (connection failure or command
+  timeout, never a `false` answer or a Redis error reply) skips it; the call goes on with the warning
+  "admission revocation check skipped: Redis is unavailable", which names the event, never the
+  token or its `jti`. So during an outage a revoked token stays usable until its fixed `exp`, at
+  most 30 minutes after admission. Seat correctness is unaffected: holds are still decided in
+  Postgres under row locks (ADR 0005).
+- **Booking:** the `holdSeats` heartbeat and the `placeOrder` slot release are best-effort; with
+  Redis down they fail within the bounds, are logged, and the hold or order stands.
+- **Worker:** it starts the relay, the consumers and the sweeper without contacting Redis; the
+  admission ticker and reaper fail their passes (logged) and retry every interval until Redis is
+  back. `/health` reports Redis separately: `{ "status": "ok", "redis": "ok" | "unavailable" }`
+  (a bounded `PING`), always HTTP 200, since the worker itself is up.
+- **Tests:** `setupRedisStandIn()` (`@ticketarena/test-infra`) is a local TCP stand-in in front
+  of the test Redis that a test switches between `forward`, `silent` (accepts, never answers) and
+  `closed` (refused) on one port; the outage tests in `packages/waiting-room`
+  (`lazy-connection.test.ts`), `apps/web` (`queue-store.test.ts`,
+  `routers/redis-outage.test.ts`) and `apps/worker` (`redis-outage.test.ts`) use it.
 
 ## Admission token
 
@@ -214,7 +261,8 @@ reaped once it goes idle or its admission expires.
   only `queue.status` for an admitted session and `holdSeats`, naming the variable.
 - **`admittedProcedure`** (`apps/web/src/server/trpc.ts`): input must carry `eventId`; it
   requires `read(eventId)` claims with `sub = principal.sessionId` and `eid = input.eventId`, and
-  then `QueueStore.isAdmitted(eventId, jti, now)`; anything else is `FORBIDDEN`. Only
+  then `QueueStore.isAdmitted(eventId, jti, now)`; anything else is `FORBIDDEN`. Only when Redis
+  cannot be reached is the `isAdmitted` lookup skipped (see [Redis outage](#redis-outage)). Only
   `booking.holdSeats` uses it. `eventId` is trustworthy because the booking core refuses any seat
   not of that event.
 - **Bypass by design:** `admin.runRace` calls `BookingService.holdSeats` in-process for synthetic

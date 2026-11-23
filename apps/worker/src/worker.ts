@@ -43,6 +43,25 @@ export interface WorkerOptions {
     readonly admitIntervalMs?: number;
     readonly reapIntervalMs?: number;
   };
+  /**
+   * Dependencies `/health` reports on separately, each a bounded probe that rejects when the
+   * dependency is unreachable. Redis is reported, never required: the worker runs without it.
+   */
+  readonly health?: {
+    readonly redis: () => Promise<unknown>;
+  };
+}
+
+/** `/health`: the worker itself is up; Redis, when probed, is `ok` or `unavailable`. */
+async function healthReport(health: WorkerOptions["health"]): Promise<object> {
+  if (health === undefined) {
+    return { status: "ok" };
+  }
+  const redis = await health.redis().then(
+    () => "ok",
+    () => "unavailable",
+  );
+  return { status: "ok", redis };
 }
 
 export interface RunningWorker {
@@ -109,8 +128,10 @@ export async function startWorker(options: WorkerOptions): Promise<RunningWorker
 
   const server = createServer((request, response) => {
     if (request.method === "GET" && request.url === "/health") {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ status: "ok" }));
+      void healthReport(options.health).then((report) => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(report));
+      });
       return;
     }
     response.writeHead(404).end();

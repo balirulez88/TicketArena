@@ -22,7 +22,12 @@ New modules are added when a slice needs them, not speculatively.
   `process.env`; configuration is validated at the app boundary (`parseServerEnv`) and injected.
 - **tRPC context as the composition root:** infrastructure (clock, db, redis, outbox) enters
   procedures through `TRPCContext`. Procedures never import a client directly, which keeps them
-  testable through `createCaller` with fakes at system boundaries only.
+  testable through `createCaller` with fakes at system boundaries only. Booking procedures get
+  their service from `bookingServiceFor(ctx)`; `composeBooking` and `connectBooking` turn one
+  `BookingTimeouts` value into a `BookingRuntime` (client plus those timeouts), and
+  `createTRPCContextFactory(runtime)` sets both `ctx.db` and the required `ctx.bookingTimeouts`
+  from it (see
+  [database](../database/index.md#transaction-timeouts-retries-and-booking_busy)).
 - **Deep modules, narrow interfaces:** each module exposes a small surface (e.g.
   `join/status/leave` for the waiting room) and hides its storage layout.
 - **Packages ship TypeScript source** (`exports` → `src/index.ts`); there is no package build
@@ -151,7 +156,8 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
   lapses (30 min, fixed) meanwhile. "Hold n seats" sends the selection to `booking.holdSeats`; on success the selection is
   emptied and the hold (the mutation's result) shows as a "Your hold" region: its seats, a
   `role="timer"` countdown to the server's `holdExpiresAt` measured on the visitor's clock (the
-  server alone decides expiry), and "Release seats" (`booking.releaseHold`). When the countdown
+  server alone decides expiry), and "Release seats" (`booking.releaseHold`; a release refused with
+  `HOLD_EXPIRED` drops the hold with the same "Your hold expired" alert). When the countdown
   reaches zero with no checkout in doubt, the hold is dropped from the page with a "Your hold
   expired" alert; nothing is sent, as the server already treats it as expired. A checkout in doubt
   at that moment is reconciled first (see Checkout). A failed background refresh of the seat map
@@ -234,8 +240,8 @@ Code: `apps/worker/src/`; decision: [ADR 0013](../adr/0013-deployment-topology.m
 the JetStream topology first, then starts the outbox **relay** (polls every 250 ms, batch of 100) and one
 **consumer runner** per registered consumer, and the **sweeper** (`sweeper.ts`: calls
 `BookingService.sweepExpired()`, which expires holds and then overdue orders, at start and then 15 s after each sweep ends, `SWEEP_INTERVAL_MS`; a
-failed sweep is logged and retried next time; `stop()` cancels the wait at once), the waiting-room **admission ticker** (every 1 s, `ADMIT_INTERVAL_MS`) and **slot reaper** (every 15 s, `REAP_INTERVAL_MS`) in `admission.ts` on the generic `periodic-loop.ts` (same run-then-wait, log-and-retry, prompt-stop behaviour), each a pass over every event (see [waiting room](waiting-room.md#admission-and-slots)), and serves `GET /health`. Configuration is validated once in
-`parseWorkerEnv` (`DATABASE_URL`, `NATS_URL`, `REDIS_URL`, `PORT`, `ADMIT_RATE_PER_SECOND` default 10, `MAX_ACTIVE` default 100) and injected. Details: [messaging](../messaging/index.md).
+failed sweep is logged and retried next time; `stop()` cancels the wait at once), the waiting-room **admission ticker** (every 1 s, `ADMIT_INTERVAL_MS`) and **slot reaper** (every 15 s, `REAP_INTERVAL_MS`) in `admission.ts` on the generic `periodic-loop.ts` (same run-then-wait, log-and-retry, prompt-stop behaviour), each a pass over every event (see [waiting room](waiting-room.md#admission-and-slots)), and serves `GET /health` (`{ status: "ok", redis: "ok" | "unavailable" }`, Redis probed with a bounded `PING`). Redis is never awaited at start: its client (`redis.ts`, `createWorkerRedis`) connects on first use with bounded connects and commands, so an outage pauses only the ticker and reaper ([waiting room](waiting-room.md#redis-outage)). Configuration is validated once in
+`parseWorkerEnv` (`DATABASE_URL`, `NATS_URL`, `REDIS_URL`, `REDIS_CONNECT_TIMEOUT_MS` default 2000, `REDIS_COMMAND_TIMEOUT_MS` default 1000, `PORT`, `ADMIT_RATE_PER_SECOND` default 10, `MAX_ACTIVE` default 100) and injected. Details: [messaging](../messaging/index.md).
 
 ## Logging and ids
 

@@ -17,6 +17,7 @@
     "@ticketarena/db": "workspace:*"
   },
   "devDependencies": {
+    "@neondatabase/serverless": "1.2.0",
     "@ticketarena/test-infra": "workspace:*",
     "@types/node": "26.6.5",
     "redis": "6.3.0",

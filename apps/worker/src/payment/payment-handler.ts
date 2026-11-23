@@ -101,14 +101,15 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
       createdAt: at,
     };
 
+    const settled = outcome.captured
+      ? { status: "CAPTURED" as const, capturedAt: captureTime(order, at) }
+      : { status: "FAILED" as const, failureReason: outcome.reason };
+    if (!(await recordAttempt(tx, { ...attempt, ...settled }))) {
+      return undefined;
+    }
+
     let result: { type: "payment.succeeded" | "payment.failed"; payload: JsonValue };
-    if (outcome.captured) {
-      const capturedAt = order.contact.email.includes(LATE_CAPTURE_MAGIC)
-        ? new Date(new Date(order.paymentDeadline).getTime() + LATE_CAPTURE_AFTER_DEADLINE_MS)
-        : at;
-      await tx.paymentAttempt.create({
-        data: { ...attempt, status: "CAPTURED", capturedAt },
-      });
+    if (settled.status === "CAPTURED") {
       result = {
         type: "payment.succeeded",
         payload: {
@@ -117,13 +118,10 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
           attemptNo: ATTEMPT_NO,
           amount: order.amountMinor,
           currency: order.currency,
-          capturedAt: capturedAt.toISOString(),
+          capturedAt: settled.capturedAt.toISOString(),
         },
       };
     } else {
-      await tx.paymentAttempt.create({
-        data: { ...attempt, status: "FAILED", failureReason: outcome.reason },
-      });
       // Invariant (spec: Mock Payment service): `final: true` lets booking cancel the order and
       // free its seats, so it is never sent while another attempt may still capture or has.
       // The check sees committed attempts only. That suffices while the MVP records only attempt
@@ -142,8 +140,8 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
           paymentId,
           orderId: order.orderId,
           attemptNo: ATTEMPT_NO,
-          final: outcome.final && otherLive === 0,
-          reason: outcome.reason,
+          final: !outcome.captured && outcome.final && otherLive === 0,
+          reason: settled.failureReason,
         },
       };
     }
@@ -168,6 +166,36 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
       { orderId: order.orderId, paymentId, copies, result: result.type },
       "payment attempted",
     );
+  }
+
+  /**
+   * Inserts the attempt unless the order already has one (TD-053). `processed_messages` absorbs a
+   * redelivery, but not an `order.placed` repeated under a new event id; the `(orderId, attemptNo)`
+   * key absorbs that, as `paymentId` does for refunds: the repeat is acked as handled and neither
+   * attempts nor emits again, since the first attempt's result went out with it. A concurrent
+   * repeat's insert waits on the uncommitted row and then skips it. Without this the insert's
+   * unique violation would roll back and be redelivered forever.
+   */
+  async function recordAttempt(
+    tx: TransactionClient,
+    data: Parameters<TransactionClient["paymentAttempt"]["create"]>[0]["data"],
+  ): Promise<boolean> {
+    const inserted = await tx.paymentAttempt.createMany({ data, skipDuplicates: true });
+    if (inserted.count === 0) {
+      logger.info(
+        { orderId: data.orderId, attemptNo: data.attemptNo },
+        "order.placed skipped: the order already has this payment attempt",
+      );
+      return false;
+    }
+    return true;
+  }
+
+  /** Provider time of a capture: `+late@` lands just after the order's payment deadline. */
+  function captureTime(order: { contact: { email: string }; paymentDeadline: string }, at: Date) {
+    return order.contact.email.includes(LATE_CAPTURE_MAGIC)
+      ? new Date(new Date(order.paymentDeadline).getTime() + LATE_CAPTURE_AFTER_DEADLINE_MS)
+      : at;
   }
 
   /** Magic emails decide first (spec: Mock Payment service); otherwise the injected Random. */

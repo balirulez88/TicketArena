@@ -1,12 +1,10 @@
+// Only what code outside the package uses (public-surface.test.ts holds the list). Tests import
+// anything else from its own module.
 export {
   BookingBusyError,
-  type BookingMetric,
   type BookingMetrics,
   type BookingService,
-  type BookingServiceDeps,
   type Buyer,
-  type Clock,
-  type Contact,
   createBookingService,
   HoldExpiredError,
   HoldNotActiveError,
@@ -20,23 +18,18 @@ export {
   MixedCurrencyError,
   NotDemoEventError,
   NotOnSaleError,
-  type OrderLineView,
-  type OrderView,
   ResetBlockedError,
-  type ResetResult,
-  requestHash,
   SeatUnavailableError,
   type SweepResult,
 } from "./booking-service";
 export {
-  createPaymentSagaHandler,
-  type PaymentSagaDeps,
-  type SagaContext,
-  type SagaMessage,
-  type SagaMetric,
-  type SagaMetrics,
-  type SagaOutcome,
-} from "./payment-saga";
+  BOOKING_ACQUIRE_TIMEOUT_MS,
+  type BookingTimeouts,
+  bookingTransactionOptions,
+  DEFAULT_BOOKING_TIMEOUTS,
+  worstCaseBookingBusyMs,
+} from "./booking-transaction";
+export { createPaymentSagaHandler, type SagaMetrics } from "./payment-saga";
 export {
   type BookingMetricCounts,
   type BookingMetricsReader,
@@ -48,17 +41,3 @@ export {
   type RedisMetricsDeleteClient,
   type RedisMetricsReadClient,
 } from "./redis-metrics";
-export {
-  decide,
-  type LedgerDisposition,
-  type LedgerEntry,
-  type NoopReason,
-  type PoisonReason,
-  type RefundReason,
-  type RetryReason,
-  type SagaDecision,
-  type SagaEvent,
-  type SagaOrderState,
-  type SagaOrderStatus,
-  type TransitionReason,
-} from "./saga-decision";

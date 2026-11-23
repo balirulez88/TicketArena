@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { createRedisBookingMetrics, createRedisBookingMetricsReader } from "@ticketarena/booking";
+import {
+  createRedisBookingMetrics,
+  createRedisBookingMetricsReader,
+  DEFAULT_BOOKING_TIMEOUTS,
+} from "@ticketarena/booking";
+import { NOW, testClients, withClient } from "@ticketarena/booking/testing";
 import { silentLogger } from "@ticketarena/contracts";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase, setupTestRedis, setupTestUpstash } from "@ticketarena/test-infra";
 import { createRedisQueueStore } from "@ticketarena/waiting-room";
 import { createClient } from "redis";
@@ -80,23 +85,15 @@ describe("admin.snapshot", () => {
   const upstash = setupTestUpstash();
   const redisClient = createClient({ url: redis.url });
   const upstashClient = createUpstashMetricsClient({ url: upstash.url, token: upstash.token });
-  let prisma: PrismaClient | undefined;
-
-  function db(): PrismaClient {
-    prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
-    return prisma;
-  }
-
-  const NOW = new Date("2027-03-01T12:00:00.000Z");
+  const { db } = testClients(database);
 
   beforeAll(async () => {
     await redisClient.connect();
-    await seedCatalog(db(), NOW);
+    await withClient(database, (seeding) => seedCatalog(seeding, NOW));
   });
 
   afterAll(async () => {
     redisClient.destroy();
-    await prisma?.$disconnect();
   });
 
   const queueStore = () => createRedisQueueStore(redisClient, { prefix: redis.prefix });
@@ -108,6 +105,7 @@ describe("admin.snapshot", () => {
       now: () => NOW,
       principal,
       isAdmin: true,
+      bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
       db: db(),
       logger: silentLogger,
       // Booking records counters fire-and-forget; the test writes them itself, awaited.

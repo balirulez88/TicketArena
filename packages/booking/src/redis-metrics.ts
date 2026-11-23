@@ -16,7 +16,13 @@ export interface RedisMetricsDeleteClient {
   del(key: string): Promise<number>;
 }
 
-export type BookingMetricCounts = Readonly<Record<BookingMetric, number>>;
+/**
+ * The counters the admin dashboard reads. `deadlock_retry` is written to the same hash but is an
+ * operational signal, not a booking outcome, so the dashboard does not show it.
+ */
+type DashboardMetric = Exclude<BookingMetric, "deadlock_retry">;
+
+export type BookingMetricCounts = Readonly<Record<DashboardMetric, number>>;
 
 /** Reads an event's counters, e.g. for the admin dashboard. */
 export interface BookingMetricsReader {
@@ -55,8 +61,8 @@ export function createRedisBookingMetricsReader(
   return {
     async read(eventId) {
       const stored = await client.hGetAll(metricsKey(prefix, eventId));
-      const count = (metric: BookingMetric) => Number(stored[metric] ?? 0);
-      // Listed field by field so a new BookingMetric fails to compile here until it is read.
+      const count = (metric: DashboardMetric) => Number(stored[metric] ?? 0);
+      // Listed field by field so a new dashboard metric fails to compile here until it is read.
       return {
         hold_ok: count("hold_ok"),
         seat_unavailable: count("seat_unavailable"),

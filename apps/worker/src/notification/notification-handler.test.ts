@@ -166,6 +166,75 @@ async function deliver(
   return provider;
 }
 
+interface Settlement {
+  readonly msgId: string | undefined;
+  readonly streamSeq: number;
+  readonly deliveryCount: number;
+  readonly settled: "ack" | "nak" | "term";
+}
+
+/**
+ * A notification consumer on a fresh subject with the envelope published once under its own id.
+ * The bus is observed at the broker boundary, so a test sees how the runner settled each delivery
+ * and that a redelivery is the same message; failures are redelivered without delay.
+ */
+async function redeliveringRunner(envelope: NotifiedEnvelope, provider: MockNotificationProvider) {
+  sequence += 1;
+  const subject = `ta.order.notification-case${sequence}`;
+  const settlements: Settlement[] = [];
+  const observed: MessageBus = {
+    ensureTopology: () => bus.ensureTopology(),
+    publish: (input) => bus.publish(input),
+    close: () => bus.close(),
+    subscribe: async (spec) => {
+      const subscription = await bus.subscribe(spec);
+      return {
+        fetch: async (options) =>
+          (await subscription.fetch(options)).map((message) => {
+            const record = (settled: Settlement["settled"]) =>
+              settlements.push({
+                msgId: message.msgId,
+                streamSeq: message.streamSeq,
+                deliveryCount: message.deliveryCount,
+                settled,
+              });
+            return {
+              ...message,
+              ack: () => {
+                record("ack");
+                message.ack();
+              },
+              nak: (delayMs) => {
+                record("nak");
+                message.nak(delayMs);
+              },
+              term: (reason) => {
+                record("term");
+                message.term(reason);
+              },
+            };
+          }),
+      };
+    },
+  };
+  const runner = await createConsumerRunner({
+    bus: observed,
+    prisma,
+    service: "notification",
+    consumer: `notification-case${sequence}`,
+    filterSubject: subject,
+    retryDelayMs: () => 0,
+    handler: createNotificationHandler({
+      prisma,
+      provider,
+      clock: { now: () => NOW },
+      newId: randomUUID,
+    }),
+  });
+  await bus.publish({ subject, data: JSON.stringify(envelope), msgId: envelope.id });
+  return { runner, settlements };
+}
+
 describe("Notification handler", () => {
   it("sends one email and marks it SENT", async () => {
     const envelope = orderConfirmed({ email: "buyer@example.com" });
@@ -206,25 +275,110 @@ describe("Notification handler", () => {
     expect(provider.deliveries()).toHaveLength(2);
   });
 
-  it("leaves a PENDING record when the provider fails, then resumes it with the same key", async () => {
+  it("TD-062: a failed send is nak'd, redelivered as the same message and resumes its PENDING record with the same key", async () => {
     const envelope = orderConfirmed({ email: "buyer@example.com" });
-    const failing: MockNotificationProvider = {
-      ...createMockNotificationProvider(),
-      send: async () => {
-        throw new Error("provider down");
+    const recorded = createMockNotificationProvider();
+    let failures = 1;
+    const flaky: MockNotificationProvider = {
+      ...recorded,
+      send: async (message) => {
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error("provider down");
+        }
+        await recorded.send(message);
       },
     };
+    const { runner, settlements } = await redeliveringRunner(envelope, flaky);
 
-    await deliver(envelope, failing).catch(() => undefined);
+    await runner.pollOnce();
 
     const pending = await prisma.notification.findMany({ where: { sourceEventId: envelope.id } });
     expect(pending).toMatchObject([{ channel: "EMAIL", status: "PENDING", sentAt: null }]);
 
-    const provider = await deliver(envelope);
+    await expect.poll(() => runner.pollOnce(), { timeout: 5_000 }).toBe(1);
 
+    expect(settlements).toEqual([
+      {
+        msgId: envelope.id,
+        streamSeq: settlements[0]?.streamSeq,
+        deliveryCount: 1,
+        settled: "nak",
+      },
+      {
+        msgId: envelope.id,
+        streamSeq: settlements[0]?.streamSeq,
+        deliveryCount: 2,
+        settled: "ack",
+      },
+    ]);
     const rows = await prisma.notification.findMany({ where: { sourceEventId: envelope.id } });
     expect(rows).toMatchObject([{ id: pending[0]?.id, status: "SENT", sentAt: NOW }]);
-    expect(provider.deliveries()).toMatchObject([{ idempotencyKey: pending[0]?.id }]);
+    expect(recorded.deliveries()).toMatchObject([{ idempotencyKey: pending[0]?.id }]);
+  });
+
+  it("TD-062: an SMS that fails after the EMAIL was sent ends, after redelivery, with both SENT under the same keys and one delivery each", async () => {
+    const envelope = orderConfirmed({ email: "buyer@example.com", phone: "+36301234567" });
+    const recorded = createMockNotificationProvider();
+    const calls: [string, string][] = [];
+    let smsFailures = 1;
+    const smsDown: MockNotificationProvider = {
+      ...recorded,
+      send: async (message) => {
+        calls.push([message.channel, message.idempotencyKey]);
+        if (message.channel === "SMS" && smsFailures > 0) {
+          smsFailures -= 1;
+          throw new Error("SMS gateway down");
+        }
+        await recorded.send(message);
+      },
+    };
+    const { runner, settlements } = await redeliveringRunner(envelope, smsDown);
+
+    await runner.pollOnce();
+
+    // The EMAIL's SENT update rode the rolled-back transaction, so both records stay PENDING.
+    const pending = await prisma.notification.findMany({
+      where: { sourceEventId: envelope.id },
+      orderBy: { channel: "asc" },
+    });
+    expect(pending.map((row) => [row.channel, row.status])).toEqual([
+      ["EMAIL", "PENDING"],
+      ["SMS", "PENDING"],
+    ]);
+    const [email, sms] = pending.map((row) => row.id);
+
+    await expect.poll(() => runner.pollOnce(), { timeout: 5_000 }).toBe(1);
+
+    expect(
+      settlements.map(({ msgId, deliveryCount, settled }) => [msgId, deliveryCount, settled]),
+    ).toEqual([
+      [envelope.id, 1, "nak"],
+      [envelope.id, 2, "ack"],
+    ]);
+    expect(settlements[1]?.streamSeq).toBe(settlements[0]?.streamSeq);
+    const rows = await prisma.notification.findMany({
+      where: { sourceEventId: envelope.id },
+      orderBy: { channel: "asc" },
+    });
+    expect(rows.map((row) => [row.id, row.channel, row.status])).toEqual([
+      [email, "EMAIL", "SENT"],
+      [sms, "SMS", "SENT"],
+    ]);
+    // The EMAIL is offered again under its own key (at-least-once); the provider's key dedupe keeps
+    // it to one delivery, so each channel is delivered exactly once.
+    expect(calls).toEqual([
+      ["EMAIL", email],
+      ["SMS", sms],
+      ["EMAIL", email],
+      ["SMS", sms],
+    ]);
+    expect(
+      recorded.deliveries().map((delivery) => [delivery.channel, delivery.idempotencyKey]),
+    ).toEqual([
+      ["EMAIL", email],
+      ["SMS", sms],
+    ]);
   });
 
   it("records an expiry email for order.expired", async () => {

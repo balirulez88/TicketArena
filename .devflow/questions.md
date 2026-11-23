@@ -554,3 +554,107 @@ What do refund notifications contain and how are the consumers named?
 Assumed: Templates refund-initiated and refund-completed only (email always, SMS with a phone); consumers notification-refund-requested and notification-refunded
 
 Answer: Accepted (2026-11-22): refund-initiated and refund-completed; email always, SMS with a phone; consumers notification-refund-requested and notification-refunded.
+
+## 2026-11-23 11:33 ticket 50
+
+The last criterion asks to mark TD-053/062/065/072 RESOLVED in docs/technical-debt.md, but CLAUDE.md declares that register frozen (not updated by runs) and CI checks it for changes.
+
+Assumed: Leave docs/technical-debt.md untouched; the commit message names each TD and the tests that prove it, so a human can close the entries
+
+Answer: Accepted (2026-11-23): the register stays unchanged; a human closes the entries from the test evidence named in the commit.
+
+## 2026-11-23 11:43 ticket 50
+
+What does the Payment consumer do with order.placed redelivered under a new event id for an order that already has a payment attempt (TD-053)?
+
+Assumed: Idempotent skip: acked, processed_messages row committed, no second attempt and no second payment.succeeded/failed (createMany skipDuplicates on orderId+attemptNo). An invalid order.placed payload stays a thrown parse error, nak'd on the ADR 0011 schedule
+
+Answer: Accepted (2026-11-23): idempotent skip with a processed_messages row, no new payment attempt and no outcome event. An invalid payload still fails and is redelivered on the ADR 0011 schedule.
+
+## 2026-11-23 12:34 ticket 54
+
+Which metrics eventId key does booking_busy use when placeOrder fails before its event is known?
+
+Assumed: eventId = "unknown" (Redis hash booking:metrics:unknown), documented in docs/database/index.md
+
+Answer: Accepted (2026-11-23): eventId = "unknown"; documented, and it cannot collide with a UUID.
+
+## 2026-11-23 12:34 ticket 54
+
+What acquire timeout, maxWait, margin and jitter does booking use?
+
+Assumed: acquireTimeoutMs = maxWait = 3s (room for a cold Neon start); margin 1s so the Prisma timeout is 3x3s+5s+1s = 15s; jitter 20 + floor(random*180) ms; worst case (retries+1)*(maxWait+timeout)+retries*200ms = 72.6s
+
+Answer: Accepted (2026-11-23): 3 s / 3 s / 1 s / 20-199 ms. 72.6 s bounds the transaction attempts only; the reads before the transaction come on top of it.
+
+## 2026-11-23 12:34 ticket 54
+
+How is a statement_timeout 57014 told apart from a pg_cancel_backend 57014?
+
+Assumed: By the driver's originalMessage, pinned in both real-Postgres tests
+
+Answer: Accepted (2026-11-23): by originalMessage; the exact messages are pinned by real-Postgres tests.
+
+## 2026-11-23 12:34 ticket 54
+
+Should the 3s acquire timeout apply only to booking queries?
+
+Assumed: It applies to the whole production web Prisma client (one pool); deadlock_retry is a new BookingMetric not shown on the admin dashboard
+
+Answer: Accepted (2026-11-23): consistent for one shared pool; showing deadlock_retry on the dashboard is not a ticket requirement.
+
+## 2026-11-23 12:42 ticket 55
+
+TD-016 asks its Resolution in docs/technical-debt.md to state the flag mechanism and argument, but the register is frozen
+
+Assumed: Register untouched; the mechanism and soundness argument go in a WHY comment at the clock-after-lock test and in the commit message
+
+Answer: Accepted (2026-11-23): WHY comment and commit message; the register can be updated by hand later.
+
+## 2026-11-23 13:51 ticket 55
+
+TD-079 asks to compare database-clock commit timestamps; track_commit_timestamp is off and a refused hold writes no row
+
+Assumed: Proved by the order of reads from the injected clock (reads.lastIndexOf(queuedFirst) < reads.lastIndexOf(other)) per test.each case
+
+Answer: Accepted (2026-11-23): the buyer lock is held until the transaction ends, so the order of clock reads inside it is valid evidence. For a refused hold this is rollback order, not a commit timestamp.
+
+## 2026-11-23 13:51 ticket 55
+
+How does TD-006 run shuffled in the gate?
+
+Assumed: Separate web-shuffled / db-shuffled Vitest projects for catalog.test.ts and seed.test.ts with root sequence.seed 3; admin-demo.test.ts is order-dependent when shuffled (pre-existing) and stays out of the shuffled project
+
+Answer: Accepted (2026-11-23): separate catalog/seed projects with a fixed seed; leaving admin-demo out meets the criterion.
+
+## 2026-11-23 13:51 ticket 55
+
+seed.test.ts cannot import @ticketarena/booking/testing (booking depends on db)
+
+Assumed: seed.test.ts opens and closes its own client per test and keeps its own NOW
+
+Answer: Accepted (2026-11-23): it avoids reversing the booking -> db dependency.
+
+## 2026-11-23 14:39 ticket 63
+
+Which Redis timeouts and reconnect policy do the apps use?
+
+Assumed: REDIS_CONNECT_TIMEOUT_MS 2000 and REDIS_COMMAND_TIMEOUT_MS 1000 (zod-validated, injected); no retry before the first connect (client destroyed and rebuilt on next use), backoff min(50*2^n, 2000) ms after; the lazy connection enforces its own command deadline because node-redis 6.3's timeout stops once a command is written
+
+Answer: Accepted with a fix (2026-11-23): 2000/1000 ms are right, but every reconnect handshake must be bounded too (PR #16 review, HIGH 2). Fixed in bd8b47c: node-redis no longer reconnects by itself; the lazy connection replaces a client that is not ready and connects under REDIS_CONNECT_TIMEOUT_MS, so the backoff is gone.
+
+## 2026-11-23 14:39 ticket 63
+
+What counts as 'Redis unreachable' and what do queue procedures answer?
+
+Assumed: Any node-redis failure that is not an ErrorReply becomes RedisUnavailableError (fail open on revocation only); an error reply still fails admittedProcedure. Queue procedures answer SERVICE_UNAVAILABLE 'The waiting room is unavailable right now; try again shortly'
+
+Answer: Overridden (2026-11-23): a server error reply fails closed even during the handshake (PR #16 review, HIGH 1); fixed in bd8b47c, so a WRONGPASS is rethrown as is, never RedisUnavailableError. SERVICE_UNAVAILABLE for the queue procedures is accepted.
+
+## 2026-11-23 14:39 ticket 63
+
+How does the worker /health report Redis?
+
+Assumed: HTTP 200 {status:'ok', redis:'ok'|'unavailable'} from a bounded PING; the Upstash queue adapter is unchanged (neither app uses it), so choosing Upstash would fail closed on an outage
+
+Answer: Accepted (2026-11-23): HTTP 200 with a separate Redis state from a bounded PING; the Upstash queue adapter's limit is documented.

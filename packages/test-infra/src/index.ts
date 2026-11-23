@@ -5,6 +5,7 @@ import { deleteStreams } from "./nats";
 import { createDatabaseFromTemplate, dropDatabase } from "./postgres";
 import type {} from "./provided-context";
 import { deleteRedisKeys } from "./redis";
+import { type RedisStandIn, type RedisStandInMode, startRedisStandIn } from "./redis-stand-in";
 import { deleteUpstashKeys, upstashCommand } from "./upstash";
 
 export type { TestEnv } from "./env";
@@ -50,6 +51,44 @@ export function setupTestRedis(): TestRedis {
   const prefix = `test:${randomBytes(4).toString("hex")}:`;
   afterAll(() => deleteRedisKeys(env.redisUrl, prefix));
   return { url: env.redisUrl, prefix };
+}
+
+export type { RedisStandIn, RedisStandInMode } from "./redis-stand-in";
+
+export interface TestRedisStandIn extends Omit<RedisStandIn, "close"> {
+  /** Every key this file writes through the stand-in must start with this prefix. */
+  readonly prefix: string;
+}
+
+/**
+ * A Redis the file can stop, hang and bring back (`setMode`) on one fixed local port, in front of
+ * the real test Redis; it starts in `initialMode`. For outage tests: no mock of our own modules.
+ */
+export function setupRedisStandIn(initialMode: RedisStandInMode = "forward"): TestRedisStandIn {
+  const env = loadTestEnv();
+  const prefix = `test:${randomBytes(4).toString("hex")}:`;
+  let standIn: RedisStandIn | undefined;
+  beforeAll(async () => {
+    standIn = await startRedisStandIn(env.redisUrl, initialMode);
+  });
+  afterAll(async () => {
+    await standIn?.close();
+    await deleteRedisKeys(env.redisUrl, prefix);
+  });
+  const started = (): RedisStandIn => {
+    if (standIn === undefined) {
+      throw new Error("setupRedisStandIn: the stand-in is available only inside tests and hooks");
+    }
+    return standIn;
+  };
+  return {
+    prefix,
+    get url() {
+      return started().url;
+    },
+    setMode: (mode) => started().setMode(mode),
+    openConnections: () => started().openConnections(),
+  };
 }
 
 export interface TestUpstash {

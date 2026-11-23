@@ -70,6 +70,7 @@ interface DeliveryDeps {
   runnerPrisma?: PrismaClient;
   runnerBus?: MessageBus;
   ackWaitMs?: number;
+  retryDelayMs?: (deliveryCount: number) => number;
 }
 
 /** Builds a payment consumer from the given deps on a fresh durable name and subject. */
@@ -83,6 +84,7 @@ async function paymentRunner(deps: DeliveryDeps = {}) {
     consumer: `payment-case${sequence}`,
     filterSubject: subject,
     ...(deps.ackWaitMs === undefined ? {} : { ackWaitMs: deps.ackWaitMs }),
+    ...(deps.retryDelayMs === undefined ? {} : { retryDelayMs: deps.retryDelayMs }),
     ...createPaymentHandler({
       clock: {
         now: () => CAPTURE_TIME,
@@ -106,7 +108,53 @@ async function deliver(email: string, deps: DeliveryDeps = {}, placed = orderPla
   const { runner, subject } = await paymentRunner(deps);
   await bus.publish({ subject, data: JSON.stringify(placed.envelope), msgId: placed.envelope.id });
   await runner.pollOnce();
-  return { ...placed, runner };
+  return { ...placed, runner, subject };
+}
+
+interface Settlement {
+  readonly msgId: string | undefined;
+  readonly streamSeq: number;
+  readonly deliveryCount: number;
+  readonly settled: "ack" | "nak" | "term";
+}
+
+/** The shared bus, observed at the broker boundary: how the runner settled each delivery. */
+function observedBus(settlements: Settlement[]): MessageBus {
+  return {
+    ensureTopology: () => bus.ensureTopology(),
+    publish: (input) => bus.publish(input),
+    close: () => bus.close(),
+    subscribe: async (spec) => {
+      const subscription = await bus.subscribe(spec);
+      return {
+        fetch: async (options) =>
+          (await subscription.fetch(options)).map((message) => {
+            const record = (settled: Settlement["settled"]) =>
+              settlements.push({
+                msgId: message.msgId,
+                streamSeq: message.streamSeq,
+                deliveryCount: message.deliveryCount,
+                settled,
+              });
+            return {
+              ...message,
+              ack: () => {
+                record("ack");
+                message.ack();
+              },
+              nak: (delayMs) => {
+                record("nak");
+                message.nak(delayMs);
+              },
+              term: (reason) => {
+                record("term");
+                message.term(reason);
+              },
+            };
+          }),
+      };
+    },
+  };
 }
 
 function failedEventsFor(orderId: string) {
@@ -388,4 +436,167 @@ describe("mock Payment handler", () => {
       ]);
     },
   );
+
+  it("TD-053: skips an order.placed redelivered under a new event id once the order has an attempt", async () => {
+    const settlements: Settlement[] = [];
+    const placed = await deliver("buyer@example.com", { runnerBus: observedBus(settlements) });
+    const repeatId = randomUUID();
+
+    await bus.publish({
+      subject: placed.subject,
+      data: JSON.stringify({ ...placed.envelope, id: repeatId }),
+      msgId: repeatId,
+    });
+    await placed.runner.pollOnce();
+
+    // Acked as handled (its dedupe row committed), not nak'd into an endless retry.
+    expect(settlements.map(({ msgId, settled }) => [msgId, settled])).toEqual([
+      [placed.envelope.id, "ack"],
+      [repeatId, "ack"],
+    ]);
+    expect(await prisma.paymentProcessedMessage.count({ where: { messageId: repeatId } })).toBe(1);
+    // ...and it neither attempted the payment again nor emitted a second result.
+    expect(await prisma.paymentAttempt.count({ where: { orderId: placed.orderId } })).toBe(1);
+    expect(await succeededEventsFor(placed.orderId)).toBe(1);
+    expect(await failedEventsFor(placed.orderId)).toEqual([]);
+  });
+
+  it("TD-053: two order.placed for one order that race on separate connections yield one attempt and one payment.succeeded, both acked", async () => {
+    const settlements: Settlement[] = [];
+    const placed = orderPlaced("buyer@example.com");
+    const repeat = { ...placed.envelope, id: randomUUID() };
+    // Each runner gets its own client (pool) and application_name, so the test can see when each
+    // one's transaction is blocked on a lock.
+    const clientNamed = (name: string) => {
+      const url = new URL(database.url);
+      url.searchParams.set("application_name", name);
+      return createPrismaClient({ connectionString: url.toString(), driver: "pg" });
+    };
+    const firstName = `payment_race_first_${sequence}`;
+    const repeatName = `payment_race_repeat_${sequence}`;
+    const firstPrisma = clientNamed(firstName);
+    const repeatPrisma = clientNamed(repeatName);
+    const blockedOnLock = async (...names: string[]) => {
+      const [row] = await prisma.$queryRaw<{ count: bigint }[]>`
+        SELECT count(*) AS "count" FROM pg_stat_activity
+        WHERE "application_name" = ANY(${names}) AND "wait_event_type" = 'Lock'`;
+      return Number(row?.count ?? 0n);
+    };
+    let release: () => void = () => undefined;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked: () => void = () => undefined;
+    const outboxLocked = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    try {
+      // Holding back outbox inserts parks the first delivery after its attempt insert, inside its
+      // still-open transaction, so the repeat's attempt insert meets an uncommitted row.
+      const outboxGate = prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`LOCK TABLE payment.outbox_events IN SHARE MODE`;
+          locked();
+          await released;
+        },
+        { timeout: 30_000 },
+      );
+      await outboxLocked;
+      const first = await paymentRunner({
+        runnerPrisma: firstPrisma,
+        runnerBus: observedBus(settlements),
+      });
+      const second = await paymentRunner({
+        runnerPrisma: repeatPrisma,
+        runnerBus: observedBus(settlements),
+      });
+      await bus.publish({
+        subject: first.subject,
+        data: JSON.stringify(placed.envelope),
+        msgId: placed.envelope.id,
+      });
+      await bus.publish({
+        subject: second.subject,
+        data: JSON.stringify(repeat),
+        msgId: repeat.id,
+      });
+
+      const firstPoll = first.runner.pollOnce();
+      await expect.poll(() => blockedOnLock(firstName), { timeout: 10_000 }).toBe(1);
+      const repeatPoll = second.runner.pollOnce();
+      // Both transactions are open at once: the repeat waits on the first's uncommitted attempt.
+      await expect.poll(() => blockedOnLock(firstName, repeatName), { timeout: 10_000 }).toBe(2);
+      release();
+      await Promise.all([outboxGate, firstPoll, repeatPoll]);
+
+      expect(settlements.map(({ msgId, settled }) => [msgId, settled]).sort()).toEqual(
+        [
+          [placed.envelope.id, "ack"],
+          [repeat.id, "ack"],
+        ].sort(),
+      );
+      expect(
+        await prisma.paymentProcessedMessage.count({
+          where: { messageId: { in: [placed.envelope.id, repeat.id] } },
+        }),
+      ).toBe(2);
+      expect(await prisma.paymentAttempt.count({ where: { orderId: placed.orderId } })).toBe(1);
+      expect(await succeededEventsFor(placed.orderId)).toBe(1);
+      expect(await failedEventsFor(placed.orderId)).toEqual([]);
+    } finally {
+      release();
+      await firstPrisma.$disconnect();
+      await repeatPrisma.$disconnect();
+    }
+  });
+
+  it("TD-053: skips the repeat of a failed attempt too, without a second payment.failed", async () => {
+    const placed = await deliver("buyer+fail@example.com");
+    const repeatId = randomUUID();
+
+    await bus.publish({
+      subject: placed.subject,
+      data: JSON.stringify({ ...placed.envelope, id: repeatId }),
+      msgId: repeatId,
+    });
+    await placed.runner.pollOnce();
+
+    expect(await prisma.paymentProcessedMessage.count({ where: { messageId: repeatId } })).toBe(1);
+    expect(
+      await prisma.paymentAttempt.findMany({ where: { orderId: placed.orderId } }),
+    ).toMatchObject([{ attemptNo: 1, status: "FAILED" }]);
+    expect(await failedEventsFor(placed.orderId)).toHaveLength(1);
+  });
+
+  it("TD-053: rejects an invalid order.placed without side effects and keeps rejecting its redelivery", async () => {
+    const settlements: Settlement[] = [];
+    const placed = orderPlaced("buyer@example.com");
+    const invalid = {
+      ...placed.envelope,
+      payload: { ...placed.envelope.payload, amountMinor: "twelve" },
+    };
+    const { runner, subject } = await paymentRunner({
+      runnerBus: observedBus(settlements),
+      retryDelayMs: () => 0,
+    });
+
+    await bus.publish({ subject, data: JSON.stringify(invalid), msgId: invalid.id });
+    await runner.pollOnce();
+    await expect.poll(() => runner.pollOnce(), { timeout: 5_000 }).toBe(1);
+
+    // nak'd, then redelivered as the same message and nak'd again: never acked as handled.
+    expect(settlements).toEqual([
+      { msgId: invalid.id, streamSeq: settlements[0]?.streamSeq, deliveryCount: 1, settled: "nak" },
+      { msgId: invalid.id, streamSeq: settlements[0]?.streamSeq, deliveryCount: 2, settled: "nak" },
+    ]);
+    expect(await prisma.paymentProcessedMessage.count({ where: { messageId: invalid.id } })).toBe(
+      0,
+    );
+    expect(await prisma.paymentAttempt.count({ where: { orderId: placed.orderId } })).toBe(0);
+    expect(
+      await prisma.paymentOutboxEvent.count({
+        where: { payload: { path: ["orderId"], equals: placed.orderId } },
+      }),
+    ).toBe(0);
+  });
 });

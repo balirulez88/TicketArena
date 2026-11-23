@@ -8,10 +8,10 @@ import {
   createRedisQueueStore,
   createScheduleAdmissionPolicy,
 } from "@ticketarena/waiting-room";
-import { createClient } from "redis";
 import { createServiceConsumers } from "./consumers.js";
 import { parseWorkerEnv } from "./env.js";
 import { createWorkerLogger } from "./logger.js";
+import { createWorkerRedis } from "./redis.js";
 import { startWorker } from "./worker.js";
 
 const env = parseWorkerEnv(process.env);
@@ -21,25 +21,28 @@ const bus = await connectJetStreamMessageBus({ servers: env.NATS_URL });
 // The composition root is the only place that reads the system clock and Math.random.
 const clock = { now: () => new Date(), sleep: (ms: number) => delay(ms) };
 const booking = createBookingService({ db: prisma, clock, newId: randomUUID, logger });
-const redis = createClient({ url: env.REDIS_URL });
-// Without a listener node-redis rethrows socket errors as uncaught exceptions; a failed tick is
-// retried by the loop, and node-redis reconnects on its own.
-redis.on("error", (error: unknown) => {
-  logger.error({ err: error instanceof Error ? error.message : String(error) }, "queue redis");
+// Connected on first use, never awaited here: the relay, the consumers and the sweeper must start
+// while Redis is down (ticket 63); the ticker and reaper fail their passes and retry until it is up.
+const redis = createWorkerRedis({
+  url: env.REDIS_URL,
+  timeouts: {
+    connectTimeoutMs: env.REDIS_CONNECT_TIMEOUT_MS,
+    commandTimeoutMs: env.REDIS_COMMAND_TIMEOUT_MS,
+  },
+  logger,
 });
-await redis.connect();
 const consumers = createServiceConsumers({
   prisma,
   clock,
   random: { next: Math.random },
   newId: randomUUID,
   // No prefix: the same per-event counter hash the web app's booking counters use.
-  sagaMetrics: createRedisBookingMetrics(redis),
+  sagaMetrics: createRedisBookingMetrics(redis.metricsClient),
   logger,
 });
 const queue = createQueueService({
   // No prefix: the same keys the web app reads and writes.
-  store: createRedisQueueStore(redis, { prefix: "" }),
+  store: createRedisQueueStore(redis.queueClient, { prefix: "" }),
   policy: createScheduleAdmissionPolicy(),
   clock,
   random: { next: Math.random },
@@ -57,13 +60,14 @@ const worker = await startWorker({
     queue,
     limits: { admitRate: env.ADMIT_RATE_PER_SECOND, maxActive: env.MAX_ACTIVE },
   },
+  health: { redis: redis.ping },
 });
 logger.info({ port: worker.port }, "worker listening");
 
 async function shutdown(): Promise<void> {
   await worker.stop();
   await bus.close();
-  redis.destroy();
+  redis.close();
   await prisma.$disconnect();
   process.exit(0);
 }

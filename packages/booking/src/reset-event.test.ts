@@ -1,60 +1,27 @@
 import { randomUUID } from "node:crypto";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { type Buyer, createBookingService, createPaymentSagaHandler } from "./index";
+import { describe, expect, test } from "vitest";
+import { createPaymentSagaHandler } from "./index";
+import { block, bookingTestBed, freshBuyer, NOW, rowLock, waitForPg } from "./testing";
 
 const database = setupTestDatabase();
-let prisma: PrismaClient | undefined;
-
-function db(): PrismaClient {
-  prisma ??= createPrismaClient({ connectionString: database.url, driver: "pg" });
-  return prisma;
-}
-
-const NOW = new Date("2027-03-01T12:00:00.000Z");
-
-const service = (now = NOW) =>
-  createBookingService({ db: db(), clock: { now: () => now }, newId: randomUUID });
+const { db, at, freeSeats, service } = bookingTestBed(database);
 
 /** A non-demo event is upcoming at NOW; holding its seats needs a clock past its on-sale. */
-const onSale = (event: { onSaleAt: Date }) => service(event.onSaleAt);
+const onSale = (event: { onSaleAt: Date }) => at(event.onSaleAt);
 
 /** Past every hold's expiry and every order's payment deadline plus settlement grace. */
 const SWEPT_AT = new Date(NOW.getTime() + 11 * 60_000);
-const sweeper = () =>
-  createBookingService({ db: db(), clock: { now: () => SWEPT_AT }, newId: randomUUID });
-
-function buyer(): Buyer {
-  const key = randomUUID().replaceAll("-", "");
-  return { sessionId: key, buyerKey: key };
-}
-
-beforeAll(async () => {
-  await seedCatalog(db(), NOW);
-});
-
-afterAll(async () => {
-  await prisma?.$disconnect();
-});
+const sweeper = () => at(SWEPT_AT);
 
 async function demoEvent() {
   return db().event.findFirstOrThrow({ where: { demo: true } });
 }
 
-async function freeSeats(eventId: string, count: number): Promise<string[]> {
-  const seats = await db().seat.findMany({
-    where: { eventId, status: "AVAILABLE" },
-    orderBy: { id: "asc" },
-    take: count,
-  });
-  return seats.map((seat) => seat.id);
-}
-
 /** A placed order, still `PENDING_PAYMENT`, on one free seat of the event. */
 async function placedOrder(eventId: string) {
-  const owner = buyer();
-  const hold = await service().holdSeats(owner, eventId, await freeSeats(eventId, 1));
+  const owner = freshBuyer();
+  const hold = await service().holdSeats(owner, eventId, (await freeSeats(1, { eventId })).seatIds);
   return service().placeOrder(owner, hold.id, { email: "buyer@example.com" }, randomUUID());
 }
 
@@ -80,7 +47,11 @@ describe("BookingService.resetEvent", () => {
   test("clears the demo event's holds, orders and ledger rows and frees its seats; keeps every other history", async () => {
     const event = await demoEvent();
     const other = await db().event.findFirstOrThrow({ where: { demo: false } });
-    await service().holdSeats(buyer(), event.id, await freeSeats(event.id, 2));
+    await service().holdSeats(
+      freshBuyer(),
+      event.id,
+      (await freeSeats(2, { eventId: event.id })).seatIds,
+    );
     const sold = await placedOrder(event.id);
     const paymentId = await confirm(sold.id, sold.holdId);
     // The Payment and Notification services' own history of the sale (ADR 0009).
@@ -108,9 +79,9 @@ describe("BookingService.resetEvent", () => {
       },
     });
     const otherHold = await onSale(other).holdSeats(
-      buyer(),
+      freshBuyer(),
       other.id,
-      await freeSeats(other.id, 1),
+      (await freeSeats(1, { eventId: other.id })).seatIds,
     );
     const outboxBefore = await db().outboxEvent.count();
 
@@ -150,12 +121,12 @@ describe("BookingService.resetEvent", () => {
 
   test("after a reset the demo event sells again from scratch", async () => {
     const event = await demoEvent();
-    const [seatId = ""] = await freeSeats(event.id, 1);
-    const first = buyer();
+    const [seatId = ""] = (await freeSeats(1, { eventId: event.id })).seatIds;
+    const first = freshBuyer();
     await service().holdSeats(first, event.id, [seatId]);
     await service().resetEvent(event.id);
 
-    const again = buyer();
+    const again = freshBuyer();
     const hold = await service().holdSeats(again, event.id, [seatId]);
     const order = await service().placeOrder(
       again,
@@ -220,7 +191,11 @@ describe("BookingService.resetEvent", () => {
 
   test("an event that is not the demo event, or does not exist, is refused untouched", async () => {
     const other = await db().event.findFirstOrThrow({ where: { demo: false } });
-    await onSale(other).holdSeats(buyer(), other.id, await freeSeats(other.id, 1));
+    await onSale(other).holdSeats(
+      freshBuyer(),
+      other.id,
+      (await freeSeats(1, { eventId: other.id })).seatIds,
+    );
     const holdsBefore = await db().hold.count({ where: { eventId: other.id } });
 
     await expect(service().resetEvent(other.id)).rejects.toMatchObject({ code: "NOT_DEMO_EVENT" });
@@ -258,9 +233,16 @@ async function waitsOnLock(pattern: string): Promise<boolean> {
   return (rows[0]?.waiting ?? 0) > 0;
 }
 
-/** Returns once the matching statement is parked on a lock: the interleaving is observed. */
-async function parkedAt(pattern: string): Promise<void> {
-  await expect.poll(() => waitsOnLock(pattern), { timeout: 10_000 }).toBe(true);
+/**
+ * Returns once the matching statement is parked on a lock: the interleaving is observed. Raced
+ * against the racer that should park there, so one that finishes or fails first ends the wait.
+ */
+async function parkedAt(pattern: string, racer: Promise<unknown>): Promise<void> {
+  await waitForPg(
+    `a statement like ${pattern} waiting on a lock`,
+    async () => ((await waitsOnLock(pattern)) ? true : undefined),
+    { against: racer },
+  );
 }
 
 // The statement each racer parks on, as pg_stat_activity shows it.
@@ -275,12 +257,14 @@ const ORDER_SWEEP_SEATS = `%FROM seats%"holdId" = ANY%'IN_CHECKOUT'%FOR UPDATE%`
 
 const PARKING = { timeout: 20_000 };
 
-/** Holds a row lock on `seatId` while `whileLocked` runs; the lock goes when it returns. */
+/** Holds a row lock on `seatId` in a blocker session while `whileLocked` runs. */
 async function withSeatLocked(seatId: string, whileLocked: () => Promise<void>): Promise<void> {
-  await db().$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM seats WHERE id = ${seatId}::uuid FOR UPDATE`;
+  const blocker = await block(db(), rowLock("seats", [seatId]), { what: "the parking seat lock" });
+  try {
     await whileLocked();
-  }, PARKING);
+  } finally {
+    await blocker.release();
+  }
 }
 
 // Each test parks the racers in one interleaving with a seat lock and pg_stat_activity, then
@@ -288,8 +272,12 @@ async function withSeatLocked(seatId: string, whileLocked: () => Promise<void>):
 describe("BookingService.resetEvent racing bookings", () => {
   test("a hold committed after the reset locked the holds blocks the reset, which changes nothing", async () => {
     const event = await demoEvent();
-    const early = await service().holdSeats(buyer(), event.id, await freeSeats(event.id, 1));
-    const [blocker = "", late = ""] = await freeSeats(event.id, 2);
+    const early = await service().holdSeats(
+      freshBuyer(),
+      event.id,
+      (await freeSeats(1, { eventId: event.id })).seatIds,
+    );
+    const [blocker = "", late = ""] = (await freeSeats(2, { eventId: event.id })).seatIds;
     let resetting = NOT_STARTED;
     let lateHoldId = "";
 
@@ -297,8 +285,8 @@ describe("BookingService.resetEvent racing bookings", () => {
     // `late`, which a booking then holds and commits.
     await withSeatLocked(blocker, async () => {
       resetting = settle(service().resetEvent(event.id));
-      await parkedAt(RESET_SEATS);
-      lateHoldId = (await service().holdSeats(buyer(), event.id, [late])).id;
+      await parkedAt(RESET_SEATS, resetting);
+      lateHoldId = (await service().holdSeats(freshBuyer(), event.id, [late])).id;
     });
 
     expect(errorCode(await resetting)).toBe("RESET_BLOCKED");
@@ -314,8 +302,12 @@ describe("BookingService.resetEvent racing bookings", () => {
 
   test("an order placed while the reset waits on its hold is seen, and blocks the reset", async () => {
     const event = await demoEvent();
-    const owner = buyer();
-    const hold = await service().holdSeats(owner, event.id, await freeSeats(event.id, 1));
+    const owner = freshBuyer();
+    const hold = await service().holdSeats(
+      owner,
+      event.id,
+      (await freeSeats(1, { eventId: event.id })).seatIds,
+    );
     const [seatId = ""] = hold.seatIds;
     let placing = NOT_STARTED;
     let resetting = NOT_STARTED;
@@ -325,9 +317,9 @@ describe("BookingService.resetEvent racing bookings", () => {
       placing = settle(
         service().placeOrder(owner, hold.id, { email: "b@example.com" }, randomUUID()),
       );
-      await parkedAt(PLACE_ORDER_SEATS);
+      await parkedAt(PLACE_ORDER_SEATS, placing);
       resetting = settle(service().resetEvent(event.id));
-      await parkedAt(RESET_HOLDS);
+      await parkedAt(RESET_HOLDS, resetting);
     });
 
     expect((await placing).ok).toBe(true);
@@ -346,20 +338,24 @@ describe("BookingService.resetEvent racing bookings", () => {
 
   test("an order placed on a hold the reset already owns finds the hold gone", async () => {
     const event = await demoEvent();
-    const owner = buyer();
-    const hold = await service().holdSeats(owner, event.id, await freeSeats(event.id, 1));
-    const [blocker = ""] = await freeSeats(event.id, 1);
+    const owner = freshBuyer();
+    const hold = await service().holdSeats(
+      owner,
+      event.id,
+      (await freeSeats(1, { eventId: event.id })).seatIds,
+    );
+    const [blocker = ""] = (await freeSeats(1, { eventId: event.id })).seatIds;
     let placing = NOT_STARTED;
     let resetting = NOT_STARTED;
 
     // The reset owns the hold and parks on a seat; placeOrder then parks on that hold.
     await withSeatLocked(blocker, async () => {
       resetting = settle(service().resetEvent(event.id));
-      await parkedAt(RESET_SEATS);
+      await parkedAt(RESET_SEATS, resetting);
       placing = settle(
         service().placeOrder(owner, hold.id, { email: "b@example.com" }, randomUUID()),
       );
-      await parkedAt(PLACE_ORDER_HOLD);
+      await parkedAt(PLACE_ORDER_HOLD, placing);
     });
 
     expect(await resetting).toMatchObject({
@@ -405,9 +401,9 @@ describe("BookingService.resetEvent racing bookings", () => {
       confirming = settle(
         db().$transaction((tx) => saga(tx, message, { emit: async () => undefined }), PARKING),
       );
-      await parkedAt(SAGA_SEATS);
+      await parkedAt(SAGA_SEATS, confirming);
       resetting = settle(service().resetEvent(event.id));
-      await parkedAt(RESET_ORDERS);
+      await parkedAt(RESET_ORDERS, resetting);
     });
 
     expect(await confirming).toEqual({ ok: true, value: undefined });
@@ -419,16 +415,20 @@ describe("BookingService.resetEvent racing bookings", () => {
 
   test("the hold sweeper owning a hold the reset waits for: both finish without deadlock", async () => {
     const event = await demoEvent();
-    const hold = await service().holdSeats(buyer(), event.id, await freeSeats(event.id, 1));
+    const hold = await service().holdSeats(
+      freshBuyer(),
+      event.id,
+      (await freeSeats(1, { eventId: event.id })).seatIds,
+    );
     const [seatId = ""] = hold.seatIds;
     let sweeping = NOT_STARTED;
     let resetting = NOT_STARTED;
 
     await withSeatLocked(seatId, async () => {
       sweeping = settle(sweeper().sweepExpired());
-      await parkedAt(HOLD_SWEEP_SEATS);
+      await parkedAt(HOLD_SWEEP_SEATS, sweeping);
       resetting = settle(service().resetEvent(event.id));
-      await parkedAt(RESET_HOLDS);
+      await parkedAt(RESET_HOLDS, resetting);
     });
 
     expect(await sweeping).toMatchObject({
@@ -450,9 +450,9 @@ describe("BookingService.resetEvent racing bookings", () => {
 
     await withSeatLocked(seatId, async () => {
       sweeping = settle(sweeper().sweepExpired());
-      await parkedAt(ORDER_SWEEP_SEATS);
+      await parkedAt(ORDER_SWEEP_SEATS, sweeping);
       resetting = settle(service().resetEvent(event.id));
-      await parkedAt(RESET_ORDERS);
+      await parkedAt(RESET_ORDERS, resetting);
     });
 
     expect(await sweeping).toMatchObject({ ok: true, value: { expiredOrderIds: [order.id] } });

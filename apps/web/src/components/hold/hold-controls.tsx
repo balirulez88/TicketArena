@@ -4,6 +4,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { inferRouterOutputs } from "@trpc/server";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { checkoutFailure } from "@/components/checkout/checkout-failure";
 import { CheckoutForm } from "@/components/checkout/checkout-form";
 import { OrderStatus } from "@/components/checkout/order-status";
 import type { SeatMapSeat } from "@/components/seat-map/seat-map";
@@ -83,7 +84,18 @@ function ActiveHold({
   readonly onCheckoutExpired: () => void;
 }) {
   const trpc = useTRPC();
-  const release = useMutation(trpc.booking.releaseHold.mutationOptions({ onSuccess: onReleased }));
+  const release = useMutation(
+    trpc.booking.releaseHold.mutationOptions({
+      onSuccess: onReleased,
+      // The server refuses to release an expired hold, swept or not; its seats are freed by the
+      // sweeper either way, so the hold is over rather than worth another try.
+      onError: (error) => {
+        if (checkoutFailure(error) === "HOLD_EXPIRED") {
+          onExpired();
+        }
+      },
+    }),
+  );
   const remainingMs = useRemainingMs(hold.holdExpiresAt);
   // An unresolved checkout may already have placed the order, so the deadline waits for the
   // checkout's answer instead of declaring the seats released (see CheckoutForm).

@@ -14,3 +14,4 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [20: Refund execution](20-refund-execution.md): `payment.refunds` PK + `ON CONFLICT DO NOTHING`, emit csak ha írt sort, ledger `REFUNDED` feltételes update-tel, AT-23
 - [21: Refund értesítések](21-refund-notifications.md): egy handler öt esemény-típusra, `sourceEventId` dedupe, contact nélküli refund ack, AT-43
 - [50: Payment-flow tesztizoláció és redelivery](50-payment-flow-test-isolation-and-redelivery-coverage.md): `createMany skipDuplicates` az `(orderId, attemptNo)` kulcson, race teszt table lockkal és `pg_stat_activity`-vel, stream izoláció, `nak` utáni redelivery
+- [54: Tranzakció timeoutok és retry](54-transaction-timeouts-and-retries.md): `SET LOCAL` `lock_timeout`/`statement_timeout`, retry csak `40P01`/`55P03`/`40001`-re jitterrel, `BOOKING_BUSY` vs internal error, 72,6 s legrosszabb eset

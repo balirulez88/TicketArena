@@ -212,7 +212,12 @@ admission the buyer holds (defence in depth).
       `holdId` and `claimBuyerKey`; write outbox `seat.held`. Commit.
 3. Errors `40P01`, `55P03`, `40001` retry the whole transaction up to 3 times with jitter
    (`deadlock_retry`), then return `BOOKING_BUSY` (tRPC `TOO_MANY_REQUESTS`, retryable). A pool
-   acquire timeout also yields `BOOKING_BUSY`.
+   acquire timeout and a transaction start timeout also yield `BOOKING_BUSY`, without a retry.
+   SQLSTATE `57014`: a statement cancelled by `statement_timeout` is `BOOKING_BUSY` (no retry,
+   counts `booking_busy`); a statement cancelled by another session (`pg_cancel_backend`) is an
+   internal error (tRPC `INTERNAL_SERVER_ERROR`). Both carry `57014`; the Postgres message
+   (`originalMessage`) tells them apart: `canceling statement due to statement timeout` versus
+   `canceling statement due to user request`.
 4. On success count `hold_ok`. Metric increments happen after commit, fire-and-forget; a Redis
    failure is logged and never fails a booking.
 
@@ -231,7 +236,9 @@ Does **not** require admission. Authorization is ownership of a valid hold.
    unique-constraint race re-reads and returns the winner's order. A replay returns the original
    order even after the hold has expired.
 2. One transaction, locks in the global order: buyer advisory lock → hold `FOR UPDATE` → its seats
-   `ORDER BY id FOR UPDATE`; then `T = clock.now()`.
+   `ORDER BY id FOR UPDATE`; then `T = clock.now()`. Same timeouts, retries and `BOOKING_BUSY`
+   rules as Holding seats step 3; saturation on any read outside the transaction (step 1 included)
+   is `BOOKING_BUSY` too.
 3. Validate: hold exists; `hold.buyerKey = BuyerKey` (else `NOT_FOUND`, never leaking existence);
    hold `status = HELD`; `T < holdExpiresAt` (else `HOLD_EXPIRED`); **every seat still has
    `status = HELD` and `holdId = this hold`** (protects against clock skew between instances and

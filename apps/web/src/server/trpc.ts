@@ -1,10 +1,17 @@
-import type {
-  BookingMetrics,
-  BookingMetricsReader,
-  BookingMetricsReset,
+import { randomUUID } from "node:crypto";
+import {
+  BOOKING_ACQUIRE_TIMEOUT_MS,
+  type BookingMetrics,
+  type BookingMetricsReader,
+  type BookingMetricsReset,
+  type BookingService,
+  type BookingTimeouts,
+  bookingTransactionOptions,
+  createBookingService,
+  DEFAULT_BOOKING_TIMEOUTS,
 } from "@ticketarena/booking";
 import type { Logger } from "@ticketarena/contracts";
-import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
+import { createPrismaClient, type PrismaClient, type PrismaClientOptions } from "@ticketarena/db";
 import type { QueueStore, Random } from "@ticketarena/waiting-room";
 import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
@@ -38,6 +45,11 @@ export interface TRPCContext {
    */
   readonly isAdmin: boolean;
   readonly db: PrismaClient;
+  /**
+   * The timeouts `db` was built with: both come from one `BookingRuntime`, so the services
+   * `bookingServiceFor` builds never wait longer than the client's transaction budget allows.
+   */
+  readonly bookingTimeouts: BookingTimeouts;
   /** Created at the app boundary; procedures bind booking ids on top of it. */
   readonly logger: Logger;
   /**
@@ -65,16 +77,65 @@ export interface TRPCContext {
   readonly admissionTokens: AdmissionTokens;
 }
 
+export interface BookingComposition {
+  readonly client: PrismaClientOptions;
+  readonly timeouts: BookingTimeouts;
+}
+
+/**
+ * One timeouts value builds both the Prisma client (its transaction budget and acquire timeout)
+ * and the booking services (their `SET LOCAL` values and retries), so the budget always covers
+ * what the transactions may wait.
+ */
+export function composeBooking(
+  { DATABASE_URL, DATABASE_DRIVER }: ReturnType<typeof parseDatabaseEnv>,
+  timeouts: BookingTimeouts = DEFAULT_BOOKING_TIMEOUTS,
+): BookingComposition {
+  return {
+    client: {
+      connectionString: DATABASE_URL,
+      driver: DATABASE_DRIVER,
+      acquireTimeoutMs: BOOKING_ACQUIRE_TIMEOUT_MS,
+      transaction: bookingTransactionOptions(timeouts),
+    },
+    timeouts,
+  };
+}
+
+/** A client and the timeouts it was built for; a request context takes both from one runtime. */
+export interface BookingRuntime {
+  readonly db: PrismaClient;
+  readonly timeouts: BookingTimeouts;
+}
+
+export function connectBooking(composition: BookingComposition): BookingRuntime {
+  return { db: createPrismaClient(composition.client), timeouts: composition.timeouts };
+}
+
 // One client per server process: the Neon driver pools internally, and a fresh client per
 // request would open a new connection pool on every call.
-let sharedDb: PrismaClient | undefined;
+let shared: BookingRuntime | undefined;
 
-function database(): PrismaClient {
-  if (sharedDb === undefined) {
-    const { DATABASE_URL, DATABASE_DRIVER } = parseDatabaseEnv(process.env);
-    sharedDb = createPrismaClient({ connectionString: DATABASE_URL, driver: DATABASE_DRIVER });
+function sharedBooking(): BookingRuntime {
+  if (shared === undefined) {
+    shared = connectBooking(composeBooking(parseDatabaseEnv(process.env)));
   }
-  return sharedDb;
+  return shared;
+}
+
+/** A booking service over the request's client and clock, with the timeouts that client fits. */
+export function bookingServiceFor(
+  ctx: Pick<TRPCContext, "db" | "now" | "logger" | "bookingTimeouts">,
+  metrics?: BookingMetrics,
+): BookingService {
+  return createBookingService({
+    db: ctx.db,
+    clock: { now: ctx.now },
+    newId: randomUUID,
+    logger: ctx.logger,
+    timeouts: ctx.bookingTimeouts,
+    ...(metrics === undefined ? {} : { metrics }),
+  });
 }
 
 const logger = createWebLogger();
@@ -91,14 +152,28 @@ const queueStore = createLazyQueueStore({ readEnv: () => process.env, logger, pr
 
 const random: Random = { next: () => Math.random() };
 
-export async function createTRPCContext({
-  req,
-  resHeaders,
-}: {
-  req: Request;
+export interface ContextRequest {
+  readonly req: Request;
   /** The response's headers; admission cookies are appended to them. */
-  resHeaders: Headers;
-}): Promise<TRPCContext> {
+  readonly resHeaders: Headers;
+}
+
+/**
+ * Builds the per-request context over a booking runtime resolved on first use, so the request's
+ * `db` and `bookingTimeouts` always come from the same composition.
+ */
+export function createTRPCContextFactory(
+  booking: () => BookingRuntime,
+): (request: ContextRequest) => Promise<TRPCContext> {
+  return (request) => buildContext(request, booking);
+}
+
+export const createTRPCContext = createTRPCContextFactory(sharedBooking);
+
+async function buildContext(
+  { req, resHeaders }: ContextRequest,
+  booking: () => BookingRuntime,
+): Promise<TRPCContext> {
   const { SESSION_SECRET } = parseSessionEnv(process.env);
   const identity = createIdentityService({ sessionSecret: SESSION_SECRET });
   const cookies = cookieReader(req.headers.get("cookie"));
@@ -109,11 +184,13 @@ export async function createTRPCContext({
     new Date(),
   );
   const now = () => new Date();
+  const { db, timeouts } = booking();
   return {
     now,
     principal,
     isAdmin,
-    db: database(),
+    db,
+    bookingTimeouts: timeouts,
     logger,
     metrics,
     metricsReader,

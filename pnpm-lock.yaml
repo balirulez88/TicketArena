@@ -356,6 +356,9 @@ importers:
         specifier: workspace:*
         version: link:../db
     devDependencies:
+      '@neondatabase/serverless':
+        specifier: 1.2.0
+        version: 1.2.0
       '@ticketarena/test-infra':
         specifier: workspace:*
         version: link:../test-infra

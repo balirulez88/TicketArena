@@ -53,13 +53,17 @@ export function createPrismaClient({
   if (connectionString.trim() === "") {
     throw new Error("createPrismaClient: connectionString must be a non-empty Postgres URL");
   }
+  // Both pools are pg-pool shaped: `connectionTimeoutMillis` bounds the wait for a pooled
+  // connection and also the opening of a new one, so neither driver can wait indefinitely.
+  const timeout =
+    acquireTimeoutMs === undefined ? {} : { connectionTimeoutMillis: acquireTimeoutMs };
   const adapter =
     driver === "neon"
-      ? new PrismaNeon({ connectionString })
+      ? new PrismaNeon({ connectionString, ...timeout })
       : new PrismaPg({
           connectionString,
           ...(poolMax === undefined ? {} : { max: poolMax }),
-          ...(acquireTimeoutMs === undefined ? {} : { connectionTimeoutMillis: acquireTimeoutMs }),
+          ...timeout,
         });
   return new PrismaClient({
     adapter,

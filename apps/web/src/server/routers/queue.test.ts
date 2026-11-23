@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { DEFAULT_BOOKING_TIMEOUTS } from "@ticketarena/booking";
 import { silentLogger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase, setupTestRedis } from "@ticketarena/test-infra";
@@ -56,6 +57,7 @@ function caller(principal: Principal, now: Date, random: Random = { next: () => 
     now: () => now,
     principal,
     isAdmin: false,
+    bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
     db: db(),
     logger: silentLogger,
     metrics: () => ({ increment: async () => undefined }),
@@ -348,6 +350,7 @@ describe("admission slots", () => {
         now: () => now,
         principal: alice,
         isAdmin: false,
+        bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
         db: db(),
         logger: silentLogger,
         metrics: () => ({ increment: async () => undefined }),

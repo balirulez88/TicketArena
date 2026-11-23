@@ -3,7 +3,6 @@ import {
   BookingBusyError,
   type BookingMetricCounts,
   type BookingMetrics,
-  createBookingService,
   type HoldView,
   NotDemoEventError,
   ResetBlockedError,
@@ -11,7 +10,7 @@ import {
 } from "@ticketarena/booking";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
-import { adminProcedure, createTRPCRouter, type TRPCContext } from "../trpc";
+import { adminProcedure, bookingServiceFor, createTRPCRouter, type TRPCContext } from "../trpc";
 
 const count = z.number().int().nonnegative();
 
@@ -225,14 +224,7 @@ export const adminRouter = createTRPCRouter({
         message: "the demo event has no free seat; reset the demo first",
       });
     }
-    const metrics = optionalMetrics(ctx);
-    const booking = createBookingService({
-      db: ctx.db,
-      clock: { now: ctx.now },
-      newId: randomUUID,
-      logger: ctx.logger,
-      ...(metrics === undefined ? {} : { metrics }),
-    });
+    const booking = bookingServiceFor(ctx, optionalMetrics(ctx));
 
     const startedAt = ctx.now();
     const outcomes = await Promise.all(
@@ -287,12 +279,7 @@ export const adminRouter = createTRPCRouter({
   resetDemo: adminProcedure.output(resetOutput).mutation(async ({ ctx }) => {
     await rateLimit(ctx, "resetDemo");
     const eventId = await demoEventId(ctx);
-    const booking = createBookingService({
-      db: ctx.db,
-      clock: { now: ctx.now },
-      newId: randomUUID,
-      logger: ctx.logger,
-    });
+    const booking = bookingServiceFor(ctx);
     let result: ResetDemoResult;
     try {
       result = await booking.resetEvent(eventId);

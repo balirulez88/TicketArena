@@ -570,3 +570,35 @@ What does the Payment consumer do with order.placed redelivered under a new even
 Assumed: Idempotent skip: acked, processed_messages row committed, no second attempt and no second payment.succeeded/failed (createMany skipDuplicates on orderId+attemptNo). An invalid order.placed payload stays a thrown parse error, nak'd on the ADR 0011 schedule
 
 Answer: (open)
+
+## 2026-11-23 12:34 ticket 54
+
+Which metrics eventId key does booking_busy use when placeOrder fails before its event is known?
+
+Assumed: eventId = "unknown" (Redis hash booking:metrics:unknown), documented in docs/database/index.md
+
+Answer: (open)
+
+## 2026-11-23 12:34 ticket 54
+
+What acquire timeout, maxWait, margin and jitter does booking use?
+
+Assumed: acquireTimeoutMs = maxWait = 3s (room for a cold Neon start); margin 1s so the Prisma timeout is 3x3s+5s+1s = 15s; jitter 20 + floor(random*180) ms; worst case (retries+1)*(maxWait+timeout)+retries*200ms = 72.6s
+
+Answer: (open)
+
+## 2026-11-23 12:34 ticket 54
+
+How is a statement_timeout 57014 told apart from a pg_cancel_backend 57014?
+
+Assumed: By the driver's originalMessage, pinned in both real-Postgres tests
+
+Answer: (open)
+
+## 2026-11-23 12:34 ticket 54
+
+Should the 3s acquire timeout apply only to booking queries?
+
+Assumed: It applies to the whole production web Prisma client (one pool); deadlock_retry is a new BookingMetric not shown on the admin dashboard
+
+Answer: (open)

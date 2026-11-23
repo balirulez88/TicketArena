@@ -8,7 +8,7 @@ import {
   createBookingService,
   LimitExceededError,
   SeatUnavailableError,
-} from "./index";
+} from "./booking-service";
 
 const database = setupTestDatabase();
 let prisma: PrismaClient | undefined;

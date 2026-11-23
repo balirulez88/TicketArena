@@ -1,3 +1,4 @@
+import { DEFAULT_BOOKING_TIMEOUTS } from "@ticketarena/booking";
 import { silentLogger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
@@ -18,6 +19,7 @@ function caller() {
     now: () => new Date("2027-03-01T12:00:00.000Z"),
     principal: { kind: "guest", sessionId: "0123456789abcdef0123456789abcdef" },
     isAdmin: false,
+    bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
     db: db(),
     logger: silentLogger,
     metrics: () => ({ increment: async () => undefined }),

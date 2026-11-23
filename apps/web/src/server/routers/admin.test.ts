@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { createRedisBookingMetrics, createRedisBookingMetricsReader } from "@ticketarena/booking";
+import {
+  createRedisBookingMetrics,
+  createRedisBookingMetricsReader,
+  DEFAULT_BOOKING_TIMEOUTS,
+} from "@ticketarena/booking";
 import { silentLogger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase, setupTestRedis, setupTestUpstash } from "@ticketarena/test-infra";
@@ -108,6 +112,7 @@ describe("admin.snapshot", () => {
       now: () => NOW,
       principal,
       isAdmin: true,
+      bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
       db: db(),
       logger: silentLogger,
       // Booking records counters fire-and-forget; the test writes them itself, awaited.

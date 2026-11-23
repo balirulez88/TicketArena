@@ -3,6 +3,7 @@ import {
   createRedisBookingMetrics,
   createRedisBookingMetricsReader,
   createRedisBookingMetricsReset,
+  DEFAULT_BOOKING_TIMEOUTS,
 } from "@ticketarena/booking";
 import { silentLogger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
@@ -62,6 +63,7 @@ function caller(overrides: Partial<TRPCContext> = {}) {
     now,
     principal,
     isAdmin: true,
+    bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
     db: db(),
     logger: silentLogger,
     metrics: () => createRedisBookingMetrics(redisClient, metricsPrefix),

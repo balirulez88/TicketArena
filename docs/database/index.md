@@ -98,20 +98,12 @@ No SQL `now()`; the `Clock` is injected.
 Metrics: an optional `BookingMetrics` port counts `hold_ok`, `limit_exceeded`, `seat_unavailable` (snapshot refusals,
 and refusals under the lock of seats nobody changed since the snapshot, such as a seat outside
 the event) and `race_lost` (refused under the lock because a refused
-seat's status or hold changed after the snapshot read it) per event. Counters are bumped
+seat's status or hold changed after the snapshot read it) per event, plus `booking_busy` and
+`deadlock_retry` (see Transaction timeouts below); the dashboard reader reads every counter but
+`deadlock_retry`, an operational signal rather than a booking outcome. Counters are bumped
 after the outcome is decided, fire-and-forget; a failure is logged and never fails a booking. The
 Redis adapter (`createRedisBookingMetrics`) keeps one hash per event,
 `booking:metrics:<eventId>`, with the metric as field. Seat state is never decided by Redis.
-
-Saturation: a `holdSeats` whose pool acquire (`pg` `connectionTimeoutMillis`) or transaction start
-(Prisma `maxWait`, `P2028`) times out fails with `BookingBusyError` (`BOOKING_BUSY`, tRPC
-`TOO_MANY_REQUESTS`) and counts `booking_busy`. `createPrismaClient` takes `poolMax`,
-`acquireTimeoutMs` and `transaction` so callers size pool and timeouts. Lock-timeout and deadlock
-retry, and the same mapping for `placeOrder`, are ticket 54 (TD-020).
-Tests fill a one-connection pool with `occupy` (`@ticketarena/booking/testing`, never the package's
-main entry): it resolves after a query has run inside the occupying transaction, and retries any
-failure before that point, up to a deadline, because a short acquire timeout also bounds opening
-the pool's first connection.
 
 Orders: `booking.placeOrder` (no admission required) and `booking.getOrder` (owner only, else
 `NOT_FOUND`). `placeOrder` runs one transaction with the lock order buyer lock (same key as `holdSeats`, taken after an unlocked read of the hold's event), hold `FOR UPDATE`, seats
@@ -161,6 +153,85 @@ order with the contact. Invariant: `IN_CHECKOUT` seats are freed only in the tra
 the checkout; lazy expiry and the hold sweeper never free them, so checkout outlives the hold's own
 expiry (AT-10). The only other such transactions are the payment saga's cancellation on a final payment failure (order `CANCELLED`, seats `AVAILABLE`, `order.cancelled`) and its expiry on a capture after the deadline (order `EXPIRED`, seats `AVAILABLE`, `order.expired`, a `REFUND_REQUESTED` ledger row and `payment.refund_requested`); the late payment never reclaims the seats. An order the payment saga has locked is skipped and re-checked next sweep. The hold
 stays `ORDERED`. `apps/worker` runs it every 15 s.
+
+### Transaction timeouts, retries and `BOOKING_BUSY`
+
+Settings (ADR 0005, `packages/booking/src/booking-transaction.ts`): every `holdSeats` and
+`placeOrder` transaction attempt starts with `set_config(..., true)` (`SET LOCAL`) for
+`lock_timeout` 3s and `statement_timeout` 5s, so the pooled connection is back at the server
+defaults after it. One exported value, `DEFAULT_BOOKING_TIMEOUTS` (`lockTimeoutMs`,
+`statementTimeoutMs`, `retries` 3), drives both those values and the Prisma transaction options
+`bookingTransactionOptions(timeouts)`. The web app's `composeBooking` (`apps/web/src/server/trpc.ts`)
+and `connectBooking` build one `BookingRuntime` (the Prisma client plus that same value); the
+request context takes `ctx.db` and the required `ctx.bookingTimeouts` from it, and the booking
+services (`bookingServiceFor(ctx)`) always run `ctx.bookingTimeouts`. `createPrismaClient` applies `acquireTimeoutMs` to
+both drivers (`connectionTimeoutMillis` of the `pg` pool and of the Neon pool); the web client uses
+`BOOKING_ACQUIRE_TIMEOUT_MS` = 3 s.
+
+Budget: the Prisma interactive-transaction `timeout` is (lock waits on the longest path, 3 for
+`placeOrder`: buyer advisory lock, hold row, seat rows) × `lock_timeout` + `statement_timeout` +
+a 1 s margin (`TRANSACTION_MARGIN_MS`, for round trips and the commit) = 3 × 3 s + 5 s + 1 s = 15 s.
+`maxWait` equals the acquire timeout (3 s): a transaction waits for its connection no longer than
+any other read, and either timeout is saturation.
+
+Retries: Postgres `40P01` (deadlock), `55P03` (lock timeout) and `40001` (serialization failure)
+re-run the whole transaction, up to 3 retries; each retry counts `deadlock_retry` and logs
+"booking transaction retried" with the SQLSTATE. Any other database error is not retried. Before
+each retry the service waits a jitter delay of `20 + floor(random × 180)` ms, i.e. at least
+20 ms and below 200 ms (`RETRY_JITTER_MIN_MS`, `RETRY_JITTER_MAX_MS`), from an injected random
+source through an injected timer seam (`random`, `delay` in `BookingServiceDeps`). Exhausted
+retries fail with `BookingBusyError` (`BOOKING_BUSY`, tRPC `TOO_MANY_REQUESTS`) and count
+`booking_busy`.
+
+Worst case from the first attempt to `BOOKING_BUSY` (`worstCaseBookingBusyMs()`): every attempt
+may wait `maxWait` to start and then run up to its transaction timeout, and every retry first
+waits at most the maximum jitter: (retries + 1) × (`maxWait` + 3 × `lock_timeout` +
+`statement_timeout` + margin) + retries × maximum jitter = 4 × (3 s + 3 × 3 s + 5 s + 1 s) +
+3 × 200 ms = **72.6 s** for the production defaults (lock 3 s, statement 5 s, 3 retries, `maxWait`
+3 s, maximum jitter 200 ms). The reads before the transaction (event, snapshot, idempotency
+replay, hold owner) can each add up to the acquire timeout on top.
+
+Saturation is `BOOKING_BUSY` (tRPC `TOO_MANY_REQUESTS`) and counts `booking_busy`, for both
+`holdSeats` and `placeOrder`, and for every read `placeOrder` makes outside its transaction too
+(the idempotency replay, the hold-owner read and the re-read after a duplicate key). Saturation is:
+a pool acquire timeout (pg-pool's message `timeout exceeded when trying to connect`), a transaction
+start timeout (`P2028` with Prisma's message `Unable to start a transaction in the given time`), and
+a statement cancelled by `statement_timeout` (below). These are not retried. A `placeOrder` refused
+before it has read its hold does not know the event yet: its `booking_busy` goes to the metrics key
+`eventId` = `"unknown"` (Redis hash `booking:metrics:unknown`); event ids are UUIDs, so it never
+collides with an event.
+
+Not saturation, surfaced unchanged (tRPC `INTERNAL_SERVER_ERROR`): a `P2028` for a transaction
+that outlived its own runtime `timeout` (its work may have committed, so it is never retried) or
+that was already closed; a connection that never opens (`Connection terminated due to connection
+timeout`, pg-pool and the Neon pool alike), which counts nothing; any other database error.
+
+`57014` rule: Postgres raises SQLSTATE `57014` both for a statement cancelled by
+`statement_timeout` and for one cancelled by another session (`pg_cancel_backend`). The first is
+`BOOKING_BUSY` after one attempt and counts `booking_busy`; the second is an internal error (the
+service rethrows the Prisma error, which keeps `57014` in its cause chain, and the router returns
+`INTERNAL_SERVER_ERROR`). Only the server message tells them apart: `originalMessage` =
+`canceling statement due to statement timeout` versus `canceling statement due to user request`.
+
+Classifier (`packages/booking/src/transaction-errors.ts`, not exported from the package entry) reads
+only: the Prisma error's `meta.driverAdapterError.cause.originalCode` (SQLSTATE) and
+`.originalMessage`, present alike for raw queries (`P2010`) and model queries (`P2034` for
+`40001`/`40P01`, `P2039`, `P2002`, ...); `code` `P2028` with the start-timeout message; and the
+pool's acquire-timeout `message`. The two pinned driver messages and the `57014` messages are
+coupled to pg-pool, Prisma and Postgres wording; the real-driver tests in
+`transaction-busy.test.ts` and `connect-timeout.test.ts` pin them, so a reworded message fails a
+test instead of silently changing behaviour. The SQLSTATE fields are the same for both drivers:
+`convertDriverError` in `@prisma/adapter-pg` 7.10.1 and `@prisma/adapter-neon` 7.10.1 (with
+`@neondatabase/serverless` 1.2.0) wraps a Postgres error identically as `{ originalCode,
+originalMessage, ...mapDriverError(error) }` with the same `kind` per SQLSTATE; `adapter-pg` adds
+only the socket and TLS cases before it (and differs only in how it parses constraint and column
+names for `23505`/`42703`, which the classifier does not read).
+
+Tests fill a one-connection pool with `occupy` (`@ticketarena/booking/testing`, never the package's
+main entry): it resolves after a query has run inside the occupying transaction, and retries any
+failure before that point, up to a deadline, because a short acquire timeout also bounds opening
+the pool's first connection. The same subpath has the lock and wait helpers the timeout tests use
+(`block`, `blockedBy`, `waitFor`, `latch`, `testTrigger`).
 
 ### Demo reset
 

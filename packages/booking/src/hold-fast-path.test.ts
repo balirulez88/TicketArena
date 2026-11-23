@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { type BookingMetric, type Buyer, createBookingService } from "./index";
+import { type BookingMetric, type Buyer, createBookingService } from "./booking-service";
 
 const database = setupTestDatabase();
 let prisma: PrismaClient | undefined;

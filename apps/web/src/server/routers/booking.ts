@@ -1,8 +1,6 @@
-import { randomUUID } from "node:crypto";
 import {
   BookingBusyError,
   type Buyer,
-  createBookingService,
   HoldExpiredError,
   HoldNotActiveError,
   HoldNotFoundError,
@@ -15,13 +13,17 @@ import {
   NotOnSaleError,
   SeatUnavailableError,
 } from "@ticketarena/booking";
-import type { Logger } from "@ticketarena/contracts";
-import type { PrismaClient } from "@ticketarena/db";
 import type { QueueService } from "@ticketarena/waiting-room";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { buyerKey, type Principal } from "../identity/identity";
-import { admittedProcedure, createTRPCRouter, publicProcedure, type TRPCContext } from "../trpc";
+import {
+  admittedProcedure,
+  bookingServiceFor,
+  createTRPCRouter,
+  publicProcedure,
+  type TRPCContext,
+} from "../trpc";
 import { queueServiceFor } from "./queue";
 
 // `eventId` is what admission is checked against; the booking core refuses any seat not of that
@@ -72,16 +74,6 @@ function toBuyer(principal: Principal): Buyer {
     ...(principal.kind === "user" ? { userId: principal.userId } : {}),
     buyerKey: buyerKey(principal),
   };
-}
-
-// Built per request so the injected clock and db always come from the request context.
-function bookingServiceFor(ctx: { db: PrismaClient; now: () => Date; logger: Logger }) {
-  return createBookingService({
-    db: ctx.db,
-    clock: { now: ctx.now },
-    newId: randomUUID,
-    logger: ctx.logger,
-  });
 }
 
 // Best-effort by design: a waiting-room slot is Redis bookkeeping and never decides seat or order
@@ -190,6 +182,9 @@ export const bookingRouter = createTRPCRouter({
       } catch (error) {
         if (error instanceof HoldNotFoundError) {
           throw new TRPCError({ code: "NOT_FOUND", message: error.message, cause: error });
+        }
+        if (error instanceof BookingBusyError) {
+          throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: error.message, cause: error });
         }
         if (error instanceof HoldExpiredError) {
           throw new TRPCError({

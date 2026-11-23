@@ -22,7 +22,12 @@ New modules are added when a slice needs them, not speculatively.
   `process.env`; configuration is validated at the app boundary (`parseServerEnv`) and injected.
 - **tRPC context as the composition root:** infrastructure (clock, db, redis, outbox) enters
   procedures through `TRPCContext`. Procedures never import a client directly, which keeps them
-  testable through `createCaller` with fakes at system boundaries only.
+  testable through `createCaller` with fakes at system boundaries only. Booking procedures get
+  their service from `bookingServiceFor(ctx)`; `composeBooking` and `connectBooking` turn one
+  `BookingTimeouts` value into a `BookingRuntime` (client plus those timeouts), and
+  `createTRPCContextFactory(runtime)` sets both `ctx.db` and the required `ctx.bookingTimeouts`
+  from it (see
+  [database](../database/index.md#transaction-timeouts-retries-and-booking_busy)).
 - **Deep modules, narrow interfaces:** each module exposes a small surface (e.g.
   `join/status/leave` for the waiting room) and hides its storage layout.
 - **Packages ship TypeScript source** (`exports` → `src/index.ts`); there is no package build

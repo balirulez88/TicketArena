@@ -183,6 +183,27 @@ describe("parseWorkerEnv", () => {
     expect(() => parseWorkerEnv({ DATABASE_URL: "nope" })).toThrow(/DATABASE_URL[\s\S]*NATS_URL/);
   });
 
+  it("defaults the Redis timeouts and names one that is not a positive integer", () => {
+    const base = {
+      DATABASE_URL: "postgresql://u@h/db",
+      NATS_URL: "nats://h:4222",
+      REDIS_URL: "redis://h:6379",
+    };
+    expect(parseWorkerEnv(base)).toMatchObject({
+      REDIS_CONNECT_TIMEOUT_MS: 2000,
+      REDIS_COMMAND_TIMEOUT_MS: 1000,
+    });
+    expect(
+      parseWorkerEnv({ ...base, REDIS_CONNECT_TIMEOUT_MS: "500", REDIS_COMMAND_TIMEOUT_MS: "250" }),
+    ).toMatchObject({ REDIS_CONNECT_TIMEOUT_MS: 500, REDIS_COMMAND_TIMEOUT_MS: 250 });
+    expect(() => parseWorkerEnv({ ...base, REDIS_CONNECT_TIMEOUT_MS: "-1" })).toThrow(
+      /REDIS_CONNECT_TIMEOUT_MS/,
+    );
+    expect(() => parseWorkerEnv({ ...base, REDIS_COMMAND_TIMEOUT_MS: "x" })).toThrow(
+      /REDIS_COMMAND_TIMEOUT_MS/,
+    );
+  });
+
   it("defaults the health port", () => {
     expect(
       parseWorkerEnv({

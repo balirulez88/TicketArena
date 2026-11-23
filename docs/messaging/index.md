@@ -31,7 +31,9 @@ publishing the same row twice in one pass.
 
 `apps/worker` is the long-running process ([ADR 0013](../adr/0013-deployment-topology.md)). On boot it calls
 `ensureTopology()` (idempotent; creates `TICKETARENA` and `TICKETARENA_DLQ` as in
-[ADR 0004](../adr/0004-nats-jetstream-message-bus.md)) and only then starts the relay. It serves `GET /health`.
+[ADR 0004](../adr/0004-nats-jetstream-message-bus.md)) and only then starts the relay. It never waits for Redis: the relay, the consumers and the sweeper
+run during a Redis outage (see [waiting room](../architecture/waiting-room.md#redis-outage)). It serves
+`GET /health`, which reports Redis separately (`"redis": "ok" | "unavailable"`).
 
 - **Relay** (`packages/messaging/src/outbox-relay.ts`): every 250 ms interval it claims a batch of 100 `PENDING`
   rows with `FOR UPDATE SKIP LOCKED` in one transaction, publishes each to `ta.<eventType>` with

@@ -12,7 +12,7 @@ import {
 } from "@ticketarena/booking";
 import type { Logger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient, type PrismaClientOptions } from "@ticketarena/db";
-import type { QueueStore, Random } from "@ticketarena/waiting-room";
+import { type QueueStore, type Random, RedisUnavailableError } from "@ticketarena/waiting-room";
 import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
 import { z } from "zod";
@@ -244,25 +244,49 @@ export const adminProcedure = t.procedure.use(({ ctx, next }) => {
 
 /**
  * Procedures only an admitted buyer may call (ADR 0008; only `booking.holdSeats`). The input must
- * carry `eventId`. The token's signature and `exp` are checked by `admissionTokens.read`; here
- * `sub` must be this session, `eid` the requested event, and the `jti` still in the event's
- * admitted set, so an admission revoked by a freed slot stops working at once. Redis is consulted
- * last and its failure fails the call: seats are never held on an unverified admission.
+ * carry `eventId`. The token's signature (HS256 only) and `exp` are checked by
+ * `admissionTokens.read`; here `sub` must be this session and `eid` the requested event, always,
+ * and then the `jti` must still be in the event's admitted set, so an admission revoked by a freed
+ * slot stops working at once.
+ *
+ * Only the revocation lookup fails open, and only when Redis cannot be reached
+ * (`RedisUnavailableError`: no connection or no reply in time); an answer, even `false`, always
+ * decides. During an outage a revoked token therefore stays usable until its fixed `exp` (at most
+ * 30 minutes), while no new admission can be issued; seat correctness is unaffected because seat
+ * state lives in Postgres (ADR 0005; ADR 0008 amendment, ticket 63).
  */
 export const admittedProcedure = t.procedure
   .input(z.object({ eventId: z.uuid() }))
   .use(async ({ ctx, input, next }) => {
     const claims = await ctx.admissionTokens.read(input.eventId);
-    const admitted =
-      claims !== undefined &&
-      claims.sessionId === ctx.principal.sessionId &&
-      claims.eventId === input.eventId &&
-      (await (await ctx.queueStore()).isAdmitted(input.eventId, claims.jti, ctx.now()));
-    if (!admitted) {
-      throw new TRPCError({
+    const forbidden = () =>
+      new TRPCError({
         code: "FORBIDDEN",
         message: `No valid admission for event ${input.eventId}; join its queue first`,
       });
+    if (
+      claims === undefined ||
+      claims.sessionId !== ctx.principal.sessionId ||
+      claims.eventId !== input.eventId
+    ) {
+      throw forbidden();
+    }
+    let admitted: boolean;
+    try {
+      admitted = await (await ctx.queueStore()).isAdmitted(input.eventId, claims.jti, ctx.now());
+    } catch (error) {
+      if (!(error instanceof RedisUnavailableError)) {
+        throw error;
+      }
+      // Never the token or its jti: a logged token would be a usable credential.
+      ctx.logger.warn(
+        { eventId: input.eventId, err: error.message },
+        "admission revocation check skipped: Redis is unavailable",
+      );
+      admitted = true;
+    }
+    if (!admitted) {
+      throw forbidden();
     }
     return next();
   });

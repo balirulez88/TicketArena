@@ -634,3 +634,27 @@ seed.test.ts cannot import @ticketarena/booking/testing (booking depends on db)
 Assumed: seed.test.ts opens and closes its own client per test and keeps its own NOW
 
 Answer: (open)
+
+## 2026-11-23 14:39 ticket 63
+
+Which Redis timeouts and reconnect policy do the apps use?
+
+Assumed: REDIS_CONNECT_TIMEOUT_MS 2000 and REDIS_COMMAND_TIMEOUT_MS 1000 (zod-validated, injected); no retry before the first connect (client destroyed and rebuilt on next use), backoff min(50*2^n, 2000) ms after; the lazy connection enforces its own command deadline because node-redis 6.3's timeout stops once a command is written
+
+Answer: (open)
+
+## 2026-11-23 14:39 ticket 63
+
+What counts as 'Redis unreachable' and what do queue procedures answer?
+
+Assumed: Any node-redis failure that is not an ErrorReply becomes RedisUnavailableError (fail open on revocation only); an error reply still fails admittedProcedure. Queue procedures answer SERVICE_UNAVAILABLE 'The waiting room is unavailable right now; try again shortly'
+
+Answer: (open)
+
+## 2026-11-23 14:39 ticket 63
+
+How does the worker /health report Redis?
+
+Assumed: HTTP 200 {status:'ok', redis:'ok'|'unavailable'} from a bounded PING; the Upstash queue adapter is unchanged (neither app uses it), so choosing Upstash would fail closed on an outage
+
+Answer: (open)

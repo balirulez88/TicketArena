@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+/**
+ * Bounds on every node-redis call (ticket 63), so a stopped or hung Redis fails a request within
+ * about two seconds instead of hanging it. Connecting (TCP plus handshake) may take a cross-region
+ * round trip or a TLS setup, hence more room than a command, which Redis answers in well under a
+ * millisecond when healthy.
+ */
+export const DEFAULT_REDIS_TIMEOUTS = { connectTimeoutMs: 2000, commandTimeoutMs: 1000 } as const;
+
 const LOCAL_HOSTNAMES: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
@@ -33,6 +41,18 @@ const serverEnvSchema = z.object({
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1),
   /** node-redis connection for the waiting-room queue (`redis://` locally, `rediss://` hosted). */
   REDIS_URL: z.url({ protocol: /^rediss?$/ }),
+  /** Bound on opening a Redis connection, handshake included (ms); see `DEFAULT_REDIS_TIMEOUTS`. */
+  REDIS_CONNECT_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(DEFAULT_REDIS_TIMEOUTS.connectTimeoutMs),
+  /** Bound on one Redis command once connected (ms); see `DEFAULT_REDIS_TIMEOUTS`. */
+  REDIS_COMMAND_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(DEFAULT_REDIS_TIMEOUTS.commandTimeoutMs),
   SESSION_SECRET: atLeast32Bytes,
   /**
    * HS256 key of the admission token (ADR 0008). Separate from SESSION_SECRET so rotating it
@@ -54,7 +74,11 @@ const metricsEnvSchema = serverEnvSchema.pick({
   UPSTASH_REDIS_REST_TOKEN: true,
 });
 
-const queueEnvSchema = serverEnvSchema.pick({ REDIS_URL: true });
+const queueEnvSchema = serverEnvSchema.pick({
+  REDIS_URL: true,
+  REDIS_CONNECT_TIMEOUT_MS: true,
+  REDIS_COMMAND_TIMEOUT_MS: true,
+});
 
 const databaseEnvSchema = serverEnvSchema.pick({ DATABASE_URL: true, DATABASE_DRIVER: true });
 
@@ -124,9 +148,11 @@ export function parseMetricsEnv(
 }
 
 /**
- * Validates only the waiting-room Redis URL, resolved lazily by the queue store so a missing value
- * breaks only the queue procedures.
+ * Validates only the waiting-room Redis URL and its timeouts, resolved lazily by the queue store so
+ * a missing value breaks only the queue procedures.
  */
-export function parseQueueEnv(source: EnvSource): Pick<ServerEnv, "REDIS_URL"> {
+export function parseQueueEnv(
+  source: EnvSource,
+): Pick<ServerEnv, "REDIS_URL" | "REDIS_CONNECT_TIMEOUT_MS" | "REDIS_COMMAND_TIMEOUT_MS"> {
   return parseEnv(queueEnvSchema, source, "queue");
 }

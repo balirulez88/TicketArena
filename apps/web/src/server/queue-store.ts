@@ -1,7 +1,7 @@
 import type { Logger } from "@ticketarena/contracts";
 import { createRedisQueueStore, type QueueStore } from "@ticketarena/waiting-room";
-import { createClient } from "redis";
 import { parseQueueEnv } from "./env";
+import { createBoundedRedis } from "./redis-client";
 
 interface LazyQueueStoreConfig {
   readonly readEnv: () => Readonly<Record<string, string | undefined>>;
@@ -11,10 +11,11 @@ interface LazyQueueStoreConfig {
 }
 
 /**
- * Builds the queue store on first call: validates `REDIS_URL`, connects one node-redis client per
- * process and reuses it. An invalid configuration is logged once and rethrown on every later
- * call without re-reading the environment; a failed connection is forgotten so the next call
- * retries it.
+ * Builds the queue store on first call: validates `REDIS_URL` and the Redis timeouts and returns
+ * one store per process over a lazily connected, bounded node-redis client (`createBoundedRedis`).
+ * An invalid configuration is logged once and rethrown on every later call without re-reading the
+ * environment. Redis itself is first contacted by the first store call, so an outage fails that
+ * call (`RedisUnavailableError`) within the timeouts, and the next call connects anew.
  */
 export function createLazyQueueStore({
   readEnv,
@@ -22,36 +23,37 @@ export function createLazyQueueStore({
   prefix,
 }: LazyQueueStoreConfig): () => Promise<QueueStore> {
   let configFailure: Error | undefined;
-  let pending: Promise<QueueStore> | undefined;
+  let store: QueueStore | undefined;
 
-  const connect = async (url: string): Promise<QueueStore> => {
-    const client = createClient({ url });
-    // Without a listener node-redis rethrows socket errors as uncaught exceptions.
-    client.on("error", (error: unknown) => {
-      logger.error({ err: error instanceof Error ? error.message : String(error) }, "queue redis");
-    });
-    await client.connect();
-    return createRedisQueueStore(client, { prefix });
-  };
-
-  return () => {
+  return async () => {
     if (configFailure !== undefined) {
-      return Promise.reject(configFailure);
+      throw configFailure;
     }
-    if (pending === undefined) {
-      let url: string;
+    if (store === undefined) {
+      let env: ReturnType<typeof parseQueueEnv>;
       try {
-        url = parseQueueEnv(readEnv()).REDIS_URL;
+        env = parseQueueEnv(readEnv());
       } catch (error) {
         configFailure = error instanceof Error ? error : new Error(String(error));
         logger.error({ err: configFailure.message }, "queue configuration is invalid");
-        return Promise.reject(configFailure);
+        throw configFailure;
       }
-      pending = connect(url).catch((error: unknown) => {
-        pending = undefined;
-        throw error;
+      const redis = createBoundedRedis({
+        url: env.REDIS_URL,
+        timeouts: {
+          connectTimeoutMs: env.REDIS_CONNECT_TIMEOUT_MS,
+          commandTimeoutMs: env.REDIS_COMMAND_TIMEOUT_MS,
+        },
+        logger,
       });
+      store = createRedisQueueStore(
+        {
+          eval: (script, options) => redis.run((client) => client.eval(script, options)),
+          zRank: (key, member) => redis.run((client) => client.zRank(key, member)),
+        },
+        { prefix },
+      );
     }
-    return pending;
+    return store;
   };
 }

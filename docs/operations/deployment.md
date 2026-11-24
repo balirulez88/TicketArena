@@ -27,7 +27,11 @@ Connections:
 - **Worker → Neon** over the direct endpoint with `pg` (one small, long-lived TCP pool).
 - **Worker → NATS** over Fly's private IPv6 network (6PN) as `nats://ticketarena-nats.internal:4222`.
   Neither Fly app has a `[http_service]` or `[[services]]` table, so neither has a public address;
-  NATS listens on `[::]` and is reachable only from apps in the same Fly organization.
+  NATS listens on `[::]` and is reachable only from apps in the same Fly organization. Every
+  app in that organization shares the network, so NATS also requires a client token
+  (`authorization { token: $NATS_TOKEN }` in `infra/fly/nats/nats.conf`, from a Fly secret);
+  the worker sends the same `NATS_TOKEN`, and `parseWorkerEnv` refuses a `*.internal`
+  `NATS_URL` without one. The monitoring port (health check) needs no token.
 - **Web and worker → Upstash.** The web app's booking counters and the admin rate limiter use
   the Upstash REST API (`UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`). The waiting-room
   queue (web and worker) and the worker's saga counters use node-redis over Upstash's TLS Redis
@@ -57,17 +61,18 @@ offending variable; packages never read `process.env`.
 
 Where each secret lives (also listed, without values, at the end of `.env.example`):
 
-| Variable                                                  | Vercel (web) | Fly `ticketarena-worker`           | GitHub secret | Notes                                             |
-| --------------------------------------------------------- | ------------ | ---------------------------------- | ------------- | ------------------------------------------------- |
-| `DATABASE_URL`                                            | pooled       | direct (`fly secrets`)             |               | Neon                                              |
-| `DATABASE_URL_UNPOOLED`                                   |              |                                    | direct        | migrations only                                   |
-| `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`      | yes          |                                    |               | metrics, admin rate limiter                       |
-| `REDIS_URL`                                               | `rediss://…` | `rediss://…` (`fly secrets`)       |               | waiting-room queue                                |
-| `SESSION_SECRET`, `ADMISSION_SECRET`                      | yes          |                                    |               | ≥ 32 bytes each, `openssl rand -hex 32`, distinct |
-| `ADMIN_PASSWORD`                                          | yes          |                                    |               | ≥ 12 characters                                   |
-| `NATS_URL`, `PORT`, `ADMIT_RATE_PER_SECOND`, `MAX_ACTIVE` |              | `[env]` in `fly.toml` (not secret) |               |                                                   |
-| `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`      |              |                                    | yes           | Vercel CLI                                        |
-| `FLY_API_TOKEN`                                           |              |                                    | yes           | `fly tokens create deploy -a ticketarena-worker`  |
+| Variable                                                  | Vercel (web) | Fly `ticketarena-worker`                       | GitHub secret | Notes                                                            |
+| --------------------------------------------------------- | ------------ | ---------------------------------------------- | ------------- | ---------------------------------------------------------------- |
+| `DATABASE_URL`                                            | pooled       | direct (`fly secrets`)                         |               | Neon                                                             |
+| `DATABASE_URL_UNPOOLED`                                   |              |                                                | direct        | migrations only                                                  |
+| `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`      | yes          |                                                |               | metrics, admin rate limiter                                      |
+| `REDIS_URL`                                               | `rediss://…` | `rediss://…` (`fly secrets`)                   |               | waiting-room queue                                               |
+| `SESSION_SECRET`, `ADMISSION_SECRET`                      | yes          |                                                |               | ≥ 32 bytes each, `openssl rand -hex 32`, distinct                |
+| `ADMIN_PASSWORD`                                          | yes          |                                                |               | ≥ 12 characters                                                  |
+| `NATS_TOKEN`                                              |              | yes (`fly secrets`), and on `ticketarena-nats` |               | ≥ 32 characters, `openssl rand -hex 32`, same value on both apps |
+| `NATS_URL`, `PORT`, `ADMIT_RATE_PER_SECOND`, `MAX_ACTIVE` |              | `[env]` in `fly.toml` (not secret)             |               |                                                                  |
+| `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`      |              |                                                | yes           | Vercel CLI                                                       |
+| `FLY_API_TOKEN`                                           |              |                                                | yes           | `fly tokens create deploy -a ticketarena-worker`                 |
 
 ## Deploy workflow
 
@@ -117,12 +122,14 @@ for NATS, the host in the worker's `NATS_URL`) and the commands below.
    `DATABASE_URL=<direct> pnpm --filter @ticketarena/db db:seed` (the demo catalog; seeding is
    not part of the deploy workflow).
 4. **NATS on Fly.** `fly apps create ticketarena-nats`, then
-   `fly volumes create nats_data --app ticketarena-nats --region fra --size 1`, then from the
+   `fly volumes create nats_data --app ticketarena-nats --region fra --size 1`, then
+   `fly secrets set --app ticketarena-nats --stage NATS_TOKEN=<openssl rand -hex 32>` (NATS refuses
+   to start without it), then from the
    repository root `fly deploy infra/fly/nats --ha=false` (the directory argument is the working
    directory, so its `fly.toml` is found there; a `--config` path would resolve inside it).
    Check: `fly checks list --app ticketarena-nats` shows `jetstream` passing.
 5. **Worker on Fly.** `fly apps create ticketarena-worker`, then
-   `fly secrets set --app ticketarena-worker --stage DATABASE_URL=<direct> REDIS_URL=<rediss url>`,
+   `fly secrets set --app ticketarena-worker --stage DATABASE_URL=<direct> REDIS_URL=<rediss url> NATS_TOKEN=<the same token>`,
    then from the repository root
    `fly deploy . --config infra/fly/worker/fly.toml --dockerfile infra/fly/worker/Dockerfile --ignorefile infra/fly/worker/Dockerfile.dockerignore --ha=false`.
    `--ignorefile` matters: the root `.dockerignore` belongs to the frozen harness sandbox and
@@ -163,7 +170,9 @@ From then on every push to `main` that passes CI deploys itself.
 - **Secret rotation.** `SESSION_SECRET` logs out every session and admin; `ADMISSION_SECRET`
   revokes every admission token; both take effect on the next Vercel deployment. A Neon or
   Upstash credential change must be applied to Vercel, Fly (`fly secrets set`, which restarts the
-  worker) and GitHub together.
+  worker) and GitHub together. A new `NATS_TOKEN` goes to both Fly apps: set it on
+  `ticketarena-worker` with `--stage`, then on `ticketarena-nats` (restarts NATS), then
+  `fly secrets deploy --app ticketarena-worker`; the worker is refused while the two differ.
 - **Scaling.** Exactly one worker machine and one NATS machine. Never `fly scale count` above 1:
   the admission ticker and reaper assume a single worker, and JetStream runs as a single node.
 - **NATS data.** Fly snapshots the volume daily (`fly volumes snapshots list`). Losing the

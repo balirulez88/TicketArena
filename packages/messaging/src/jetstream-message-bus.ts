@@ -31,6 +31,8 @@ export const DEFAULT_ACK_WAIT_MS = 30_000;
 
 export interface JetStreamMessageBusOptions {
   readonly servers: string;
+  /** Client token for a server that requires one (production NATS on Fly.io). */
+  readonly token?: string;
   /** Prepended to stream names; lets parallel test files own disjoint streams. */
   readonly streamPrefix?: string;
   /** Root token prepended to every subject, for the same isolation. */
@@ -67,7 +69,10 @@ const STREAMS: Readonly<Record<StreamKind, StreamDefinition>> = {
 export async function connectJetStreamMessageBus(
   options: JetStreamMessageBusOptions,
 ): Promise<MessageBus> {
-  const connection = await connect({ servers: options.servers });
+  const connection = await connect({
+    servers: options.servers,
+    ...(options.token === undefined ? {} : { token: options.token }),
+  });
   try {
     const manager = await jetstreamManager(connection);
     return new JetStreamMessageBus(

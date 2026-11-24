@@ -17,7 +17,10 @@ import { startWorker } from "./worker.js";
 const env = parseWorkerEnv(process.env);
 const logger = createWorkerLogger();
 const prisma = createPrismaClient({ connectionString: env.DATABASE_URL, driver: "pg" });
-const bus = await connectJetStreamMessageBus({ servers: env.NATS_URL });
+const bus = await connectJetStreamMessageBus({
+  servers: env.NATS_URL,
+  ...(env.NATS_TOKEN === undefined ? {} : { token: env.NATS_TOKEN }),
+});
 // The composition root is the only place that reads the system clock and Math.random.
 const clock = { now: () => new Date(), sleep: (ms: number) => delay(ms) };
 const booking = createBookingService({ db: prisma, clock, newId: randomUUID, logger });

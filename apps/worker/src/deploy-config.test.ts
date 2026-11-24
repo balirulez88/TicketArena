@@ -63,6 +63,11 @@ describe("NATS on Fly.io", () => {
     expect(natsConf).toMatch(/^\s*listen:\s*"\[::\]:4222"\s*$/m);
     expect([...natsToml.keys()].filter((name) => /services?$/.test(name))).toEqual([]);
   });
+
+  it("requires a client token read from the NATS_TOKEN secret, never written in the file", () => {
+    expect(natsConf).toMatch(/^\s*authorization\s*\{\s*token:\s*\$NATS_TOKEN\s*\}\s*$/m);
+    expect(natsToml.get("env") ?? {}).not.toHaveProperty("NATS_TOKEN");
+  });
 });
 
 describe("the worker on Fly.io", () => {
@@ -90,6 +95,7 @@ describe("the worker on Fly.io", () => {
       DATABASE_URL:
         "postgresql://app:secret@ep-quiet-bird-a1b2c3.eu-central-1.aws.neon.tech/ticketarena?sslmode=require",
       REDIS_URL: "rediss://default:secret@example.upstash.io:6379",
+      NATS_TOKEN: "n".repeat(64),
     };
 
     const env = parseWorkerEnv({ ...table(workerToml, "env"), ...secrets });

@@ -204,6 +204,20 @@ describe("parseWorkerEnv", () => {
     );
   });
 
+  it("needs a NATS_TOKEN of at least 32 characters for NATS on Fly's private network, not locally", () => {
+    const local = {
+      DATABASE_URL: "postgresql://u@h/db",
+      NATS_URL: "nats://localhost:4222",
+      REDIS_URL: "redis://h:6379",
+    };
+    const fly = { ...local, NATS_URL: "nats://ticketarena-nats.internal:4222" };
+
+    expect(parseWorkerEnv(local).NATS_TOKEN).toBeUndefined();
+    expect(() => parseWorkerEnv(fly)).toThrow(/NATS_TOKEN/);
+    expect(() => parseWorkerEnv({ ...fly, NATS_TOKEN: "short" })).toThrow(/NATS_TOKEN/);
+    expect(parseWorkerEnv({ ...fly, NATS_TOKEN: "t".repeat(32) }).NATS_TOKEN).toBe("t".repeat(32));
+  });
+
   it("defaults the health port", () => {
     expect(
       parseWorkerEnv({

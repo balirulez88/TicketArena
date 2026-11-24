@@ -722,3 +722,19 @@ ADR 0013 says Upstash REST in web and worker; the queue and saga counters use no
 Assumed: No: keep node-redis over Upstash TLS (switching needs the REST queue's errors mapped to SERVICE_UNAVAILABLE); documented in docs/operations/deployment.md; a human decides on an ADR amendment or ticket
 
 Answer: (open)
+
+## 2026-11-24 19:30 ticket 66
+
+Is SENT recorded per channel right after each send, or all together?
+
+Assumed: All together in the runner's transaction with the dedupe row; beforeTransaction creates/reuses PENDING per channel and sends outside any transaction, keyed by notification id; no schema change (PENDING already existed)
+
+Answer: (open)
+
+## 2026-11-24 19:30 ticket 66
+
+How is 'a crash after the send' simulated?
+
+Assumed: The test wraps the runner's Prisma client so its first $transaction fails (database-boundary failure) instead of killing the process
+
+Answer: (open)

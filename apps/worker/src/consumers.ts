@@ -38,7 +38,7 @@ export function createServiceConsumers(
   deps: ServiceConsumerDeps,
 ): Omit<ConsumerRunnerOptions, "bus" | "prisma" | "logger">[] {
   const loggerOption = deps.logger === undefined ? {} : { logger: deps.logger };
-  const notificationHandler = createNotificationHandler({
+  const notificationSteps = createNotificationHandler({
     prisma: deps.prisma,
     provider: deps.notificationProvider ?? createMockNotificationProvider(),
     clock: deps.clock,
@@ -94,31 +94,31 @@ export function createServiceConsumers(
       service: "notification",
       consumer: "notification",
       filterSubject: "ta.order.confirmed",
-      handler: notificationHandler,
+      ...notificationSteps,
     },
     {
       service: "notification",
       consumer: "notification-cancelled",
       filterSubject: "ta.order.cancelled",
-      handler: notificationHandler,
+      ...notificationSteps,
     },
     {
       service: "notification",
       consumer: "notification-expired",
       filterSubject: "ta.order.expired",
-      handler: notificationHandler,
+      ...notificationSteps,
     },
     {
       service: "notification",
       consumer: "notification-refund-requested",
       filterSubject: "ta.payment.refund_requested",
-      handler: notificationHandler,
+      ...notificationSteps,
     },
     {
       service: "notification",
       consumer: "notification-refunded",
       filterSubject: "ta.payment.refunded",
-      handler: notificationHandler,
+      ...notificationSteps,
     },
   ];
 }

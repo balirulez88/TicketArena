@@ -40,7 +40,8 @@ export interface ConsumerRunnerOptions {
   readonly filterSubject: string;
   /**
    * Runs before the transaction opens, on every delivery including duplicates, for slow work
-   * that needs no database (e.g. a provider's latency): awaited inside the transaction it would
+   * that must not hold the transaction (e.g. a provider's latency or call; it may commit its own
+   * short writes, never the dedupe row): awaited inside the transaction it would
    * hold a pooled connection idle and could outlast the interactive-transaction timeout, turning
    * one slow message into endless redelivery. It must be safe to repeat; it never decides
    * whether the message is a duplicate. A throw naks the message like a handler failure.

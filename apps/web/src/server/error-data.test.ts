@@ -161,6 +161,22 @@ describe("error data on the wire", () => {
     }
   });
 
+  test("an unexpected failure reaches the client as a generic message, never its own", async () => {
+    for (const call of [() => client.crashed.mutate(), () => client.unmapped.mutate()]) {
+      const error = await rejectionOf<typeof router>(call());
+
+      expect(error.data?.code).toBe("INTERNAL_SERVER_ERROR");
+      expect(error.message).toBe("Internal server error");
+      expect(JSON.stringify(error)).not.toContain("db.internal");
+    }
+  });
+
+  test("a deliberate error keeps its own message on the wire", async () => {
+    const error = await rejectionOf<typeof router>(client.plain.mutate());
+
+    expect(error.message).toBe("No valid admission");
+  });
+
   test("a domain error no router mapped is an internal error without a domain code", async () => {
     const error = await rejectionOf<typeof router>(client.unmapped.mutate());
 

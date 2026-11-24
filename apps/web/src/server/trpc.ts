@@ -233,10 +233,13 @@ const t = initTRPC.context<TRPCContext>().create({
    * `data` is built field by field rather than spread from tRPC's default: the default adds the
    * server stack outside production, and nothing but these fields may reach a browser. The domain
    * code (and SEAT_UNAVAILABLE's seat ids) let the client tell refusals apart that share a tRPC
-   * code, without reading the message; the stack stays in the server log (`onError`).
+   * code, without reading the message; the stack stays in the server log (`onError`). An internal
+   * error's message is replaced too: it is whatever the failure said (a database host, a driver
+   * detail), which is for the log, not the browser.
    */
   errorFormatter: ({ shape, error }) => ({
     ...shape,
+    ...(shape.data.code === "INTERNAL_SERVER_ERROR" ? { message: "Internal server error" } : {}),
     data: {
       code: shape.data.code,
       httpStatus: shape.data.httpStatus,

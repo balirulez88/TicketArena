@@ -5,6 +5,11 @@
 #
 # Every target is opt-in by its secrets: while they are absent (forks, before the one-time setup)
 # its job is skipped with a notice instead of failing, so main never turns red for lack of them.
+#
+# Only the current tip of main ships, and only after CI passed on a push of that exact commit
+# (apps/worker/src/deploy/deploy-target.ts): a replayed old CI run is skipped, because migrations
+# never roll back, and a manual run whose commit has no green CI fails. Every job deploys the one
+# commit the gate pinned. A rollback is a revert pushed to main.
 name: Deploy
 
 on:
@@ -16,6 +21,8 @@ on:
 
 permissions:
   contents: read
+  # The gate reads CI runs of the commit it is about to deploy.
+  actions: read
 
 # One production deployment at a time, and never cancel one half-way through.
 concurrency:
@@ -24,7 +31,7 @@ concurrency:
 
 jobs:
   gate:
-    name: Deployment secrets
+    name: Deployment target and secrets
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     # Only a green CI run of a push to this repository's main, or a manual run on main. A pull
@@ -36,10 +43,33 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     outputs:
-      migrate: ${{ steps.check.outputs.migrate }}
-      web: ${{ steps.check.outputs.web }}
-      worker: ${{ steps.check.outputs.worker }}
+      sha: ${{ steps.target.outputs.sha }}
+      migrate: ${{ steps.target.outputs.deploy == 'true' && steps.check.outputs.migrate }}
+      web: ${{ steps.target.outputs.deploy == 'true' && steps.check.outputs.web }}
+      worker: ${{ steps.target.outputs.deploy == 'true' && steps.check.outputs.worker }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            .nvmrc
+            apps/worker/src/deploy/deploy-target.ts
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      # Read under the concurrency group, so no other deployment moves production meanwhile.
+      - name: Resolve the commit to deploy (tip of main, CI passed on its push)
+        id: target
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: node apps/worker/src/deploy/deploy-target.ts
+
       - name: Check which targets are configured
         id: check
         env:
@@ -75,7 +105,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Set up pnpm (version from packageManager)
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -121,7 +151,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Set up pnpm (version from packageManager)
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -155,7 +185,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Set up flyctl
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1.6

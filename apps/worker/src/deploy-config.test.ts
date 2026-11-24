@@ -123,4 +123,25 @@ describe("the deploy workflow", () => {
       expect(job(name)).toMatch(/^ {4}needs: \[[^\]]*\bmigrate\b[^\]]*\]\s*$/m);
     }
   });
+
+  it("the gate resolves the commit with deploy-target and every target is off unless it deploys", () => {
+    const gate = job("gate");
+
+    expect(gate).toContain("run: node apps/worker/src/deploy/deploy-target.ts");
+    expect(gate).toContain(`sha: \${{ steps.target.outputs.sha }}`);
+    for (const target of ["migrate", "web", "worker"]) {
+      expect(gate).toContain(
+        `${target}: \${{ steps.target.outputs.deploy == 'true' && steps.check.outputs.${target} }}`,
+      );
+    }
+    expect(workflow).toMatch(/^ {2}actions: read\s*$/m);
+  });
+
+  it("every job checks out the one commit the gate pinned, never the triggering run's head", () => {
+    for (const name of ["migrate", "web", "worker"]) {
+      const refs = job(name).match(/^\s+ref: .*$/gm) ?? [];
+
+      expect(refs.map((ref) => ref.trim())).toEqual([`ref: \${{ needs.gate.outputs.sha }}`]);
+    }
+  });
 });

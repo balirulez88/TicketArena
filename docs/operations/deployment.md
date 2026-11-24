@@ -74,10 +74,16 @@ Where each secret lives (also listed, without values, at the end of `.env.exampl
 
 `.github/workflows/deploy.yml` (separate from `ci.yml`, which stays the quality gate) starts when
 `CI` completes successfully for a **push** to `main` of this repository, or by hand
-(`workflow_dispatch`) on `main`. It checks out the commit CI passed and runs:
+(`workflow_dispatch`) on `main`. It runs:
 
-1. `gate`: checks which targets have their secrets. A target whose secrets are absent is skipped
-   with a notice, so the workflow is green (not red) before the setup below or on a fork.
+1. `gate`: first resolves the one commit this run may deploy
+   (`apps/worker/src/deploy/deploy-target.ts`, run with plain `node`): the current tip of `main`,
+   and only if the latest CI run of a push of that exact commit passed. A re-run of an old CI run
+   is skipped with a notice, since migrations never roll back and older code would land on a newer
+   schema; a manual run fails if its commit's CI is pending, failed, missing, or if `main` moved
+   meanwhile. Every later job checks out that pinned commit (`needs.gate.outputs.sha`). Then it
+   checks which targets have their secrets. A target whose secrets are absent is skipped with a
+   notice, so the workflow is green (not red) before the setup below or on a fork.
 2. `migrate`: `prisma migrate deploy` with `DATABASE_URL_UNPOOLED`.
 3. `web` and `worker`, both `needs: [gate, migrate]`, so neither runs unless the migrations
    succeeded: `vercel pull` / `vercel build --prod` / `vercel deploy --prebuilt --prod`, and
@@ -113,7 +119,8 @@ for NATS, the host in the worker's `NATS_URL`) and the commands below.
    not part of the deploy workflow).
 4. **NATS on Fly.** `fly apps create ticketarena-nats`, then
    `fly volumes create nats_data --app ticketarena-nats --region fra --size 1`, then from the
-   repository root `fly deploy infra/fly/nats --config infra/fly/nats/fly.toml --ha=false`.
+   repository root `fly deploy infra/fly/nats --ha=false` (the directory argument is the working
+   directory, so its `fly.toml` is found there; a `--config` path would resolve inside it).
    Check: `fly checks list --app ticketarena-nats` shows `jetstream` passing.
 5. **Worker on Fly.** `fly apps create ticketarena-worker`, then
    `fly secrets set --app ticketarena-worker --stage DATABASE_URL=<direct> REDIS_URL=<rediss url>`,
@@ -146,9 +153,14 @@ From then on every push to `main` that passes CI deploys itself.
   seats, orders and pending payments live.
 - **Logs.** `fly logs --app ticketarena-worker` (pino JSON, `correlationId` per flow); Vercel →
   Project → Logs for the web app.
-- **Rollback.** Web: `vercel rollback` (or promote an earlier deployment in the dashboard). Worker:
-  `fly releases --app ticketarena-worker --image` then `fly deploy --image <previous image>` with
-  the same flags. Migrations are forward-only: fix forward with a new migration.
+- **Rollback.** The default is a revert commit pushed to `main`: it passes CI and deploys like any
+  change, with the migrations left in place. Migrations are forward-only: fix forward with a new
+  migration. An emergency rollback of the code alone, outside the workflow, is allowed only to the
+  release that ran immediately before the last deploy, which the expand/contract rule above keeps
+  compatible with the current schema: web `vercel rollback` (or promote that deployment in the
+  dashboard); worker `fly releases --app ticketarena-worker --image`, then
+  `fly deploy --image <that image>` with the same flags. Follow it with the revert on `main`, or
+  the next deploy brings the change back.
 - **Secret rotation.** `SESSION_SECRET` logs out every session and admin; `ADMISSION_SECRET`
   revokes every admission token; both take effect on the next Vercel deployment. A Neon or
   Upstash credential change must be applied to Vercel, Fly (`fly secrets set`, which restarts the

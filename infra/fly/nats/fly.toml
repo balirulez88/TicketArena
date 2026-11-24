@@ -1,5 +1,7 @@
 # Fly.io app for NATS JetStream (ADR 0013). Deploy from the repository root with
-#   fly deploy infra/fly/nats --config infra/fly/nats/fly.toml --ha=false
+#   fly deploy infra/fly/nats --ha=false
+# (the directory is the working directory, so this fly.toml is found there; a --config path would
+# be resolved inside it).
 # See docs/operations/deployment.md for the one-time setup (app, volume).
 #
 # There is deliberately no [http_service] or [[services]] table: NATS gets no public address and

@@ -18,3 +18,4 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [54: Tranzakció timeoutok és retry](54-transaction-timeouts-and-retries.md): `SET LOCAL` `lock_timeout`/`statement_timeout`, retry csak `40P01`/`55P03`/`40001`-re jitterrel, `BOOKING_BUSY` vs internal error, 72,6 s legrosszabb eset
 - [55: Determinisztikus tranzakciós tesztek](55-deterministic-transaction-tests.md): `waitForPg` + `pg_blocking_pids` időzítés helyett, közös testing helper, tesztenkénti kliens, shuffle, rollback bizonyítása
 - [63: Redis kiesése](63-redis-outages-do-not-hang-booking-or-the-worker.md): lusta, korlátos Redis kapcsolat, worker Redis nélkül is indul, fail open csak a revocationre, TCP stand-in tesztek
+- [64: Konzervatív demo reset](64-conservative-demo-reset.md): székek felszabadítása, order/line/ledger megtartása, `ordersKept`, `RESET_BLOCKED` fail closed, késői capture a normál saga szabállyal

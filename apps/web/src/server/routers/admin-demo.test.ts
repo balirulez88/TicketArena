@@ -119,7 +119,7 @@ describe("admin.runRace", () => {
 });
 
 describe("admin.resetDemo", () => {
-  test("clears the demo event's bookings and Redis keys and frees its seats", async () => {
+  test("frees the demo event's seats, deletes unordered holds and clears its Redis keys", async () => {
     const { demo, others } = await events();
     const other = others[0];
     if (other === undefined) {
@@ -134,7 +134,7 @@ describe("admin.resetDemo", () => {
 
     const reset = await caller().admin.resetDemo();
 
-    expect(reset).toMatchObject({ eventId: demo.id, ordersDeleted: 0, ledgerRowsDeleted: 0 });
+    expect(reset).toMatchObject({ eventId: demo.id, ordersKept: 0 });
     expect(reset.holdsDeleted).toBeGreaterThan(0);
     expect(await db().hold.count({ where: { eventId: demo.id } })).toBe(0);
     expect(
@@ -171,7 +171,10 @@ describe("admin.resetDemo", () => {
 
     await db().order.update({ where: { id: order.id }, data: { status: "EXPIRED" } });
     freshLimiter();
-    await caller().admin.resetDemo();
+    await expect(caller().admin.resetDemo()).resolves.toMatchObject({ ordersKept: 1 });
+    expect(await db().order.findUniqueOrThrow({ where: { id: order.id } })).toMatchObject({
+      status: "EXPIRED",
+    });
   });
 });
 

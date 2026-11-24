@@ -277,7 +277,8 @@ outbox writes → commit.
 conditional updates are never treated as success. The order always commits before `order.placed`
 is published, so a missing order never means a message arrived early. An unknown `orderId` on a
 `succeeded` payment is a **refund** (reason `unknown_order`), not poison: the capture took real
-money and the order can be gone for good (a demo reset deletes settled orders). With no order to
+money and the order may never have existed in this database (a demo reset keeps every order, so it
+is not a cause). With no order to
 attach a ledger row to, the obligation is the `payment.refund_requested` outbox event alone (no
 contact), written in the same transaction as the consumer's dedupe record; duplicates of that
 payment serialize on an advisory lock keyed by `paymentId` and find the earlier request in the
@@ -503,9 +504,15 @@ Principle: **replaying processed messages is acceptable; silently skipping unpro
 - **Run race:** demo event only; 100 synthetic sessions call `BookingService.holdSeats` on one
   seat concurrently in-process, bypassing admission on purpose (admission is a tRPC concern; the
   race exercises the booking core). Shows successes, `SEAT_UNAVAILABLE`, `BOOKING_BUSY`, duration.
-- **Reset demo:** demo event only; allowed when no demo order is `PENDING_PAYMENT` and no demo
-  refund obligation is open; clears demo holds, orders, ledger rows and Redis keys, and returns
-  seats to `AVAILABLE`. Payment and notification history stays (no cross-schema deletes).
+- **Reset demo:** demo event only. **Refuses** with `RESET_BLOCKED`, changing nothing, while a demo
+  order is `PENDING_PAYMENT` or a demo refund obligation is open (`REFUND_REQUESTED` or
+  `MANUAL_REVIEW`): a buyer is still owed an outcome. **Frees** every demo seat (`AVAILABLE`, no
+  hold, no buyer, so the per-buyer limit counts nothing from before and anyone can hold any seat),
+  deletes holds that never became an order, and clears the demo event's Redis keys (queue and
+  counters). **Keeps** all financial history: every demo order, its order lines, its ledger rows
+  and the hold it was placed from, so a late or duplicate payment finds its order and the saga
+  reconciles it (a refund, never a seat reclaim). Payment and notification history stays too (no
+  cross-schema deletes).
 - Run race and reset are rate-limited to 1 per 10s.
 
 ### Observability

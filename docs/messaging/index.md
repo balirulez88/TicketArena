@@ -185,7 +185,7 @@ row with `refundRequestedAt = T`, `order.expired` and `payment.refund_requested`
 with a mismatched amount: order unchanged, `REFUND_REQUESTED` ledger row, `payment.refund_requested`
 with the contact; an on-time capture on an `EXPIRED` order, reason `late_delivery`, is also counted
 as `late_delivery_refund`, best-effort); `refund` `unknown_order` (a capture whose order no longer
-exists, e.g. deleted by a demo reset: no ledger row is possible, so the `payment.refund_requested`
+exists; a demo reset keeps orders, so it is not a cause: no ledger row is possible, so the `payment.refund_requested`
 outbox row, without contact, is the obligation; without an order row to lock, the handler takes an
 advisory lock on `refund:<paymentId>` and writes the request only if none exists for that payment,
 so a redelivery or a duplicate under a new event id refunds it once); `noop` (ack; a non-final

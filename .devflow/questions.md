@@ -658,3 +658,19 @@ How does the worker /health report Redis?
 Assumed: HTTP 200 {status:'ok', redis:'ok'|'unavailable'} from a bounded PING; the Upstash queue adapter is unchanged (neither app uses it), so choosing Upstash would fail closed on an outage
 
 Answer: Accepted (2026-11-23): HTTP 200 with a separate Redis state from a bounded PING; the Upstash queue adapter's limit is documented.
+
+## 2026-11-24 18:51 ticket 64
+
+Which holds does the demo reset keep, and what does ordersKept count?
+
+Assumed: Any hold that has an order (any status) is kept unchanged and no seat points to it any more; ordersKept counts every demo order of any status left after the reset
+
+Answer: (open)
+
+## 2026-11-24 18:51 ticket 64
+
+Should the unknown_order refund path stay now that the reset no longer causes it?
+
+Assumed: Yes, unchanged as a safety net; only its comments and docs were updated
+
+Answer: (open)

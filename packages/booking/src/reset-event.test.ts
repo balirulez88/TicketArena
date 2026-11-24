@@ -14,6 +14,68 @@ const onSale = (event: { onSaleAt: Date }) => at(event.onSaleAt);
 const SWEPT_AT = new Date(NOW.getTime() + 11 * 60_000);
 const sweeper = () => at(SWEPT_AT);
 
+/** Every demo order, order line and ledger row, to prove the reset leaves them unchanged. */
+async function demoHistory(eventId: string) {
+  const [orders, lines, ledger] = await Promise.all([
+    db().order.findMany({ where: { hold: { eventId } }, orderBy: { id: "asc" } }),
+    db().orderLine.findMany({ where: { order: { hold: { eventId } } }, orderBy: { id: "asc" } }),
+    db().orderPayment.findMany({
+      where: { order: { hold: { eventId } } },
+      orderBy: { paymentId: "asc" },
+    }),
+  ]);
+  return { orders, lines, ledger };
+}
+
+/** Everything a refused reset must leave as it was: history, holds and seats. */
+async function demoState(eventId: string) {
+  const [holds, seats] = await Promise.all([
+    db().hold.findMany({ where: { eventId }, orderBy: { id: "asc" } }),
+    db().seat.findMany({ where: { eventId }, orderBy: { id: "asc" } }),
+  ]);
+  return { ...(await demoHistory(eventId)), holds, seats };
+}
+
+/** Demo seats that are not plain `AVAILABLE`: held, claimed or bought by someone. */
+async function dirtyDemoSeats(eventId: string): Promise<number> {
+  return db().seat.count({
+    where: {
+      eventId,
+      OR: [
+        { status: { not: "AVAILABLE" } },
+        { holdId: { not: null } },
+        { claimBuyerKey: { not: null } },
+      ],
+    },
+  });
+}
+
+/** A captured, on-time `payment.succeeded` for the order, as the Payment service publishes it. */
+function paymentSucceeded(
+  order: { id: string; totalMinor: number; currency: string },
+  paymentId: string,
+) {
+  return {
+    data: JSON.stringify({
+      id: randomUUID(),
+      type: "payment.succeeded",
+      version: 1,
+      occurredAt: NOW.toISOString(),
+      correlationId: randomUUID(),
+      causationId: randomUUID(),
+      orderId: order.id,
+      payload: {
+        paymentId,
+        orderId: order.id,
+        attemptNo: 1,
+        amount: order.totalMinor,
+        currency: order.currency,
+        capturedAt: NOW.toISOString(),
+      },
+    }),
+  };
+}
+
 async function demoEvent() {
   return db().event.findFirstOrThrow({ where: { demo: true } });
 }
@@ -44,10 +106,10 @@ async function confirm(orderId: string, holdId: string): Promise<string> {
 }
 
 describe("BookingService.resetEvent", () => {
-  test("clears the demo event's holds, orders and ledger rows and frees its seats; keeps every other history", async () => {
+  test("keeps every demo order, order line, ledger row and ordered hold; deletes only holds without an order and frees every seat", async () => {
     const event = await demoEvent();
     const other = await db().event.findFirstOrThrow({ where: { demo: false } });
-    await service().holdSeats(
+    const unordered = await service().holdSeats(
       freshBuyer(),
       event.id,
       (await freeSeats(2, { eventId: event.id })).seatIds,
@@ -84,32 +146,22 @@ describe("BookingService.resetEvent", () => {
       (await freeSeats(1, { eventId: other.id })).seatIds,
     );
     const outboxBefore = await db().outboxEvent.count();
+    const history = await demoHistory(event.id);
 
     const result = await service().resetEvent(event.id);
 
     expect(result).toEqual({
       eventId: event.id,
-      holdsDeleted: 2,
-      ordersDeleted: 1,
-      ledgerRowsDeleted: 1,
+      holdsDeleted: 1,
+      ordersKept: 1,
       seatsFreed: 3,
     });
-    expect(await db().hold.count({ where: { eventId: event.id } })).toBe(0);
-    expect(await db().order.count({ where: { id: sold.id } })).toBe(0);
-    expect(await db().orderLine.count({ where: { orderId: sold.id } })).toBe(0);
-    expect(await db().orderPayment.count({ where: { orderId: sold.id } })).toBe(0);
-    expect(
-      await db().seat.count({
-        where: {
-          eventId: event.id,
-          OR: [
-            { status: { not: "AVAILABLE" } },
-            { holdId: { not: null } },
-            { claimBuyerKey: { not: null } },
-          ],
-        },
-      }),
-    ).toBe(0);
+    expect(await demoHistory(event.id)).toEqual(history);
+    expect(await db().hold.count({ where: { id: unordered.id } })).toBe(0);
+    expect(await db().hold.findUniqueOrThrow({ where: { id: sold.holdId } })).toMatchObject({
+      status: "ORDERED",
+    });
+    expect(await dirtyDemoSeats(event.id)).toBe(0);
     expect(await db().hold.findUniqueOrThrow({ where: { id: otherHold.id } })).toMatchObject({
       status: "HELD",
     });
@@ -117,6 +169,39 @@ describe("BookingService.resetEvent", () => {
     expect(await db().outboxEvent.count()).toBe(outboxBefore);
     expect(await db().paymentAttempt.count({ where: { orderId: sold.id } })).toBe(1);
     expect(await db().notification.count()).toBe(1);
+  });
+
+  test("after a reset the per-buyer limit counts nothing from before and any seat can be held", async () => {
+    const event = await demoEvent();
+    const buyer = freshBuyer();
+    const hold = await service().holdSeats(
+      buyer,
+      event.id,
+      (await freeSeats(6, { eventId: event.id })).seatIds,
+    );
+    const order = await service().placeOrder(
+      buyer,
+      hold.id,
+      { email: "b@example.com" },
+      randomUUID(),
+    );
+    await confirm(order.id, hold.id);
+    await expect(
+      service().holdSeats(buyer, event.id, (await freeSeats(1, { eventId: event.id })).seatIds),
+    ).rejects.toMatchObject({ code: "LIMIT_EXCEEDED" });
+
+    await service().resetEvent(event.id);
+
+    // The same buyer gets a full allowance again, on the very seats their kept order still lists.
+    const again = await service().holdSeats(buyer, event.id, hold.seatIds);
+    expect(again.seatIds).toEqual(hold.seatIds);
+    await service().releaseHold(buyer, again.id);
+    const stranger = await service().holdSeats(freshBuyer(), event.id, hold.seatIds);
+    expect(stranger.seatIds).toEqual(hold.seatIds);
+    expect(await db().order.findUniqueOrThrow({ where: { id: order.id } })).toMatchObject({
+      status: "CONFIRMED",
+    });
+    await service().resetEvent(event.id);
   });
 
   test("after a reset the demo event sells again from scratch", async () => {
@@ -143,14 +228,14 @@ describe("BookingService.resetEvent", () => {
   test("a demo order awaiting payment blocks the reset, which then changes nothing", async () => {
     const event = await demoEvent();
     const pending = await placedOrder(event.id);
-    const holdsBefore = await db().hold.count({ where: { eventId: event.id } });
+    const before = await demoState(event.id);
 
     await expect(service().resetEvent(event.id)).rejects.toMatchObject({
       code: "RESET_BLOCKED",
       message: expect.stringContaining("PENDING_PAYMENT"),
     });
 
-    expect(await db().hold.count({ where: { eventId: event.id } })).toBe(holdsBefore);
+    expect(await demoState(event.id)).toEqual(before);
     expect(await db().order.findUniqueOrThrow({ where: { id: pending.id } })).toMatchObject({
       status: "PENDING_PAYMENT",
     });
@@ -159,7 +244,7 @@ describe("BookingService.resetEvent", () => {
   });
 
   test.each(["REFUND_REQUESTED", "MANUAL_REVIEW"] as const)(
-    "an open refund obligation (%s) blocks the reset",
+    "an open refund obligation (%s) blocks the reset, which then changes nothing",
     async (disposition) => {
       const event = await demoEvent();
       const order = await placedOrder(event.id);
@@ -175,19 +260,56 @@ describe("BookingService.resetEvent", () => {
         },
       });
 
+      const before = await demoState(event.id);
       await expect(service().resetEvent(event.id)).rejects.toMatchObject({
         code: "RESET_BLOCKED",
         message: expect.stringContaining("refund obligation"),
       });
-      expect(await db().order.count({ where: { id: order.id } })).toBe(1);
+      expect(await demoState(event.id)).toEqual(before);
 
       await db().orderPayment.updateMany({
         where: { orderId: order.id },
         data: { disposition: "REFUNDED" },
       });
-      await expect(service().resetEvent(event.id)).resolves.toMatchObject({ ledgerRowsDeleted: 1 });
+      await expect(service().resetEvent(event.id)).resolves.toMatchObject({
+        ordersKept: expect.any(Number),
+      });
+      expect(await db().orderPayment.count({ where: { orderId: order.id } })).toBe(1);
     },
   );
+
+  test("a payment.succeeded for an order that was EXPIRED before the reset finds it and is refunded; its seats stay with their new holder", async () => {
+    const event = await demoEvent();
+    const order = await placedOrder(event.id);
+    const [seatId = ""] = order.lines.map((line) => line.seatId);
+    // The sweeper expires the unpaid order and frees its seat, as in production.
+    await sweeper().sweepExpired();
+    await service().resetEvent(event.id);
+    const newcomer = await service().holdSeats(freshBuyer(), event.id, [seatId]);
+    const paymentId = randomUUID();
+
+    await db().$transaction((tx) =>
+      createPaymentSagaHandler({ clock: { now: () => NOW }, newId: randomUUID })(
+        tx,
+        paymentSucceeded(order, paymentId),
+        { emit: async () => undefined },
+      ),
+    );
+
+    expect(await db().order.findUniqueOrThrow({ where: { id: order.id } })).toMatchObject({
+      status: "EXPIRED",
+    });
+    expect(await db().orderPayment.findUniqueOrThrow({ where: { paymentId } })).toMatchObject({
+      orderId: order.id,
+      disposition: "REFUND_REQUESTED",
+    });
+    expect(await db().seat.findUniqueOrThrow({ where: { id: seatId } })).toMatchObject({
+      status: "HELD",
+      holdId: newcomer.id,
+    });
+    await db().orderPayment.update({ where: { paymentId }, data: { disposition: "REFUNDED" } });
+    await service().resetEvent(event.id);
+  });
 
   test("an event that is not the demo event, or does not exist, is refused untouched", async () => {
     const other = await db().event.findFirstOrThrow({ where: { demo: false } });
@@ -360,11 +482,11 @@ describe("BookingService.resetEvent racing bookings", () => {
 
     expect(await resetting).toMatchObject({
       ok: true,
-      value: { holdsDeleted: 1, ordersDeleted: 0 },
+      value: { holdsDeleted: 1 },
     });
     expect(errorCode(await placing)).toBe("NOT_FOUND");
     expect(await db().order.count({ where: { holdId: hold.id } })).toBe(0);
-    expect(await db().hold.count({ where: { eventId: event.id } })).toBe(0);
+    expect(await db().hold.count({ where: { id: hold.id } })).toBe(0);
   });
 
   test("the payment saga owning an order the reset waits for: both finish without deadlock", async () => {
@@ -409,7 +531,7 @@ describe("BookingService.resetEvent racing bookings", () => {
     expect(await confirming).toEqual({ ok: true, value: undefined });
     expect(await resetting).toMatchObject({
       ok: true,
-      value: { holdsDeleted: 1, ordersDeleted: 1, ledgerRowsDeleted: 1, seatsFreed: 1 },
+      value: { holdsDeleted: 0, ordersKept: expect.any(Number), seatsFreed: 1 },
     });
   });
 
@@ -437,7 +559,7 @@ describe("BookingService.resetEvent racing bookings", () => {
     });
     expect(await resetting).toMatchObject({
       ok: true,
-      value: { holdsDeleted: 1, ordersDeleted: 0, seatsFreed: 0 },
+      value: { holdsDeleted: 1, seatsFreed: 0 },
     });
   });
 
@@ -458,7 +580,7 @@ describe("BookingService.resetEvent racing bookings", () => {
     expect(await sweeping).toMatchObject({ ok: true, value: { expiredOrderIds: [order.id] } });
     expect(await resetting).toMatchObject({
       ok: true,
-      value: { holdsDeleted: 1, ordersDeleted: 1, seatsFreed: 0 },
+      value: { holdsDeleted: 0, ordersKept: expect.any(Number), seatsFreed: 0 },
     });
   });
 });

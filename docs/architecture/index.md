@@ -117,7 +117,9 @@ taken first, so a refused call has no effect.
   normal `seat.held`; that row is the race's entry for the live feed (ticket 36), found by the
   winner's `correlationId`. Counters go to `ctx.metrics()` when configured.
 - `admin.resetDemo`: `BookingService.resetEvent(demoId)` (see
-  [database](../database/index.md#demo-reset)); `RESET_BLOCKED`/`NOT_DEMO_EVENT` become
+  [database](../database/index.md#demo-reset): frees every demo seat and deletes holds without an
+  order, keeps every order, order line and ledger row; returns `holdsDeleted`, `ordersKept`,
+  `seatsFreed`); `RESET_BLOCKED`/`NOT_DEMO_EVENT` become
   `PRECONDITION_FAILED`. After it commits, the demo event's booking counters
   (`ctx.metricsReset()`, `DEL` of the counter hash) and its waiting-room keys
   (`QueueStore.clearEvent`) are deleted. Postgres goes first because it is the authority; a Redis
@@ -211,7 +213,7 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
   `UNAUTHORIZED`, and the page offers a link back to the login. A "Demo event" card has "Run race"
   and "Reset demo" buttons (`useMutation`); the result shows in a `role="status"` line ("Race
   result": successes, seat unavailable, booking busy, duration, winner's correlation id; "Reset
-  result": holds, orders and ledger rows deleted, seats freed) and a failure, such as the rate
+  result": seats freed, holds deleted, orders kept with their payments) and a failure, such as the rate
   limit, in a `role="alert"` line. The next poll shows the new seat state.
 - **Server state:** components read `events.list`, `events.get`, `seats.map`, `queue.status`, `booking.getOrder` and `admin.snapshot` through TanStack
   Query (`useTRPC().….queryOptions`) under `TRPCReactProvider`; no server data is copied into

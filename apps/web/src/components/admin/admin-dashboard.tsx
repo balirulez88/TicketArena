@@ -136,9 +136,8 @@ function RaceSummary({ race }: { readonly race: RaceResult }) {
 function ResetSummary({ reset }: { readonly reset: ResetDemoResult }) {
   return (
     <p role="status" aria-label="Reset result">
-      Demo reset: {plural(reset.holdsDeleted, "hold")}, {plural(reset.ordersDeleted, "order")} and{" "}
-      {plural(reset.ledgerRowsDeleted, "ledger row")} deleted; {plural(reset.seatsFreed, "seat")}{" "}
-      freed.
+      Demo reset: {plural(reset.seatsFreed, "seat")} freed, {plural(reset.holdsDeleted, "hold")}{" "}
+      deleted, {plural(reset.ordersKept, "order")} kept with their payments.
     </p>
   );
 }

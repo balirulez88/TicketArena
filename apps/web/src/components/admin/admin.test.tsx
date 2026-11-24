@@ -56,8 +56,7 @@ const RACE: RaceResult = {
 const RESET: ResetDemoResult = {
   eventId: EVENT_ID,
   holdsDeleted: 2,
-  ordersDeleted: 1,
-  ledgerRowsDeleted: 1,
+  ordersKept: 1,
   seatsFreed: 3,
 };
 
@@ -200,16 +199,15 @@ describe("AdminDashboard demo actions", () => {
     expect(result.textContent).toContain(RACE.winner?.correlationId);
   });
 
-  test("Reset demo shows what was cleared", async () => {
+  test("Reset demo shows what was cleared and what was kept", async () => {
     renderWithApi(<AdminDashboard />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Reset demo" }));
 
     const result = await screen.findByRole("status", { name: "Reset result" });
     expect(actionCalls).toEqual(["admin.resetDemo"]);
-    expect(result.textContent).toContain("2 holds");
-    expect(result.textContent).toContain("1 order");
-    expect(result.textContent).toContain("1 ledger row");
+    expect(result.textContent).toContain("2 holds deleted");
+    expect(result.textContent).toContain("1 order kept");
     expect(result.textContent).toContain("3 seats freed");
   });
 

@@ -690,3 +690,35 @@ Does every login attempt use up the limiter window, and does logout need a valid
 Assumed: Every attempt, right or wrong, takes the window; parseAdminEnv still runs first; logout needs no cookie and clears ta_admin with the same attributes
 
 Answer: (open)
+
+## 2026-11-24 19:02 ticket 38
+
+What does 'deployed on Fly.io / Vercel' mean for an unattended run with no credentials?
+
+Assumed: Everything needed to deploy is committed and verified locally (Dockerfile, fly.toml for worker and NATS, nats.conf, deploy workflow, env validation); the run deploys nothing and calls no real service; the one-time human steps (apps, volume, secrets, Vercel link, GitHub secrets) are a step-by-step runbook in docs
+
+Answer: (open)
+
+## 2026-11-24 19:21 ticket 38
+
+The docs must link the recovery runbook, but it belongs to ticket 27, which is still open. What do they link to?
+
+Assumed: ADR 0011, the spec section 'Consumer recovery (runbook and script)' and issues/27, saying plainly the runbook is not built yet; no runbook invented here
+
+Answer: (open)
+
+## 2026-11-24 19:21 ticket 38
+
+When does the deploy workflow run, and what if secrets are missing?
+
+Assumed: New deploy.yml (ci.yml untouched): workflow_run after CI succeeds on main, or workflow_dispatch; migrate (direct URL) then web (Vercel CLI, git deploys off) and worker; a gate job skips each target whose secrets are missing; NATS deployed by hand; Fly apps ticketarena-nats/ticketarena-worker in fra, single machine, NATS unauthenticated on the private network only
+
+Answer: (open)
+
+## 2026-11-24 19:21 ticket 38
+
+ADR 0013 says Upstash REST in web and worker; the queue and saga counters use node-redis over rediss://. Switch now?
+
+Assumed: No: keep node-redis over Upstash TLS (switching needs the REST queue's errors mapped to SERVICE_UNAVAILABLE); documented in docs/operations/deployment.md; a human decides on an ADR amendment or ticket
+
+Answer: (open)

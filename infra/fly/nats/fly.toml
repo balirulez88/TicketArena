@@ -1,0 +1,29 @@
+# Fly.io app for NATS JetStream (ADR 0013). Deploy from the repository root with
+#   fly deploy infra/fly/nats --config infra/fly/nats/fly.toml --ha=false
+# See docs/operations/deployment.md for the one-time setup (app, volume).
+#
+# There is deliberately no [http_service] or [[services]] table: NATS gets no public address and
+# is reached only over Fly's private network as `<app>.internal` (the worker's NATS_URL).
+
+app = "ticketarena-nats"
+primary_region = "fra"
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+# One volume, one machine: JetStream runs as a single node (ADR 0013 consequences).
+[mounts]
+  source = "nats_data"
+  destination = "/data"
+
+[checks]
+  [checks.jetstream]
+    type = "http"
+    port = 8222
+    path = "/healthz?js-enabled-only=true"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "20s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

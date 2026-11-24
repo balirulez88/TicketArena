@@ -27,12 +27,38 @@ function isHttpsOrLocalHttp(value: string): boolean {
   );
 }
 
+/**
+ * Neon names its PgBouncer endpoint `<endpoint>-pooler.<region>.neon.tech`. Each serverless
+ * function instance opens its own connections, so the web app must go through the pooler; the
+ * direct endpoint is for migrations and the long-running worker only (ADR 0013). Any other host
+ * (local Postgres, tests) is not Neon and is accepted as is.
+ */
+function isPooledIfNeon(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    // Reported by `z.url()` already.
+    return false;
+  }
+  const host = url.hostname.toLowerCase();
+  if (!host.endsWith(".neon.tech")) {
+    return true;
+  }
+  return host.split(".")[0]?.endsWith("-pooler") ?? false;
+}
+
 const atLeast32Bytes = z
   .string()
   .refine((secret) => new TextEncoder().encode(secret).length >= 32, "must be at least 32 bytes");
 
 const serverEnvSchema = z.object({
-  DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
+  DATABASE_URL: z
+    .url({ protocol: /^postgres(ql)?$/ })
+    .refine(
+      isPooledIfNeon,
+      "must be Neon's pooled endpoint (host `<endpoint>-pooler.<region>.neon.tech`), not the direct one",
+    ),
   /** `neon` (serverless driver, the default) for Neon; `pg` for a local or plain Postgres. */
   DATABASE_DRIVER: z.enum(["neon", "pg"]).default("neon"),
   UPSTASH_REDIS_REST_URL: z

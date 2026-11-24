@@ -4,7 +4,9 @@
 
 **Blocked by:** 34, 14, 29 (Upstash `QueueStore` adapter), 65
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-24 on devflow/run-202611241838 (run 202611241838)
 
 - [ ] The web app uses `adapter-neon` with the pooled URL; migrations use the direct URL via `prisma migrate deploy` in CI.
 - [ ] The worker and NATS (JetStream on a volume, `sync_interval: always`) are deployed on Fly.io over private networking.

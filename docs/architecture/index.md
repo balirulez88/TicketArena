@@ -145,7 +145,8 @@ taken first, so a refused call has no effect. The same limiter guards the admin 
 Routers in `apps/web/src/server/routers/`: `events` (`list`, `get`) and `seats` (`map`), sharing
 zod schemas in `catalog-schemas.ts`. They read through `ctx.db`, a process-wide Prisma client
 created lazily from `DATABASE_URL` and `DATABASE_DRIVER` (`neon`, the default, or `pg` for a local
-Postgres; `parseDatabaseEnv` validates only these two). A missing
+Postgres; `parseDatabaseEnv` validates only these two and refuses a direct `*.neon.tech` host:
+the web app must use the `-pooler` endpoint). A missing
 event is a `NOT_FOUND` tRPC error. Integration tests run against real Postgres. See
 [database](../database/index.md).
 

@@ -5,7 +5,9 @@
 ## Stack
 
 - **Neon** serverless PostgreSQL. Use the **pooled** connection string at runtime because
-  serverless functions open many short-lived connections.
+  serverless functions open many short-lived connections; the web app's `parseServerEnv` refuses a
+  direct Neon host. Migrations (`prisma migrate deploy` in the deploy workflow) and the worker use
+  the direct one ([operations](../operations/deployment.md)).
 - **Prisma 7** with the `prisma-client` generator (output `packages/db/src/generated/prisma`,
   git-ignored) and an injected driver adapter.
 - Configuration in `packages/db/prisma.config.ts`; the schema lives in

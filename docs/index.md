@@ -42,6 +42,7 @@ below shows what is built.
 | Database & Prisma   | catalog, holds, orders, payment, notification | [database/](database/index.md)         |
 | Async messaging     | relay and consumer runner                     | [messaging/](messaging/index.md)       |
 | Agent workflow & CI | operational                                   | [workflow/](workflow/index.md)         |
+| Deployment & ops    | Vercel, Fly.io, Neon, Upstash; setup runbook  | [operations/](operations/index.md)     |
 | Technical debt      | frozen record (harness-v1 era)                | [technical-debt.md](technical-debt.md) |
 | Learning notes      | one per ticket: decision, alternatives, Q&A   | [learning/](learning/index.md)         |
 | Decisions (ADRs)    | 17 accepted                                   | [adr/](adr/index.md)                   |
@@ -90,6 +91,14 @@ below shows what is built.
   production belongs to deployment). The worker's admission ticker (1 s) and slot reaper (15 s)
   run on the same store. See
   [architecture/waiting-room](architecture/waiting-room.md).
+- Deployment ([operations/](operations/deployment.md)): `.github/workflows/deploy.yml` runs after
+  CI passes on `main`: `prisma migrate deploy` on the direct Neon URL, then the web app to Vercel
+  (git deployments off in `apps/web/vercel.json`; `parseServerEnv` refuses a direct Neon URL, so
+  the web app runs on `adapter-neon` over the pooled one) and the worker to Fly.io
+  (`infra/fly/worker`). NATS is its own Fly app on a volume (`infra/fly/nats`, `sync_interval:
+  always`); neither Fly app is public, the worker reaches NATS over the private network. A target
+  whose secrets are missing is skipped, not failed; the one-time setup is a runbook. Nothing is
+  deployed yet.
 - Structured logging: each app injects a `pino` logger; booking, the relay and the consumer runner log with a child logger bound to `correlationId`/`causationId` (plus `holdId`, `orderId`, `paymentId`). See [architecture/](architecture/index.md#logging-and-ids).
 - Quality gate: Biome (warnings fail), strict `tsc`, Vitest, enforced by `ralph-loop.sh`.
 - Execution drivers: `ralph-loop.sh` (default) and the opt-in lead driver (`RALPH_DRIVER=lead`, [ADR 0017](adr/0017-opt-in-lead-driver.md)); the host judges both the same way. A candidate rejected only for a ticket defect can be replayed on the amended base by `scripts/ralph-replay.mjs` ([ADR 0018](adr/0018-host-side-replay-of-a-rejected-candidate.md)).

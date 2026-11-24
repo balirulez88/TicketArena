@@ -1,0 +1,39 @@
+# Fly.io app for apps/worker (ADR 0013): relay, consumers, sweeper and the admission ticker in
+# one process. Deploy from the repository root (the image needs the whole pnpm workspace) with
+#   fly deploy . --config infra/fly/worker/fly.toml --dockerfile infra/fly/worker/Dockerfile \
+#     --ignorefile infra/fly/worker/Dockerfile.dockerignore --ha=false
+# The deploy workflow (.github/workflows/deploy.yml) runs exactly that after the migrations.
+# See docs/operations/deployment.md for the one-time setup and the secrets.
+#
+# There is deliberately no [http_service] or [[services]] table: the worker serves nothing
+# public. Its /health endpoint is reached only by the Fly check below.
+#
+# Exactly one machine (`--ha=false`): the admission ticker and the reaper assume a single worker
+# (ADR 0013), and a second relay would only add duplicate publishes for consumers to dedupe.
+
+app = "ticketarena-worker"
+primary_region = "fra"
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+# Non-secret configuration, validated by parseWorkerEnv at start-up. DATABASE_URL (Neon direct
+# endpoint) and REDIS_URL (Upstash, rediss://) are Fly secrets, never written here.
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+  NATS_URL = "nats://ticketarena-nats.internal:4222"
+  ADMIT_RATE_PER_SECOND = "10"
+  MAX_ACTIVE = "100"
+
+[checks]
+  [checks.health]
+    type = "http"
+    port = 8080
+    path = "/health"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "30s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

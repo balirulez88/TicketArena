@@ -1,0 +1,170 @@
+# Production deployment (ADR 0013): migrations first, then the web app (Vercel) and the worker
+# (Fly.io). Runs after CI passed on a push to main, or by hand on main. Vercel's own git
+# deployments are off (apps/web/vercel.json), so a web deploy can never race the migrations.
+# NATS changes rarely and is deployed by hand (docs/operations/deployment.md).
+#
+# Every target is opt-in by its secrets: while they are absent (forks, before the one-time setup)
+# its job is skipped with a notice instead of failing, so main never turns red for lack of them.
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One production deployment at a time, and never cancel one half-way through.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Deployment secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Only a green CI run of a push to this repository's main, or a manual run on main. A pull
+    # request from a fork's `main` branch also matches `branches: [main]`, hence the event and
+    # repository checks.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    outputs:
+      migrate: ${{ steps.check.outputs.migrate }}
+      web: ${{ steps.check.outputs.web }}
+      worker: ${{ steps.check.outputs.worker }}
+    steps:
+      - name: Check which targets are configured
+        id: check
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          configured() {
+            missing=""
+            for name in "$@"; do
+              if [ -z "${!name}" ]; then missing="$missing $name"; fi
+            done
+            if [ -n "$missing" ]; then
+              echo "::notice::skipping $target: secrets not configured:$missing"
+              echo "$target=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "$target=true" >> "$GITHUB_OUTPUT"
+            fi
+          }
+          target=migrate configured DATABASE_URL_UNPOOLED
+          target=web configured DATABASE_URL_UNPOOLED VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID
+          target=worker configured DATABASE_URL_UNPOOLED FLY_API_TOKEN
+
+  migrate:
+    name: Migrate the production database
+    needs: [gate]
+    if: needs.gate.outputs.migrate == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Set up pnpm (version from packageManager)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install the Prisma CLI
+        run: pnpm install --frozen-lockfile --filter @ticketarena/db
+
+      # Migrations need Neon's direct endpoint: they take session-level advisory locks, which a
+      # transaction-mode pooler cannot hold. Fail fast, naming the secret, before connecting.
+      - name: Apply migrations (prisma migrate deploy)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_UNPOOLED }}
+        run: |
+          case "$DATABASE_URL" in
+            *-pooler.*)
+              echo "::error::DATABASE_URL_UNPOOLED is Neon's pooled endpoint; migrations need the direct one"
+              exit 1 ;;
+            postgres://* | postgresql://*) ;;
+            *)
+              echo "::error::DATABASE_URL_UNPOOLED must be a postgres:// or postgresql:// URL"
+              exit 1 ;;
+          esac
+          pnpm --filter @ticketarena/db exec prisma migrate deploy
+
+  web:
+    name: Deploy the web app to Vercel
+    needs: [gate, migrate]
+    if: needs.gate.outputs.web == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Set up pnpm (version from packageManager)
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies and the Vercel CLI
+        run: |
+          pnpm install --frozen-lockfile
+          npm install --global vercel@66.6.0
+
+      # Builds here with the production environment pulled from the Vercel project, then uploads
+      # the prebuilt output, so what is deployed is exactly this commit.
+      - name: Build and deploy
+        run: |
+          vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+          vercel build --prod --token="$VERCEL_TOKEN"
+          vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+
+  worker:
+    name: Deploy the worker to Fly.io
+    needs: [gate, migrate]
+    if: needs.gate.outputs.worker == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Set up flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1.6
+
+      - name: Deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: >-
+          flyctl deploy . --remote-only --ha=false
+          --config infra/fly/worker/fly.toml
+          --dockerfile infra/fly/worker/Dockerfile
+          --ignorefile infra/fly/worker/Dockerfile.dockerignore

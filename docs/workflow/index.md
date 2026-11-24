@@ -115,6 +115,9 @@ Upstash adapters.
 `.github/workflows/ci.yml` runs on every push and pull request: install, `docker compose up
 --wait`, `pnpm run check`. Actions are pinned to commit SHAs.
 
+`.github/workflows/deploy.yml` deploys production after `CI` succeeds on a push to `main`
+(migrations, then Vercel and Fly.io); see [operations](../operations/deployment.md#deploy-workflow).
+
 ## Ralph loop (`ralph-loop.sh`)
 
 For each ticket whose `**Status:**` is `ready-for-agent`, whose blockers are all `done` and that

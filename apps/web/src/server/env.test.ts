@@ -219,3 +219,28 @@ describe("parseDatabaseEnv", () => {
     );
   });
 });
+
+describe("parseDatabaseEnv in production (ADR 0013)", () => {
+  const pooled =
+    "postgresql://app:secret@ep-quiet-bird-a1b2c3-pooler.eu-central-1.aws.neon.tech/ticketarena?sslmode=require";
+  const direct =
+    "postgresql://app:secret@ep-quiet-bird-a1b2c3.eu-central-1.aws.neon.tech/ticketarena?sslmode=require";
+
+  test("a Neon pooled URL with no driver set runs on the Neon serverless adapter", () => {
+    expect(parseDatabaseEnv({ DATABASE_URL: pooled })).toEqual({
+      DATABASE_URL: pooled,
+      DATABASE_DRIVER: "neon",
+    });
+  });
+
+  test("names DATABASE_URL when it is a direct Neon endpoint instead of the pooled one", () => {
+    expect(() => parseDatabaseEnv({ DATABASE_URL: direct })).toThrow(/pooled[\s\S]*DATABASE_URL/);
+    expect(() => parseServerEnv({ ...validEnv, DATABASE_URL: direct })).toThrow(/DATABASE_URL/);
+  });
+
+  test("a direct Neon endpoint is refused whichever driver is configured", () => {
+    expect(() => parseDatabaseEnv({ DATABASE_URL: direct, DATABASE_DRIVER: "pg" })).toThrow(
+      /DATABASE_URL/,
+    );
+  });
+});

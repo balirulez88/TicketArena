@@ -64,8 +64,9 @@ below shows what is built.
   retries; distinct `HOLD_EXPIRED` and `IDEMPOTENCY_KEY_REUSED` messages), and a placed order is
   followed on the event page and at `/orders/[orderId]`, polling `booking.getOrder` every 2 s until
   it is final. See [architecture/](architecture/index.md#web-ui).
-- Admin: `/admin/login` checks `ADMIN_PASSWORD` and sets a signed `ta_admin` cookie (8 h);
-  `proxy.ts` guards `/admin` and `adminProcedure` guards admin procedures (`UNAUTHORIZED`).
+- Admin: `/admin/login` checks `ADMIN_PASSWORD` and sets a signed `ta_admin` cookie (8 h); every
+  attempt first takes the global admin limit (1 per 10 s, fails closed), and `/api/admin/logout`
+  clears the cookie (a copied cookie stays valid until it expires). `proxy.ts` guards `/admin` and `adminProcedure` guards admin procedures (`UNAUTHORIZED`).
   `/admin` polls `admin.snapshot` every second: seats by status per event, orders by status,
   pending payments, queue length, active shoppers and the booking counters. `admin.runRace` races
   100 synthetic buyers for one demo seat (exactly one wins) and `admin.resetDemo` frees the demo

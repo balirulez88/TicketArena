@@ -514,6 +514,9 @@ Principle: **replaying processed messages is acceptable; silently skipping unpro
   reconciles it (a refund, never a seat reclaim). Payment and notification history stays too (no
   cross-schema deletes).
 - Run race and reset are rate-limited to 1 per 10s.
+- Admin login takes the same global limit (action `login`, fails closed): an attacker can delay
+  the real admin's login, accepted for the demo. Logout clears the admin cookie but cannot revoke
+  a copied one before its 8-hour expiry (no server-side session store).
 
 ### Observability
 

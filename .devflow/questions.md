@@ -674,3 +674,19 @@ Should the unknown_order refund path stay now that the reset no longer causes it
 Assumed: Yes, unchanged as a safety net; only its comments and docs were updated
 
 Answer: (open)
+
+## 2026-11-24 18:59 ticket 65
+
+How does a refused or unavailable admin login answer in the form-POST flow?
+
+Assumed: 303 to /admin/login?error=rate-limited&retry=<ceil seconds, min 1> plus Retry-After; an unreachable or misconfigured limiter answers 303 ?error=unavailable and logs the error (fails closed, no 500 page)
+
+Answer: (open)
+
+## 2026-11-24 18:59 ticket 65
+
+Does every login attempt use up the limiter window, and does logout need a valid admin cookie?
+
+Assumed: Every attempt, right or wrong, takes the window; parseAdminEnv still runs first; logout needs no cookie and clears ta_admin with the same attributes
+
+Answer: (open)

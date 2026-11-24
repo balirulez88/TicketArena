@@ -82,9 +82,23 @@ Decision: [ADR 0012](../adr/0012-identity-service-seam.md). Code: `apps/web/src/
   `SESSION_SECRET` logs out operators too; changing `ADMIN_PASSWORD` does not revoke issued cookies.
   `proxy.ts` redirects `/admin` and `/admin/*` (except `/admin/login`) to the login page without a
   valid cookie; `createTRPCContext` sets `ctx.isAdmin`, and `adminProcedure` rejects every admin
-  procedure with `UNAUTHORIZED` unless it is `true`. Login is not rate-limited and there is no
-  logout yet. `ADMIN_PASSWORD` (at least 12 characters) is validated in `parseServerEnv`, and by
+  procedure with `UNAUTHORIZED` unless it is `true`. `ADMIN_PASSWORD` (at least 12 characters) is validated in `parseServerEnv`, and by
   `parseAdminEnv` for the login route only, so it cannot break buyer requests.
+- **Login rate limit:** every `POST /api/admin/login`, right or wrong, first takes the admin
+  limiter for action `login` (`admin:rate:login`, the same global 1-per-10 s limiter as the demo
+  actions, see [Admin API](#admin-api)); only an allowed attempt reads the form and compares the
+  password. A refused attempt sets no cookie and redirects (303) to
+  `/admin/login?error=rate-limited&retry=<seconds>` with a matching `Retry-After` header; the page
+  shows the wait. A limiter that cannot be reached or configured fails closed: the attempt is
+  logged and redirected to `/admin/login?error=unavailable`. **Accepted for the demo:** the limit
+  is global, not per IP, so an attacker posting one guess every 10 s keeps the real operator's
+  login waiting (they can still log in in a gap); per-IP limits would need trusted proxy headers
+  and more state.
+- **Logout:** `POST /api/admin/logout` (the "Log out" button on `/admin`, a plain form) expires
+  the `ta_admin` cookie (`Max-Age=0`, same attributes) and redirects (303) to `/admin/login`; that
+  browser then sends no admin cookie, so admin procedures answer `UNAUTHORIZED`. There is no
+  server-side session store, so logout **cannot revoke a copied cookie**: a copy stays valid until
+  its signed 8-hour expiry (only rotating `SESSION_SECRET` ends it sooner). Accepted for the demo.
 - **Known MVP limitation:** clearing cookies yields a new guest session, so per-session guest
   limits (e.g. the 6-ticket limit) can be bypassed until authentication exists.
 - **API:** `session.whoami` returns the caller's principal.
@@ -107,7 +121,8 @@ exactly one is `PRECONDITION_FAILED`), so no request can aim them at a real even
 to **1 per 10 s per action, globally** (not per session) by `ctx.rateLimiter()`
 (`rate-limiter.ts`: `SET admin:rate:<action> 1 NX PX 10000` on the Upstash store, shared by every
 instance; a refusal is `TOO_MANY_REQUESTS` naming the seconds to wait from `PTTL`). The limit is
-taken first, so a refused call has no effect.
+taken first, so a refused call has no effect. The same limiter guards the admin login (action
+`login`, see [Identity](#identity)).
 
 - `admin.runRace`: picks the demo event's first `AVAILABLE` seat (none: `PRECONDITION_FAILED`,
   reset first) and has 100 synthetic sessions (fresh random session id = buyer key each) call
@@ -141,7 +156,9 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
 - **Pages:** `/events` lists events (venue, on-sale date, on-sale status) and links to
   `/events/[eventId]`, which shows the event (venue, on-sale status, a "Prices per section" table),
   the queue step and its seat map. `/admin/login` is a plain HTML form posting to
-  `/api/admin/login`; `/admin` (behind the proxy guard) shows the admin dashboard.
+  `/api/admin/login` that shows the route's `error` (wrong password, the seconds to wait when
+  rate-limited, or login unavailable); `/admin` (behind the proxy guard) shows the admin
+  dashboard and a "Log out" form posting to `/api/admin/logout`.
   `/orders/[orderId]` shows one order's status (owner only; another buyer's or a malformed id
   reads "Order not found."). Checkout is not its own route: it is the live hold on the event page.
 - **Queue room** (`components/queue/queue-room.tsx`): a step on `/events/[eventId]`, not its own

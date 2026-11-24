@@ -19,7 +19,7 @@ number sequentially, and never rewrite an accepted decision; supersede it with a
 | [0010](0010-real-infrastructure-tests.md)                       | Integration tests on real infrastructure, ports and contracts | Accepted                           |
 | [0011](0011-delivery-retry-dlq-recovery.md)                     | Delivery guarantees, retries, DLQ and consumer recovery       | Accepted                           |
 | [0012](0012-identity-service-seam.md)                           | Anonymous sessions behind an `IdentityService` seam           | Accepted                           |
-| [0013](0013-deployment-topology.md)                             | Deployment topology and CI                                    | Accepted                           |
+| [0013](0013-deployment-topology.md)                             | Deployment topology and CI                                    | Accepted; Redis line amended by 0025 (proposed) |
 | [0014](0014-sandbox-trust-boundary.md)                          | Sandbox trust boundary: bundles in, validated bundles out     | Accepted                           |
 | [0015](0015-review-and-verification-isolation.md)               | Isolated host reviews and hardened, staged verification       | Accepted                           |
 | [0016](0016-risk-based-debt-gate.md)                            | Risk-based technical debt gate                                | Superseded in part by 0024         |
@@ -31,3 +31,4 @@ number sequentially, and never rewrite an accepted decision; supersede it with a
 | [0022](0022-terminal-failed-outbox-events.md)                   | Terminal FAILED outbox events release their aggregate         | Accepted (ticket 59 implements it) |
 | [0023](0023-quarantine-replay-namespaces-and-recovery-holds.md) | Quarantine replay namespaces and recovery holds               | Accepted                           |
 | [0024](0024-frozen-debt-register-check.md)                      | Frozen debt register is checked for changes                   | Accepted                           |
+| [0025](0025-node-redis-over-tls-for-the-queue.md) | Queue and worker counters use node-redis over TLS (amends 0013) | Proposed |

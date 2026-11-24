@@ -21,4 +21,5 @@
 - [ ] AT-33: processed {1, 2, 3, 5}, consumer deleted → resume at 4; 5 is redelivered and deduped.
 - [ ] AT-34: no checkpoint → replay from the earliest retained message with no duplicate side effects.
 - [ ] The runbook in `docs/messaging` documents every rule and the 14-day recovery limit.
+- [ ] `docs/operations/deployment.md` (Recovery) links the runbook and no longer says it is not built; deferred here from ticket 38 (PR #17 review, 2026-11-24).
 - [ ] Every entry in `docs/technical-debt.md` whose Target is ticket 27 (TD-033) is `RESOLVED`, with the tests that prove it named in `Verification` (the host refuses the merge otherwise).

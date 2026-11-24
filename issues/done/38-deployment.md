@@ -12,3 +12,4 @@
 - [ ] The worker and NATS (JetStream on a volume, `sync_interval: always`) are deployed on Fly.io over private networking.
 - [ ] Production configuration is validated at each app boundary; secrets are documented in `.env.example`.
 - [ ] Deployment and operations are documented in `docs`, including a link to the recovery runbook.
+  **Amended 2026-11-24 (PR #17 review, approved by the maintainer):** the runbook link is deferred to ticket 27, which builds the runbook and must link it from `docs/operations/deployment.md`; until then the docs link ADR 0011, the spec section and ticket 27 and say plainly that the runbook is not built yet.

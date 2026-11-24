@@ -33,7 +33,18 @@ New modules are added when a slice needs them, not speculatively.
 - **Packages ship TypeScript source** (`exports` → `src/index.ts`); there is no package build
   step. Turborepo caches `typecheck`, `test`, `build` and `db:generate`.
 - **Errors:** validate at boundaries (zod), fail fast with actionable messages, and surface
-  domain failures as typed tRPC errors rather than thrown strings.
+  domain failures as typed tRPC errors rather than thrown strings. A router maps a domain error
+  to a `TRPCError` with the domain error as its `cause`; the error formatter in `server/trpc.ts`
+  then adds `data.domainCode` (and, for `SEAT_UNAVAILABLE`, `data.seatIds`) via
+  `domainErrorData` (`server/domain-error-data.ts`), so the client tells refusals that share a
+  tRPC code apart without reading the message. Codes exposed: `SEAT_UNAVAILABLE`,
+  `LIMIT_EXCEEDED`, `BOOKING_BUSY`, `INVALID_SEAT_SELECTION`, `NOT_ON_SALE`, `NOT_FOUND` (a hold),
+  `HOLD_EXPIRED`, `HOLD_NOT_ACTIVE`, `HOLD_SEAT_SET_MISSING`, `MIXED_CURRENCY`,
+  `IDEMPOTENCY_KEY_REUSED`, and the admin reset's `RESET_BLOCKED` and `NOT_DEMO_EVENT`; the client
+  sees `domainCode` as that union, inferred from `AppRouter`. Any other error (a missing
+  admission, input validation, an infrastructure cause, or a domain error no router mapped, which
+  is an `INTERNAL_SERVER_ERROR`) has no `domainCode`. `data` is only `code`, `httpStatus`, `path`
+  and those two fields: tRPC's development `stack` is never sent; the route's `onError` logs it.
 
 ## Request path today
 
@@ -184,10 +195,10 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
   or the event keeps the last data and the hold controls on screen (with a "could not be
   refreshed" status), so the hold, the checkout and its key survive a transient error; only a
   first load without data shows the error instead. Refusals are told apart by
-  `hold-failure.ts`: `SEAT_UNAVAILABLE` (listing the taken seats by section, row and number) and
-  `LIMIT_EXCEEDED` both arrive as `CONFLICT` and are split by the domain code that starts the
-  error message; `BOOKING_BUSY` is `TOO_MANY_REQUESTS`, `FORBIDDEN` asks the buyer to join the queue
-  again (and re-reads `queue.status`), and `NOT_ON_SALE` is `PRECONDITION_FAILED`. Each has its own
+  `hold-failure.ts` from `error.data` alone, never the message: `domainCode` `SEAT_UNAVAILABLE`
+  (listing `data.seatIds` by section, row and number), `LIMIT_EXCEEDED` (both are tRPC
+  `CONFLICT`), `BOOKING_BUSY` and `NOT_ON_SALE`; tRPC `FORBIDDEN` (no domain code) asks the buyer
+  to join the queue again (and re-reads `queue.status`). Each has its own
   `role="alert"` message. The hold is not kept across a page reload.
 - **Checkout** (`components/checkout/checkout-form.tsx`): a "Checkout" form inside the "Your hold"
   region, so the countdown, the release button and the heartbeat stay on while the buyer types.
@@ -205,9 +216,8 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
   expired, because the server answers a replay with the order it already placed even after the
   hold expired. The order it returns replaces the hold; `HOLD_EXPIRED` ends it; another
   ambiguous answer keeps the form for a manual retry with the same key. Refusals are told apart by
-  `checkout-failure.ts`: `HOLD_EXPIRED` (`PRECONDITION_FAILED`) drops the hold with a "Your hold
-  expired before your order was placed" alert; `IDEMPOTENCY_KEY_REUSED` (`CONFLICT`, recognised by
-  the domain code starting the message) says the checkout was already submitted with different
+  `checkout-failure.ts` from `data.domainCode` alone: `HOLD_EXPIRED` drops the hold with a "Your
+  hold expired before your order was placed" alert; `IDEMPOTENCY_KEY_REUSED` says the checkout was already submitted with different
   details and discards the key, so the next submit is a new attempt; anything else, network
   failures included, asks to try again.
 - **Order status** (`components/checkout/order-status.tsx`): once `placeOrder` succeeds the hold

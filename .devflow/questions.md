@@ -738,3 +738,19 @@ How is 'a crash after the send' simulated?
 Assumed: The test wraps the runner's Prisma client so its first $transaction fails (database-boundary failure) instead of killing the process
 
 Answer: (open)
+
+## 2026-11-24 19:45 ticket 67
+
+Which errors carry a domainCode, and is the stack ever sent?
+
+Assumed: The 11 booking errors the booking router maps plus admin RESET_BLOCKED and NOT_DEMO_EVENT; queue SERVICE_UNAVAILABLE (Redis outage) and unmapped domain errors (INTERNAL_SERVER_ERROR) carry none; data is built field by field (code, httpStatus, path, domain fields) and never includes a stack in any environment
+
+Answer: (open)
+
+## 2026-11-24 19:45 ticket 67
+
+Is data.seatIds required by the type when domainCode is SEAT_UNAVAILABLE?
+
+Assumed: No: both optional on one object type; the UI falls back to [] so domainCode stays readable without narrowing a union
+
+Answer: (open)

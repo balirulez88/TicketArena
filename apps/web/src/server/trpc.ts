@@ -17,6 +17,7 @@ import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
 import { z } from "zod";
 import { type AdmissionTokens, admissionSetCookie, createAdmissionTokens } from "./admission-token";
+import { domainErrorData } from "./domain-error-data";
 import { parseAdmissionEnv, parseDatabaseEnv, parseSessionEnv } from "./env";
 import { ADMIN_COOKIE, verifyAdminCookieValue } from "./identity/admin-session";
 import { type CookieReader, createIdentityService, type Principal } from "./identity/identity";
@@ -228,6 +229,21 @@ function cookieReader(header: string | null): CookieReader {
 const t = initTRPC.context<TRPCContext>().create({
   // superjson keeps Date/Map/BigInt intact across the wire (booking timestamps, prices).
   transformer: superjson,
+  /**
+   * `data` is built field by field rather than spread from tRPC's default: the default adds the
+   * server stack outside production, and nothing but these fields may reach a browser. The domain
+   * code (and SEAT_UNAVAILABLE's seat ids) let the client tell refusals apart that share a tRPC
+   * code, without reading the message; the stack stays in the server log (`onError`).
+   */
+  errorFormatter: ({ shape, error }) => ({
+    ...shape,
+    data: {
+      code: shape.data.code,
+      httpStatus: shape.data.httpStatus,
+      ...(shape.data.path === undefined ? {} : { path: shape.data.path }),
+      ...domainErrorData(error),
+    },
+  }),
 });
 
 export const createTRPCRouter = t.router;

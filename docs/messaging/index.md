@@ -30,8 +30,14 @@ publishing the same row twice in one pass.
 ## Worker, relay and consumer runner
 
 `apps/worker` is the long-running process ([ADR 0013](../adr/0013-deployment-topology.md)). On boot it calls
-`ensureTopology()` (idempotent; creates `TICKETARENA` and `TICKETARENA_DLQ` as in
-[ADR 0004](../adr/0004-nats-jetstream-message-bus.md)) and only then starts the relay. It never waits for Redis: the relay, the consumers and the sweeper
+`ensureTopology()` (creates `TICKETARENA` and `TICKETARENA_DLQ` as in
+[ADR 0004](../adr/0004-nats-jetstream-message-bus.md)) and only then starts the relay. Re-applying the
+topology is safe at any time: an unchanged stream is left alone, and a stream declared by an older
+topology is updated in place, keeping its messages. Only the broker's "stream name already in use"
+answer to the `add` leads to that `update`; any other failure (invalid configuration such as a
+subject another stream owns, the broker unreachable) propagates with its original cause and no
+update is attempted (TD-036). The two streams' subjects are disjoint, so every message lands in
+exactly one of them. It never waits for Redis: the relay, the consumers and the sweeper
 run during a Redis outage (see [waiting room](../architecture/waiting-room.md#redis-outage)). It serves
 `GET /health`, which reports Redis separately (`"redis": "ok" | "unavailable"`).
 
@@ -56,6 +62,29 @@ run during a Redis outage (see [waiting room](../architecture/waiting-room.md#re
   The DLQ gate and recovery from ADR 0011 are not built yet.
 - **Port:** `MessageBus` hides the broker; `jetstream-message-bus.ts` is the only module importing
   `@nats-io/*` (a test enforces it). `message-bus.contract.ts` is the contract suite run against real NATS.
+
+## Delivery guarantee and its bounds
+
+Delivery is **at-least-once** end to end; Postgres is the source of truth and the outbox is the
+recovery source. The bounds:
+
+- **A full stream holds events back, never drops them.** Both streams use `discard: new` with a
+  sized `max_bytes`, so once a stream is full the broker rejects the publish (`maximum bytes
+  exceeded`) instead of discarding stored messages. The relay records the failure (`attempts`,
+  `lastError`) and the row stays `PENDING`; it is published on a later tick once space frees
+  (messages age out or are purged). AT-35, `stream-backpressure.test.ts`.
+- **7-day `max_age`.** A consumer more than 7 days behind loses the messages that aged out of
+  `TICKETARENA` (30 days for the DLQ). Outbox rows outlive it (no retention deletes them yet; the spec's
+  14 days is longer than `max_age`), so recovery can reach beyond the stream.
+- **Single-node disk loss.** JetStream runs on one node and one volume (`sync_interval: always`
+  protects against an OS crash, not against losing the disk). Losing the disk loses in-flight
+  messages; they are recovered from the outbox
+  ([ADR 0011](../adr/0011-delivery-retry-dlq-recovery.md)).
+
+**Outbox lag** is the age of the oldest `PENDING` row: `measureOutboxLag({ prisma, service, now })`
+(`outbox-lag.ts`) returns it in ms for one service's outbox, 0 when nothing is `PENDING`. It grows
+while the relay cannot publish (broker down, stream full), which makes it the dashboard's signal
+that events are waiting in the outbox. The admin dashboard does not show it yet.
 
 ## Event catalogue
 

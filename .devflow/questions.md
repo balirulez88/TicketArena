@@ -802,3 +802,11 @@ Slots that predate the holders hash, or fresh slots missing a jti?
 Assumed: Not migrated: an expired pre-deploy jti is dropped and its slot is freed once 90 s idle or on re-join (gap closes within 30 min of deploy); a fresh slot with no jti is no longer freed immediately, only when idle (no script creates one)
 
 Answer: Changed (2026-11-26, PR #18 review): the 30-minute claim was not guaranteed, since status polls kept heartbeating an old-layout slot. The heartbeat now refreshes a slot only while its admission is valid, so such a slot goes idle and is reaped at most 90 s plus one reaper interval after its admission expired, with no backfill; a contract test starts from the old key layout on both adapters. A slot with no jti at all (state no script produces) is likewise never refreshed and is reaped as idle.
+
+## 2026-11-26 17:14 ticket 26
+
+The last AC asks to mark TD-036 RESOLVED in docs/technical-debt.md, but CLAUDE.md says that register is frozen and not updated by runs. Which wins?
+
+Assumed: CLAUDE.md wins, as for ticket 14: the register is not edited; the TD-036 tests are named in the commit message and a human updates TD-036 if wanted
+
+Answer: (open)

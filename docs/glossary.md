@@ -43,6 +43,7 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Oversell**           | Selling the same seat twice. Must be impossible, not merely unlikely.                                                      |
 | **Integration event**  | A fact published to other services via the outbox (e.g. `order.confirmed`).                                                |
 | **Outbox**             | The `outbox_events` table; integration events committed atomically with business data.                                     |
+| **Outbox lag**         | Age of the oldest `PENDING` outbox row; grows while the relay cannot publish (broker down, stream full).                   |
 | **Relay**              | The process that publishes PENDING outbox rows to the broker.                                                              |
 | **Consumer runner**    | Worker component running a durable pull consumer; dedupes via `processed_messages` in the handler TX.                      |
 | **Admin cookie**       | `ta_admin`: proof an operator logged in with `ADMIN_PASSWORD`; signed, expires after 8 h.                                  |

@@ -35,3 +35,15 @@ describe("provider latency docs", () => {
     expect(doc).toContain("interactive-transaction timeout");
   });
 });
+
+describe("delivery guarantee docs", () => {
+  it("docs/messaging states the delivery guarantee and its bounds: 7-day max_age, single-node disk loss, a full stream", () => {
+    const doc = readFileSync(join(docsDir, "messaging", "index.md"), "utf8");
+    expect(doc).toContain("## Delivery guarantee and its bounds");
+    expect(doc).toContain("at-least-once");
+    expect(doc).toContain("7-day `max_age`");
+    expect(doc).toContain("Single-node disk loss");
+    expect(doc).toContain("`discard: new`");
+    expect(doc).toContain("Outbox lag");
+  });
+});

@@ -84,7 +84,7 @@ below shows what is built.
   `booking.holdSeats` / `booking.getHold` / `booking.activeHold` / `booking.releaseHold` (`packages/booking`), which write
   `seat.held` and `hold.released` outbox events; the worker's sweeper expires abandoned holds every 15 s and writes `hold.expired`, and expires unpaid orders at `paymentDeadline + 60 s` (`order.expired`, seats freed); `orders` and `order_lines` back `booking.placeOrder` / `booking.getOrder`, which write
   `order.placed`; envelope schemas live in `packages/contracts`.
-- `packages/messaging` and `apps/worker`: the `MessageBus` port with its JetStream adapter, the outbox relay (250 ms, batch of 100), the consumer runner, the sweeper, the waiting-room admission ticker and reaper, and the worker app with `/health`.
+- `packages/messaging` and `apps/worker`: the `MessageBus` port with its JetStream adapter, the outbox relay (250 ms, batch of 100; a full stream rejects publishes and the rows wait `PENDING`, measured as outbox lag), the consumer runner, the sweeper, the waiting-room admission ticker and reaper, and the worker app with `/health`.
 - `packages/waiting-room`: `QueueService` with the `QueueStore` port, its node-redis and Upstash
   REST adapters (the same atomic Lua scripts and key layout, configurable key prefix, one shared
   contract suite run against both) and the schedule `AdmissionPolicy`; served as

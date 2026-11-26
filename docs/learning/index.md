@@ -25,3 +25,4 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [67: Típusos domain hibakódok](67-typed-domain-error-codes.md): `cause`-ból `data.domainCode` és `seatIds` az error formatterben, explicit lista, stack soha a `data`-ban, a UI nem parsol üzenetet
 - [68: Az oldalújratöltés visszaállítja az aktív holdot](68-reload-restores-the-active-hold.md): `activeHold` query, szerver dönti el a lejáratot, `sessionId` + `buyerKey`, egyszeri olvasás és cache törlés
 - [69: Korlátos reaping az aktív slotokon](69-bounded-reaping.md): kötegelt atomic Lua `reap` indexekből `LIMIT`-tel, `holders` hash, pass budget, AT-39 egy lépésben
+- [26: Stream backpressure és topology hardening](26-stream-backpressure-and-topology.md): `discard: new` backpressure, outbox `PENDING` marad, szűk catch az `ensureTopology()`-ban, outbox lag

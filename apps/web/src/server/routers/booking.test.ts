@@ -13,12 +13,16 @@ import { silentLogger } from "@ticketarena/contracts";
 import { seedCatalog } from "@ticketarena/db";
 import { setupTestDatabase, setupTestRedis } from "@ticketarena/test-infra";
 import { createRedisQueueStore } from "@ticketarena/waiting-room";
+import { createTRPCClient, httpLink } from "@trpc/client";
 import { SignJWT } from "jose";
 import { createClient } from "redis";
+import superjson from "superjson";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import type { Principal } from "../identity/identity";
 import { createBrowserCookies } from "../testing/browser-cookies";
-import { createCaller } from "./_app";
+import { rejectionOf, WIRE_URL, wireFetch } from "../testing/wire-client";
+import type { TRPCContext } from "../trpc";
+import { type AppRouter, appRouter, createCaller } from "./_app";
 
 const database = setupTestDatabase();
 const redis = setupTestRedis();
@@ -38,8 +42,8 @@ const admissionTokensFor = (principal: Principal, now: Date) =>
 
 const queueStore = async () => createRedisQueueStore(redisClient, { prefix: redis.prefix });
 
-function caller(principal: Principal, now: Date = NOW) {
-  return createCaller({
+function contextFor(principal: Principal, now: Date = NOW): TRPCContext {
+  return {
     now: () => now,
     principal,
     isAdmin: false,
@@ -59,6 +63,23 @@ function caller(principal: Principal, now: Date = NOW) {
     queueStore,
     random: { next: () => 0 },
     admissionTokens: admissionTokensFor(principal, now),
+  };
+}
+
+function caller(principal: Principal, now: Date = NOW) {
+  return createCaller(contextFor(principal, now));
+}
+
+/** The client as the browser has it: refusals come back through the error formatter. */
+function wire(principal: Principal, now: Date = NOW) {
+  return createTRPCClient<AppRouter>({
+    links: [
+      httpLink({
+        url: WIRE_URL,
+        transformer: superjson,
+        fetch: wireFetch(appRouter, () => contextFor(principal, now)),
+      }),
+    ],
   });
 }
 
@@ -368,6 +389,134 @@ describe("booking.placeOrder / getOrder", () => {
         idempotencyKey: randomUUID(),
       }),
     ).rejects.toMatchObject({ code: "BAD_REQUEST", message: expect.stringContaining("email") });
+  });
+});
+
+describe("booking refusals on the wire carry their domain code", () => {
+  const contact = { email: "alice@example.com" };
+  const refusal = (call: Promise<unknown>) => rejectionOf<AppRouter>(call);
+
+  test("SEAT_UNAVAILABLE carries the taken seat ids", async () => {
+    const { eventId, seatIds } = await freeSeats(db(), 2);
+    const [taken = "", free = ""] = seatIds;
+    await caller(alice).booking.holdSeats({ eventId, seatIds: [taken] });
+
+    const error = await refusal(
+      wire(bob).booking.holdSeats.mutate({ eventId, seatIds: [free, taken] }),
+    );
+
+    expect(error.data).toMatchObject({ code: "CONFLICT", domainCode: "SEAT_UNAVAILABLE" });
+    expect(error.data?.seatIds).toEqual([taken]);
+  });
+
+  test("LIMIT_EXCEEDED shares CONFLICT but has its own code and no seat ids", async () => {
+    const event = await db().event.findFirstOrThrow({ where: { demo: true } });
+    const [extra = "", ...six] = (await freeSeats(db(), 7, { eventId: event.id })).seatIds;
+    await caller(alice).booking.holdSeats({ eventId: event.id, seatIds: six });
+
+    const error = await refusal(
+      wire(alice).booking.holdSeats.mutate({ eventId: event.id, seatIds: [extra] }),
+    );
+
+    expect(error.data).toMatchObject({ code: "CONFLICT", domainCode: "LIMIT_EXCEEDED" });
+    expect(error.data).not.toHaveProperty("seatIds");
+  });
+
+  test("NOT_ON_SALE", async () => {
+    const upcoming = await db().event.findFirstOrThrow({ where: { demo: false } });
+    const { seatIds } = await freeSeats(db(), 1, { eventId: upcoming.id });
+    await admit(alice, upcoming.id, upcoming.queueClosesAt);
+
+    const error = await refusal(
+      wire(alice).booking.holdSeats.mutate({ eventId: upcoming.id, seatIds }),
+    );
+
+    expect(error.data).toMatchObject({ code: "PRECONDITION_FAILED", domainCode: "NOT_ON_SALE" });
+  });
+
+  test("NOT_FOUND, HOLD_NOT_ACTIVE and HOLD_EXPIRED from releaseHold", async () => {
+    const { eventId, seatIds } = await freeSeats(db(), 2);
+    const released = await caller(alice).booking.holdSeats({
+      eventId,
+      seatIds: [seatIds[0] ?? ""],
+    });
+    await caller(alice).booking.releaseHold({ holdId: released.id });
+    const live = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatIds[1] ?? ""] });
+
+    const notFound = await refusal(wire(bob).booking.releaseHold.mutate({ holdId: live.id }));
+    const notActive = await refusal(
+      wire(alice).booking.releaseHold.mutate({ holdId: released.id }),
+    );
+    const expired = await refusal(
+      wire(alice, live.holdExpiresAt).booking.releaseHold.mutate({ holdId: live.id }),
+    );
+
+    expect(notFound.data).toMatchObject({ code: "NOT_FOUND", domainCode: "NOT_FOUND" });
+    expect(notActive.data).toMatchObject({ code: "CONFLICT", domainCode: "HOLD_NOT_ACTIVE" });
+    expect(expired.data).toMatchObject({
+      code: "PRECONDITION_FAILED",
+      domainCode: "HOLD_EXPIRED",
+    });
+  });
+
+  test("IDEMPOTENCY_KEY_REUSED, HOLD_NOT_ACTIVE and HOLD_EXPIRED from placeOrder", async () => {
+    const { eventId, seatIds } = await freeSeats(db(), 2);
+    const ordered = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatIds[0] ?? ""] });
+    // Held before the order: placing it frees the buyer's slot, and with it the admission.
+    const live = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatIds[1] ?? ""] });
+    const idempotencyKey = randomUUID();
+    await caller(alice).booking.placeOrder({ holdId: ordered.id, contact, idempotencyKey });
+
+    const reused = await refusal(
+      wire(alice).booking.placeOrder.mutate({
+        holdId: ordered.id,
+        contact: { email: "x@example.com" },
+        idempotencyKey,
+      }),
+    );
+    const notActive = await refusal(
+      wire(alice).booking.placeOrder.mutate({
+        holdId: ordered.id,
+        contact,
+        idempotencyKey: randomUUID(),
+      }),
+    );
+    const expired = await refusal(
+      wire(alice, live.holdExpiresAt).booking.placeOrder.mutate({
+        holdId: live.id,
+        contact,
+        idempotencyKey: randomUUID(),
+      }),
+    );
+
+    expect(reused.data).toMatchObject({ code: "CONFLICT", domainCode: "IDEMPOTENCY_KEY_REUSED" });
+    expect(notActive.data).toMatchObject({ code: "CONFLICT", domainCode: "HOLD_NOT_ACTIVE" });
+    expect(expired.data).toMatchObject({
+      code: "PRECONDITION_FAILED",
+      domainCode: "HOLD_EXPIRED",
+    });
+  });
+
+  test("a refusal that is not a domain error carries no domain code", async () => {
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const stranger: Principal = { kind: "guest", sessionId: randomUUID().replaceAll("-", "") };
+
+    const forbidden = await refusal(wire(stranger).booking.holdSeats.mutate({ eventId, seatIds }));
+    const malformed = await refusal(
+      wire(alice).booking.holdSeats.mutate({ eventId, seatIds: ["nope"] }),
+    );
+    const missingOrder = await refusal(
+      wire(alice).booking.getOrder.query({ orderId: randomUUID() }),
+    );
+
+    expect(forbidden.data?.code).toBe("FORBIDDEN");
+    expect(malformed.data?.code).toBe("BAD_REQUEST");
+    expect(missingOrder.data?.code).toBe("NOT_FOUND");
+    for (const error of [forbidden, malformed, missingOrder]) {
+      expect(error.data).not.toHaveProperty("domainCode");
+      expect(error.data).not.toHaveProperty("seatIds");
+      expect(error.data).not.toHaveProperty("stack");
+    }
   });
 });
 

@@ -658,3 +658,99 @@ How does the worker /health report Redis?
 Assumed: HTTP 200 {status:'ok', redis:'ok'|'unavailable'} from a bounded PING; the Upstash queue adapter is unchanged (neither app uses it), so choosing Upstash would fail closed on an outage
 
 Answer: Accepted (2026-11-23): HTTP 200 with a separate Redis state from a bounded PING; the Upstash queue adapter's limit is documented.
+
+## 2026-11-24 18:51 ticket 64
+
+Which holds does the demo reset keep, and what does ordersKept count?
+
+Assumed: Any hold that has an order (any status) is kept unchanged and no seat points to it any more; ordersKept counts every demo order of any status left after the reset
+
+Answer: Accepted (2026-11-24): every hold with an order of any status stays unchanged, and after the reset no seat points to it; ordersKept counts every demo order kept.
+
+## 2026-11-24 18:51 ticket 64
+
+Should the unknown_order refund path stay now that the reset no longer causes it?
+
+Assumed: Yes, unchanged as a safety net; only its comments and docs were updated
+
+Answer: Accepted (2026-11-24): it stays as a safety net; a real capture for an unknown order must never be dropped, even if the reset no longer causes one.
+
+## 2026-11-24 18:59 ticket 65
+
+How does a refused or unavailable admin login answer in the form-POST flow?
+
+Assumed: 303 to /admin/login?error=rate-limited&retry=<ceil seconds, min 1> plus Retry-After; an unreachable or misconfigured limiter answers 303 ?error=unavailable and logs the error (fails closed, no 500 page)
+
+Answer: Accepted (2026-11-24): 303 after the form POST; when rate-limited, a retry rounded up to at least 1 s plus Retry-After; an unreachable or failing limiter answers unavailable and is logged on the server. No cookie is set.
+
+## 2026-11-24 18:59 ticket 65
+
+Does every login attempt use up the limiter window, and does logout need a valid admin cookie?
+
+Assumed: Every attempt, right or wrong, takes the window; parseAdminEnv still runs first; logout needs no cookie and clears ta_admin with the same attributes
+
+Answer: Accepted (2026-11-24): right and wrong passwords both use up the login window; invalid app configuration may stop earlier; logout needs no valid cookie and clears it with the same attributes.
+
+## 2026-11-24 19:02 ticket 38
+
+What does 'deployed on Fly.io / Vercel' mean for an unattended run with no credentials?
+
+Assumed: Everything needed to deploy is committed and verified locally (Dockerfile, fly.toml for worker and NATS, nats.conf, deploy workflow, env validation); the run deploys nothing and calls no real service; the one-time human steps (apps, volume, secrets, Vercel link, GitHub secrets) are a step-by-step runbook in docs
+
+Answer: Accepted as preparation (2026-11-24): Docker/Fly/Vercel/workflow and the one-time human steps are reviewable; no account creation or real deployment is faked. The hosted/live-demo criterion is not proven by this.
+
+## 2026-11-24 19:21 ticket 38
+
+The docs must link the recovery runbook, but it belongs to ticket 27, which is still open. What do they link to?
+
+Assumed: ADR 0011, the spec section 'Consumer recovery (runbook and script)' and issues/27, saying plainly the runbook is not built yet; no runbook invented here
+
+Answer: Partly accepted (2026-11-24): linking ADR 0011, the spec and ticket 27, and saying plainly the runbook is missing, is right, but it does not meet the runbook criterion. Either build the dependency or amend/defer the criterion explicitly.
+
+## 2026-11-24 19:21 ticket 38
+
+When does the deploy workflow run, and what if secrets are missing?
+
+Assumed: New deploy.yml (ci.yml untouched): workflow_run after CI succeeds on main, or workflow_dispatch; migrate (direct URL) then web (Vercel CLI, git deploys off) and worker; a gate job skips each target whose secrets are missing; NATS deployed by hand; Fly apps ticketarena-nats/ticketarena-worker in fra, single machine, NATS unauthenticated on the private network only
+
+Answer: Accepted with a fix (2026-11-24): deploying after green main CI, skipping clearly on missing secrets, and NATS by hand are right. A manual run must also require green CI of the exact commit, and redeploying an old commit is excluded (fixed in 72fad6f). A partial job re-run reuses the old gate output, so each production job re-checks its pinned commit right before acting (re-review of e22945c). NATS without auth stays only with an explicitly accepted, trusted Fly-org boundary.
+
+## 2026-11-24 19:21 ticket 38
+
+ADR 0013 says Upstash REST in web and worker; the queue and saga counters use node-redis over rediss://. Switch now?
+
+Assumed: No: keep node-redis over Upstash TLS (switching needs the REST queue's errors mapped to SERVICE_UNAVAILABLE); documented in docs/operations/deployment.md; a human decides on an ADR amendment or ticket
+
+Answer: ADR decision needed (2026-11-24): no forced adapter switch without evidence, but the deviation must be accepted by a reviewed ADR amendment, or the REST wiring finished. A follow-up in the docs is not enough. Resolved (2026-11-26): the maintainer accepted ADR 0025.
+
+## 2026-11-24 19:30 ticket 66
+
+Is SENT recorded per channel right after each send, or all together?
+
+Assumed: All together in the runner's transaction with the dedupe row; beforeTransaction creates/reuses PENDING per channel and sends outside any transaction, keyed by notification id; no schema change (PENDING already existed)
+
+Answer: Accepted (2026-11-24): PENDING rows durably first, sends outside the transaction, then SENT for every channel that succeeded plus the dedupe row atomically in the runner's transaction. A partial failure is resent with the same notification-id keys.
+
+## 2026-11-24 19:30 ticket 66
+
+How is 'a crash after the send' simulated?
+
+Assumed: The test wraps the runner's Prisma client so its first $transaction fails (database-boundary failure) instead of killing the process
+
+Answer: Accepted as a simulation of the crash window (2026-11-24): the first runner transaction after the sends fails, leaving the right PENDING state, and real NATS redelivery follows. It is not a process-kill/restart test and must not be called one.
+
+## 2026-11-24 19:45 ticket 67
+
+Which errors carry a domainCode, and is the stack ever sent?
+
+Assumed: The 11 booking errors the booking router maps plus admin RESET_BLOCKED and NOT_DEMO_EVENT; queue SERVICE_UNAVAILABLE (Redis outage) and unmapped domain errors (INTERNAL_SERVER_ERROR) carry none; data is built field by field (code, httpStatus, path, domain fields) and never includes a stack in any environment
+
+Answer: Accepted (2026-11-24): an explicit whitelist of 11 booking and 2 admin errors; any other error has no domainCode; no stack in data in any environment. The raw internal message was a separate hardening point, fixed in 425c1e0.
+
+## 2026-11-24 19:45 ticket 67
+
+Is data.seatIds required by the type when domainCode is SEAT_UNAVAILABLE?
+
+Assumed: No: both optional on one object type; the UI falls back to [] so domainCode stays readable without narrowing a union
+
+Answer: Accepted (2026-11-24): the optional fields with the empty-array UI fallback meet the ticket. A discriminated union would give a stronger static guarantee but is not needed for this scope.

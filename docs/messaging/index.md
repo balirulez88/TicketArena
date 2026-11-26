@@ -47,8 +47,9 @@ run during a Redis outage (see [waiting room](../architecture/waiting-room.md#re
   that insert is a duplicate and is acked; any handler error, including its own unique violation, rolls back
   and `nak`s with the ADR 0011 delay (1 s, 5 s, 30 s, 2 min). A message without `Nats-Msg-Id` is `term`ed and
   never processed. An optional `beforeTransaction(message)` step runs first, outside the transaction, on every
-  delivery (duplicates included); it is for slow work that needs no database, must be safe to repeat, and a throw
-  `nak`s like a handler failure. A handler may instead resolve to a `HandlerOutcome`
+  delivery (duplicates included); it is for slow work that must not hold the transaction (a provider's latency or
+  call; it may commit its own short writes, never the dedupe row), must be safe to repeat, and a throw `nak`s like a
+  handler failure. A handler may instead resolve to a `HandlerOutcome`
   (`{ outcome: "retry" | "poison", reason }`): the transaction rolls back (no `processed_messages` row, no
   outbox writes) and the message is `nak`ed with the same delay; `poison` is logged as an error. Until the DLQ
   exists, poison is redelivered rather than `term`ed, because ADR 0011 forbids `term` without a DLQ copy.
@@ -121,15 +122,25 @@ a failed attempt, not a failed checkout. `order.cancelled` payload: `orderId`, `
 `order-cancellation`), `notification-refund-requested` on `payment.refund_requested` (template
 `refund-initiated`) and `notification-refunded` on `payment.refunded` (template `refund-completed`),
 because a durable consumer takes one filter subject. A refund event without a contact (only an
-`unknown_order` refund: the order and its buyer are gone) is logged and acked with no record. Per
-channel (EMAIL; SMS when a phone was given) it first commits a `PENDING` `notification.notifications`
-row in its own transaction (via the injected `prisma`), calls the provider with
-`idempotencyKey = notification id`, then marks it `SENT` in the handler's transaction. A failed send
-leaves the `PENDING` row; redelivery resumes it with the same key. All channels share one
-transaction, so when the SMS send fails after the EMAIL was sent, the EMAIL's `SENT` update rolls
-back too: the redelivered message offers the EMAIL again under its key (the provider's dedupe keeps
-it to one delivery) and then sends the SMS. Unique `(sourceEventId, channel)`
-plus the consumer's `processed_messages` keep a redelivered or `+dup@` event at one record per
+`unknown_order` refund: the order and its buyer are gone) is logged and acked with no record. It
+runs in three steps, spread into the runner as `beforeTransaction` + `handler`:
+
+1. **Pending** (`beforeTransaction`): per channel (EMAIL; SMS when a phone was given) it commits a
+   `PENDING` `notification.notifications` row in its own short write (via the injected `prisma`), or
+   resumes the one a previous delivery left; a channel already `SENT` is skipped.
+2. **Send** (`beforeTransaction`, no transaction open): it calls the provider with
+   `idempotencyKey = notification id`.
+3. **Record** (`handler`, the runner's transaction with the `processed_messages` row): every
+   `PENDING` row of the event becomes `SENT`. It is reached only when step 2 sent every channel.
+
+**The send runs outside the transaction** (TD-051): awaited inside the runner's transaction, a slow
+provider would hold a pooled connection idle for the whole call, and a call longer than the
+interactive-transaction timeout would roll the record back and redeliver the message forever. A
+failed send, or a crash after the send and before step 3 commits, leaves the `PENDING` rows and
+redelivers the message; the redelivery resends every `PENDING` channel under the same key (the
+provider's dedupe keeps it to one delivery each) and then records them `SENT`. So when the SMS send
+fails after the EMAIL was sent, both stay `PENDING` and the redelivery offers the EMAIL again.
+Unique `(sourceEventId, channel)` plus the consumer's `processed_messages` keep a redelivered or `+dup@` event at one record per
 channel (AT-43, for all five kinds). Dedupe is by event id: a refund request re-emitted under a new
 event id (the planned reconciler) would be a new source event and send a second `refund-initiated`.
 The mock provider records deliveries and dedupes by key.
@@ -185,7 +196,7 @@ row with `refundRequestedAt = T`, `order.expired` and `payment.refund_requested`
 with a mismatched amount: order unchanged, `REFUND_REQUESTED` ledger row, `payment.refund_requested`
 with the contact; an on-time capture on an `EXPIRED` order, reason `late_delivery`, is also counted
 as `late_delivery_refund`, best-effort); `refund` `unknown_order` (a capture whose order no longer
-exists, e.g. deleted by a demo reset: no ledger row is possible, so the `payment.refund_requested`
+exists; a demo reset keeps orders, so it is not a cause: no ledger row is possible, so the `payment.refund_requested`
 outbox row, without contact, is the obligation; without an order row to lock, the handler takes an
 advisory lock on `refund:<paymentId>` and writes the request only if none exists for that payment,
 so a redelivery or a duplicate under a new event id refunds it once); `noop` (ack; a non-final

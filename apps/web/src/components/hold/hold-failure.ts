@@ -9,34 +9,23 @@ export type HoldFailure =
   | { readonly kind: "NOT_ON_SALE" }
   | { readonly kind: "OTHER" };
 
-const SEAT_UNAVAILABLE_PREFIX = "SEAT_UNAVAILABLE:";
-
 /**
- * Names a `booking.holdSeats` refusal. The router maps both `SEAT_UNAVAILABLE` and
- * `LIMIT_EXCEEDED` to tRPC `CONFLICT`, so those two are told apart by the domain code each booking
- * error starts its message with; `SEAT_UNAVAILABLE`'s message then lists the taken seat ids.
+ * Names a `booking.holdSeats` refusal from the error's structured `data` only, never its message:
+ * the server's error formatter adds the booking `domainCode` (and `SEAT_UNAVAILABLE`'s taken
+ * `seatIds`), because `SEAT_UNAVAILABLE` and `LIMIT_EXCEEDED` share tRPC `CONFLICT`. A missing
+ * admission is not a domain error and is recognised by tRPC `FORBIDDEN`.
  */
 export function holdFailure(error: TRPCClientErrorLike<AppRouter>): HoldFailure {
-  switch (error.data?.code) {
-    case "CONFLICT":
-      if (error.message.startsWith(SEAT_UNAVAILABLE_PREFIX)) {
-        const seatIds = error.message
-          .slice(SEAT_UNAVAILABLE_PREFIX.length)
-          .split(",")
-          .map((id) => id.trim())
-          .filter((id) => id.length > 0);
-        return { kind: "SEAT_UNAVAILABLE", seatIds };
-      }
-      return error.message.startsWith("LIMIT_EXCEEDED:")
-        ? { kind: "LIMIT_EXCEEDED" }
-        : { kind: "OTHER" };
-    case "TOO_MANY_REQUESTS":
+  switch (error.data?.domainCode) {
+    case "SEAT_UNAVAILABLE":
+      return { kind: "SEAT_UNAVAILABLE", seatIds: error.data.seatIds ?? [] };
+    case "LIMIT_EXCEEDED":
+      return { kind: "LIMIT_EXCEEDED" };
+    case "BOOKING_BUSY":
       return { kind: "BOOKING_BUSY" };
-    case "FORBIDDEN":
-      return { kind: "FORBIDDEN" };
-    case "PRECONDITION_FAILED":
+    case "NOT_ON_SALE":
       return { kind: "NOT_ON_SALE" };
     default:
-      return { kind: "OTHER" };
+      return error.data?.code === "FORBIDDEN" ? { kind: "FORBIDDEN" } : { kind: "OTHER" };
   }
 }

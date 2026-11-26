@@ -4,7 +4,9 @@
 
 **Blocked by:** 37
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-24 on devflow/run-202611241838 (run 202611241838)
 
 - [ ] After a reset, every demo order, order line and ledger row that existed before is still there, unchanged; holds that have an order are kept; only holds without an order are deleted. `ResetResult` reports kept orders instead of deleted orders and ledger rows.
 - [ ] After a reset, every demo seat is `AVAILABLE` with no hold and no buyer, so the per-buyer ticket limit counts nothing from before the reset and a new buyer can hold any seat.

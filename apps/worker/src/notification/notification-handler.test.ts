@@ -148,7 +148,7 @@ async function deliver(
     service: "notification",
     consumer: `notification-case${sequence}`,
     filterSubject: subject,
-    handler: createNotificationHandler({
+    ...createNotificationHandler({
       prisma,
       provider,
       clock: { now: () => NOW },
@@ -178,7 +178,11 @@ interface Settlement {
  * The bus is observed at the broker boundary, so a test sees how the runner settled each delivery
  * and that a redelivery is the same message; failures are redelivered without delay.
  */
-async function redeliveringRunner(envelope: NotifiedEnvelope, provider: MockNotificationProvider) {
+async function redeliveringRunner(
+  envelope: NotifiedEnvelope,
+  provider: MockNotificationProvider,
+  runnerPrisma: PrismaClient = prisma,
+) {
   sequence += 1;
   const subject = `ta.order.notification-case${sequence}`;
   const settlements: Settlement[] = [];
@@ -219,13 +223,13 @@ async function redeliveringRunner(envelope: NotifiedEnvelope, provider: MockNoti
   };
   const runner = await createConsumerRunner({
     bus: observed,
-    prisma,
+    prisma: runnerPrisma,
     service: "notification",
     consumer: `notification-case${sequence}`,
     filterSubject: subject,
     retryDelayMs: () => 0,
-    handler: createNotificationHandler({
-      prisma,
+    ...createNotificationHandler({
+      prisma: runnerPrisma,
       provider,
       clock: { now: () => NOW },
       newId: randomUUID,
@@ -367,6 +371,154 @@ describe("Notification handler", () => {
     ]);
     // The EMAIL is offered again under its own key (at-least-once); the provider's key dedupe keeps
     // it to one delivery, so each channel is delivered exactly once.
+    expect(calls).toEqual([
+      ["EMAIL", email],
+      ["SMS", sms],
+      ["EMAIL", email],
+      ["SMS", sms],
+    ]);
+    expect(
+      recorded.deliveries().map((delivery) => [delivery.channel, delivery.idempotencyKey]),
+    ).toEqual([
+      ["EMAIL", email],
+      ["SMS", sms],
+    ]);
+  });
+
+  it("TD-051: sends and records every channel on the first delivery when the provider outlasts the transaction timeout", async () => {
+    // The runner's interactive-transaction timeout is injected config of its Prisma client;
+    // lowering it from Prisma's 5 s default keeps a real provider delay that exceeds it short.
+    const runnerPrisma = createPrismaClient({
+      connectionString: database.url,
+      driver: "pg",
+      transaction: { maxWaitMs: 2_000, timeoutMs: 500 },
+    });
+    try {
+      const envelope = orderConfirmed({ email: "patient@example.com", phone: "+36301234567" });
+      const recorded = createMockNotificationProvider();
+      const slow: MockNotificationProvider = {
+        ...recorded,
+        send: async (message) => {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          await recorded.send(message);
+        },
+      };
+      const { runner, settlements } = await redeliveringRunner(envelope, slow, runnerPrisma);
+
+      await runner.pollOnce();
+
+      // Acked on the first delivery: no transaction timed out, nothing was nak'd.
+      expect(settlements.map(({ deliveryCount, settled }) => [deliveryCount, settled])).toEqual([
+        [1, "ack"],
+      ]);
+      const rows = await prisma.notification.findMany({
+        where: { sourceEventId: envelope.id },
+        orderBy: { channel: "asc" },
+      });
+      expect(rows.map((row) => [row.channel, row.status, row.sentAt])).toEqual([
+        ["EMAIL", "SENT", NOW],
+        ["SMS", "SENT", NOW],
+      ]);
+      expect(
+        recorded.deliveries().map((delivery) => [delivery.channel, delivery.idempotencyKey]),
+      ).toEqual(rows.map((row) => [row.channel, row.id]));
+    } finally {
+      await runnerPrisma.$disconnect();
+    }
+  });
+
+  it("TD-051: holds no database transaction open while the provider sends", async () => {
+    // A distinct application_name lets pg_stat_activity single out the runner's connections.
+    const applicationName = `notification_send_probe_${sequence}`;
+    const url = new URL(database.url);
+    url.searchParams.set("application_name", applicationName);
+    const runnerPrisma = createPrismaClient({ connectionString: url.toString(), driver: "pg" });
+    try {
+      const envelope = orderConfirmed({ email: "observed@example.com", phone: "+36301234567" });
+      const recorded = createMockNotificationProvider();
+      const openTransactionsDuringSend: number[] = [];
+      const probing: MockNotificationProvider = {
+        ...recorded,
+        send: async (message) => {
+          const rows = await prisma.$queryRaw<{ open: bigint }[]>`
+            SELECT count(*) AS open FROM pg_stat_activity
+            WHERE application_name = ${applicationName} AND xact_start IS NOT NULL`;
+          openTransactionsDuringSend.push(Number(rows[0]?.open ?? -1));
+          await recorded.send(message);
+        },
+      };
+      const { runner } = await redeliveringRunner(envelope, probing, runnerPrisma);
+
+      await runner.pollOnce();
+
+      expect(openTransactionsDuringSend).toEqual([0, 0]);
+      expect(
+        await prisma.notification.count({ where: { sourceEventId: envelope.id, status: "SENT" } }),
+      ).toBe(2);
+    } finally {
+      await runnerPrisma.$disconnect();
+    }
+  });
+
+  it("TD-051: a crash after the send but before the outcome is recorded is redelivered and leaves one sent notification per channel", async () => {
+    const envelope = orderConfirmed({ email: "buyer@example.com", phone: "+36301234567" });
+    const recorded = createMockNotificationProvider();
+    const calls: [string, string][] = [];
+    const provider: MockNotificationProvider = {
+      ...recorded,
+      send: async (message) => {
+        calls.push([message.channel, message.idempotencyKey]);
+        await recorded.send(message);
+      },
+    };
+    // The database boundary fails the first runner transaction, i.e. the one that would record
+    // the outcome: what a worker crash between the send and that commit leaves behind.
+    let crashes = 1;
+    const crashingPrisma = new Proxy(prisma, {
+      get(target, property) {
+        if (property === "$transaction" && crashes > 0) {
+          crashes -= 1;
+          return async () => {
+            throw new Error("worker crashed before recording the outcome");
+          };
+        }
+        const value: unknown = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const { runner, settlements } = await redeliveringRunner(envelope, provider, crashingPrisma);
+
+    await runner.pollOnce();
+
+    // Sent, but the outcome was never recorded.
+    const pending = await prisma.notification.findMany({
+      where: { sourceEventId: envelope.id },
+      orderBy: { channel: "asc" },
+    });
+    expect(pending.map((row) => [row.channel, row.status])).toEqual([
+      ["EMAIL", "PENDING"],
+      ["SMS", "PENDING"],
+    ]);
+    const [email, sms] = pending.map((row) => row.id);
+    expect(recorded.deliveries()).toHaveLength(2);
+
+    await expect.poll(() => runner.pollOnce(), { timeout: 5_000 }).toBe(1);
+
+    expect(
+      settlements.map(({ msgId, deliveryCount, settled }) => [msgId, deliveryCount, settled]),
+    ).toEqual([
+      [envelope.id, 1, "nak"],
+      [envelope.id, 2, "ack"],
+    ]);
+    const rows = await prisma.notification.findMany({
+      where: { sourceEventId: envelope.id },
+      orderBy: { channel: "asc" },
+    });
+    expect(rows.map((row) => [row.id, row.channel, row.status])).toEqual([
+      [email, "EMAIL", "SENT"],
+      [sms, "SMS", "SENT"],
+    ]);
+    // The redelivery resends under the same keys; the provider's key dedupe keeps one each.
     expect(calls).toEqual([
       ["EMAIL", email],
       ["SMS", sms],
@@ -523,7 +675,7 @@ describe("AT-43: one notification record per channel for every final order outco
         consumer: `notification-case${sequence}`,
         filterSubject: subject,
         retryDelayMs: () => 0,
-        handler: createNotificationHandler({
+        ...createNotificationHandler({
           prisma,
           provider: flaky,
           clock: { now: () => NOW },

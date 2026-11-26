@@ -18,3 +18,8 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [54: Tranzakció timeoutok és retry](54-transaction-timeouts-and-retries.md): `SET LOCAL` `lock_timeout`/`statement_timeout`, retry csak `40P01`/`55P03`/`40001`-re jitterrel, `BOOKING_BUSY` vs internal error, 72,6 s legrosszabb eset
 - [55: Determinisztikus tranzakciós tesztek](55-deterministic-transaction-tests.md): `waitForPg` + `pg_blocking_pids` időzítés helyett, közös testing helper, tesztenkénti kliens, shuffle, rollback bizonyítása
 - [63: Redis kiesése](63-redis-outages-do-not-hang-booking-or-the-worker.md): lusta, korlátos Redis kapcsolat, worker Redis nélkül is indul, fail open csak a revocationre, TCP stand-in tesztek
+- [64: Konzervatív demo reset](64-conservative-demo-reset.md): székek felszabadítása, order/line/ledger megtartása, `ordersKept`, `RESET_BLOCKED` fail closed, késői capture a normál saga szabállyal
+- [65: Admin login rate limit és logout](65-admin-login-rate-limit-and-logout.md): limiter a jelszó-összehasonlítás előtt, fail closed, globális limit kompromisszuma, logout cookie törléssel (másolt cookie nem vonható vissza)
+- [66: Notification send a tranzakción kívül](66-notification-send-outside-the-transaction.md): pending, send, record három lépés, `beforeTransaction` hook, idempotency key a notification id, crash utáni redelivery
+- [38: Deployment](38-deployment.md): pooled Neon URL a webnek, direct a migrációnak, `workflow_run` deploy a CI után, Vercel git deploy kikapcsolva, Fly privát hálózat, JetStream volume-on
+- [67: Típusos domain hibakódok](67-typed-domain-error-codes.md): `cause`-ból `data.domainCode` és `seatIds` az error formatterben, explicit lista, stack soha a `data`-ban, a UI nem parsol üzenetet

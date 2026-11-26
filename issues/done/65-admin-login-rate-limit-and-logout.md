@@ -4,7 +4,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-24 on devflow/run-202611241838 (run 202611241838)
 
 - [ ] Every `POST /api/admin/login` takes the existing admin rate limit (action `login`) before the password is compared; a refused attempt compares no password, sets no cookie and answers with the retry time.
 - [ ] If the limiter cannot be reached, the login is refused (fails closed), as the other admin actions are.

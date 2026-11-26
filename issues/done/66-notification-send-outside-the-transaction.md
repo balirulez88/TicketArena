@@ -4,7 +4,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-24 on devflow/run-202611241838 (run 202611241838)
 
 - [ ] With a provider slower than an injected runner transaction timeout, the notification is still sent and recorded, and no transaction times out.
 - [ ] A crash after the send but before the outcome is recorded is redelivered and leaves exactly one sent notification per channel (the provider is idempotent on the notification id).

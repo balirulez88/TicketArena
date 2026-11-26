@@ -39,7 +39,7 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Snapshot fast path** | Lock-free read in `holdSeats` that refuses visibly taken seats before any lock; advisory only.         |
 | **Demo event**         | The one Event flagged `demo`; the only target of the admin race and reset.                             |
 | **Race (demo)**        | `admin.runRace`: 100 synthetic sessions hold one demo seat at once; exactly one may win.               |
-| **Demo reset**         | `admin.resetDemo`: deletes the demo event's holds, orders and ledger rows and frees its seats.         |
+| **Demo reset**         | `admin.resetDemo`: frees the demo seats and deletes unordered holds; keeps orders and ledger rows.     |
 | **Oversell**           | Selling the same seat twice. Must be impossible, not merely unlikely.                                  |
 | **Integration event**  | A fact published to other services via the outbox (e.g. `order.confirmed`).                            |
 | **Outbox**             | The `outbox_events` table; integration events committed atomically with business data.                 |
@@ -47,6 +47,7 @@ Use these terms exactly in code, tests, tickets and specs. Add a term when a sli
 | **Consumer runner**    | Worker component running a durable pull consumer; dedupes via `processed_messages` in the handler TX.  |
 | **Admin cookie**       | `ta_admin`: proof an operator logged in with `ADMIN_PASSWORD`; signed, expires after 8 h.              |
 | **Admin snapshot**     | `admin.snapshot`: live seat, order, payment, queue and counter figures; `/admin` polls it each 1s.     |
+| **Domain code**        | A booking refusal's code (e.g. `SEAT_UNAVAILABLE`) in a tRPC error's `data.domainCode`; UI reads it.   |
 | **Seat map**           | The event page's grid of seat buttons by section; shows each seat's price and status.                  |
 | **Seat selection**     | Up to 6 available seats a visitor picked on the seat map before a hold; client-only state.             |
 | **Queue room**         | The event page's view while queued: position and ETA, polling `queue.status` until admitted.           |

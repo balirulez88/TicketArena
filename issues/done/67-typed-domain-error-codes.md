@@ -4,7 +4,9 @@
 
 **Blocked by:** 33, 34
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-24 on devflow/run-202611241838 (run 202611241838)
 
 - [ ] Every booking domain error mapped by the routers (`SEAT_UNAVAILABLE`, `LIMIT_EXCEEDED`, `HOLD_EXPIRED`, `HOLD_NOT_ACTIVE`, `NOT_ON_SALE`, `IDEMPOTENCY_KEY_REUSED`, ...) reaches the client with its code in `error.data.domainCode`; `SEAT_UNAVAILABLE` also carries `error.data.seatIds`.
 - [ ] Errors that are not domain errors carry no `domainCode`, and internal details never leak into `data`.

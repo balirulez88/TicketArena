@@ -42,6 +42,7 @@ below shows what is built.
 | Database & Prisma   | catalog, holds, orders, payment, notification | [database/](database/index.md)         |
 | Async messaging     | relay and consumer runner                     | [messaging/](messaging/index.md)       |
 | Agent workflow & CI | operational                                   | [workflow/](workflow/index.md)         |
+| Deployment & ops    | Vercel, Fly.io, Neon, Upstash; setup runbook  | [operations/](operations/index.md)     |
 | Technical debt      | frozen record (harness-v1 era)                | [technical-debt.md](technical-debt.md) |
 | Learning notes      | one per ticket: decision, alternatives, Q&A   | [learning/](learning/index.md)         |
 | Decisions (ADRs)    | 17 accepted                                   | [adr/](adr/index.md)                   |
@@ -64,12 +65,14 @@ below shows what is built.
   retries; distinct `HOLD_EXPIRED` and `IDEMPOTENCY_KEY_REUSED` messages), and a placed order is
   followed on the event page and at `/orders/[orderId]`, polling `booking.getOrder` every 2 s until
   it is final. See [architecture/](architecture/index.md#web-ui).
-- Admin: `/admin/login` checks `ADMIN_PASSWORD` and sets a signed `ta_admin` cookie (8 h);
-  `proxy.ts` guards `/admin` and `adminProcedure` guards admin procedures (`UNAUTHORIZED`).
+- Admin: `/admin/login` checks `ADMIN_PASSWORD` and sets a signed `ta_admin` cookie (8 h); every
+  attempt first takes the global admin limit (1 per 10 s, fails closed), and `/api/admin/logout`
+  clears the cookie (a copied cookie stays valid until it expires). `proxy.ts` guards `/admin` and `adminProcedure` guards admin procedures (`UNAUTHORIZED`).
   `/admin` polls `admin.snapshot` every second: seats by status per event, orders by status,
   pending payments, queue length, active shoppers and the booking counters. `admin.runRace` races
-  100 synthetic buyers for one demo seat (exactly one wins) and `admin.resetDemo` restores the demo
-  event (refused while a demo order awaits payment or a refund obligation is open); both touch only
+  100 synthetic buyers for one demo seat (exactly one wins) and `admin.resetDemo` frees the demo
+  event's seats and queue while keeping every order and ledger row (refused while a demo order
+  awaits payment or a refund obligation is open); both touch only
   the `demo` event and are limited to 1 per 10 s globally. See
   [architecture/](architecture/index.md#admin-api).
 - Guest identity: `proxy.ts` issues a signed `ta_session` cookie; `IdentityService` resolves a
@@ -88,6 +91,14 @@ below shows what is built.
   production belongs to deployment). The worker's admission ticker (1 s) and slot reaper (15 s)
   run on the same store. See
   [architecture/waiting-room](architecture/waiting-room.md).
+- Deployment ([operations/](operations/deployment.md)): `.github/workflows/deploy.yml` runs after
+  CI passes on `main`: `prisma migrate deploy` on the direct Neon URL, then the web app to Vercel
+  (git deployments off in `apps/web/vercel.json`; `parseServerEnv` refuses a direct Neon URL, so
+  the web app runs on `adapter-neon` over the pooled one) and the worker to Fly.io
+  (`infra/fly/worker`). NATS is its own Fly app on a volume (`infra/fly/nats`, `sync_interval:
+  always`); neither Fly app is public, the worker reaches NATS over the private network. A target
+  whose secrets are missing is skipped, not failed; the one-time setup is a runbook. Nothing is
+  deployed yet.
 - Structured logging: each app injects a `pino` logger; booking, the relay and the consumer runner log with a child logger bound to `correlationId`/`causationId` (plus `holdId`, `orderId`, `paymentId`). See [architecture/](architecture/index.md#logging-and-ids).
 - Quality gate: Biome (warnings fail), strict `tsc`, Vitest, enforced by `ralph-loop.sh`.
 - Execution drivers: `ralph-loop.sh` (default) and the opt-in lead driver (`RALPH_DRIVER=lead`, [ADR 0017](adr/0017-opt-in-lead-driver.md)); the host judges both the same way. A candidate rejected only for a ticket defect can be replayed on the amended base by `scripts/ralph-replay.mjs` ([ADR 0018](adr/0018-host-side-replay-of-a-rejected-candidate.md)).

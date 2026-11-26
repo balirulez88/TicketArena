@@ -1,0 +1,15 @@
+# Build context of infra/fly/worker/Dockerfile: the workspace manifests, the worker and the
+# packages it runs. Every workspace's package.json is kept so the frozen lockfile still matches.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!apps/*/package.json
+!apps/worker/
+!packages/
+**/node_modules
+**/src/generated
+**/*.test.ts
+**/vitest.config.ts
+**/tsconfig.tsbuildinfo

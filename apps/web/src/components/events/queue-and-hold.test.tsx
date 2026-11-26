@@ -57,7 +57,14 @@ function seatsWith(status: "AVAILABLE" | "HELD") {
 }
 
 type Answer = { readonly data: unknown } | { readonly error: TrpcFailure };
-type TrpcFailure = { readonly code: string; readonly httpStatus: number; readonly message: string };
+type TrpcFailure = {
+  readonly code: string;
+  readonly httpStatus: number;
+  readonly message: string;
+  /** What the server's error formatter adds for a mapped domain error. */
+  readonly domainCode?: string;
+  readonly seatIds?: readonly string[];
+};
 
 /** The fake API's scripted answers; each test sets what it needs. */
 let joinAnswer: Answer;
@@ -77,9 +84,9 @@ function respond(answer: Answer): Response {
   if ("data" in answer) {
     return Response.json({ result: { data: superjson.serialize(answer.data) } });
   }
-  const { code, httpStatus, message } = answer.error;
-  const error = { message, code: -32000, data: { code, httpStatus } };
-  return Response.json({ error: superjson.serialize(error) }, { status: httpStatus });
+  const { message, ...data } = answer.error;
+  const error = { message, code: -32000, data };
+  return Response.json({ error: superjson.serialize(error) }, { status: data.httpStatus });
 }
 
 /** Answers tRPC requests the way the API route does; the network is the faked boundary. */
@@ -257,7 +264,9 @@ describe("Holding seats", () => {
       error: {
         code: "CONFLICT",
         httpStatus: 409,
-        message: `SEAT_UNAVAILABLE: ${SEAT_A2}`,
+        message: "Refused",
+        domainCode: "SEAT_UNAVAILABLE",
+        seatIds: [SEAT_A2],
       },
       expected: ["just taken", "Section Floor, row A, seat 2"],
       absent: ["row A, seat 1"],
@@ -267,7 +276,8 @@ describe("Holding seats", () => {
       error: {
         code: "CONFLICT",
         httpStatus: 409,
-        message: "LIMIT_EXCEEDED: 5 seat(s) in use plus 2 requested exceeds 6",
+        message: "Refused",
+        domainCode: "LIMIT_EXCEEDED",
       },
       expected: ["at most 6 seats"],
       absent: ["just taken"],
@@ -277,10 +287,32 @@ describe("Holding seats", () => {
       error: {
         code: "TOO_MANY_REQUESTS",
         httpStatus: 429,
-        message: "BOOKING_BUSY: the booking system is saturated, retry shortly",
+        message: "Refused",
+        domainCode: "BOOKING_BUSY",
       },
       expected: ["busy", "try again"],
       absent: ["just taken"],
+    },
+    {
+      name: "NOT_ON_SALE says tickets are not on sale yet",
+      error: {
+        code: "PRECONDITION_FAILED",
+        httpStatus: 412,
+        message: "Refused",
+        domainCode: "NOT_ON_SALE",
+      },
+      expected: ["not on sale yet"],
+      absent: ["just taken"],
+    },
+    {
+      name: "a refusal without a domain code is the generic failure, whatever its message says",
+      error: {
+        code: "CONFLICT",
+        httpStatus: 409,
+        message: `SEAT_UNAVAILABLE: ${SEAT_A2}`,
+      },
+      expected: ["could not be held"],
+      absent: ["just taken", "at most 6 seats"],
     },
     {
       name: "FORBIDDEN asks to rejoin the queue",
@@ -338,9 +370,20 @@ describe("Holding seats", () => {
   test("the four refusals are four different messages", async () => {
     const messages: string[] = [];
     for (const error of [
-      { code: "CONFLICT", httpStatus: 409, message: `SEAT_UNAVAILABLE: ${SEAT_A1}` },
-      { code: "CONFLICT", httpStatus: 409, message: "LIMIT_EXCEEDED: 6 + 2 exceeds 6" },
-      { code: "TOO_MANY_REQUESTS", httpStatus: 429, message: "BOOKING_BUSY: retry" },
+      {
+        code: "CONFLICT",
+        httpStatus: 409,
+        message: "Refused",
+        domainCode: "SEAT_UNAVAILABLE",
+        seatIds: [SEAT_A1],
+      },
+      { code: "CONFLICT", httpStatus: 409, message: "Refused", domainCode: "LIMIT_EXCEEDED" },
+      {
+        code: "TOO_MANY_REQUESTS",
+        httpStatus: 429,
+        message: "Refused",
+        domainCode: "BOOKING_BUSY",
+      },
       { code: "FORBIDDEN", httpStatus: 403, message: "No valid admission" },
     ]) {
       holdAnswer = { error };
@@ -396,7 +439,12 @@ describe("Hold countdown and release", () => {
 
   test("a release refused with HOLD_EXPIRED ends the hold and says it expired", async () => {
     releaseAnswer = {
-      error: { code: "PRECONDITION_FAILED", httpStatus: 412, message: `HOLD_EXPIRED: ${HOLD_ID}` },
+      error: {
+        code: "PRECONDITION_FAILED",
+        httpStatus: 412,
+        message: "Refused",
+        domainCode: "HOLD_EXPIRED",
+      },
     };
     await admittedWithBothSeatsSelected();
     fireEvent.click(screen.getByRole("button", { name: "Hold 2 seats" }));

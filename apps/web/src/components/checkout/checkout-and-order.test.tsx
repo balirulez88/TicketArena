@@ -49,7 +49,14 @@ const seats = [
 ];
 
 type OrderState = "PENDING_PAYMENT" | "CONFIRMED" | "CANCELLED" | "EXPIRED";
-type TrpcFailure = { readonly code: string; readonly httpStatus: number; readonly message: string };
+type TrpcFailure = {
+  readonly code: string;
+  readonly httpStatus: number;
+  readonly message: string;
+  /** What the server's error formatter adds for a mapped domain error. */
+  readonly domainCode?: string;
+  readonly seatIds?: readonly string[];
+};
 type Answer = { readonly data: unknown } | { readonly error: TrpcFailure } | "NETWORK_DOWN";
 
 function order(status: OrderState) {
@@ -102,9 +109,9 @@ function respond(answer: Answer): Response {
   if ("data" in answer) {
     return Response.json({ result: { data: superjson.serialize(answer.data) } });
   }
-  const { code, httpStatus, message } = answer.error;
-  const error = { message, code: -32000, data: { code, httpStatus } };
-  return Response.json({ error: superjson.serialize(error) }, { status: httpStatus });
+  const { message, ...data } = answer.error;
+  const error = { message, code: -32000, data };
+  return Response.json({ error: superjson.serialize(error) }, { status: data.httpStatus });
 }
 
 /** Answers tRPC requests the way the API route does; the network is the faked boundary. */
@@ -344,7 +351,8 @@ describe("Checkout refusals", () => {
         error: {
           code: "PRECONDITION_FAILED",
           httpStatus: 412,
-          message: `HOLD_EXPIRED: ${HOLD_ID}`,
+          message: "Refused",
+          domainCode: "HOLD_EXPIRED",
         },
       },
     ];
@@ -365,7 +373,8 @@ describe("Checkout refusals", () => {
         error: {
           code: "CONFLICT",
           httpStatus: 409,
-          message: "IDEMPOTENCY_KEY_REUSED: aaaaaaaa was used for a different request",
+          message: "Refused",
+          domainCode: "IDEMPOTENCY_KEY_REUSED",
         },
       },
       { data: order("PENDING_PAYMENT") },
@@ -386,9 +395,19 @@ describe("Checkout refusals", () => {
   test("HOLD_EXPIRED, IDEMPOTENCY_KEY_REUSED and other failures are different messages", async () => {
     const messages: string[] = [];
     for (const error of [
-      { code: "PRECONDITION_FAILED", httpStatus: 412, message: `HOLD_EXPIRED: ${HOLD_ID}` },
-      { code: "CONFLICT", httpStatus: 409, message: "IDEMPOTENCY_KEY_REUSED: key" },
-      { code: "CONFLICT", httpStatus: 409, message: `HOLD_NOT_ACTIVE: hold ${HOLD_ID} is ORDERED` },
+      {
+        code: "PRECONDITION_FAILED",
+        httpStatus: 412,
+        message: "Refused",
+        domainCode: "HOLD_EXPIRED",
+      },
+      {
+        code: "CONFLICT",
+        httpStatus: 409,
+        message: "Refused",
+        domainCode: "IDEMPOTENCY_KEY_REUSED",
+      },
+      { code: "CONFLICT", httpStatus: 409, message: "Refused", domainCode: "HOLD_NOT_ACTIVE" },
     ]) {
       placeOrderAnswers = [{ error }];
       holdIds = [HOLD_ID];
@@ -400,6 +419,28 @@ describe("Checkout refusals", () => {
     }
 
     expect(new Set(messages).size).toBe(3);
+  });
+});
+
+describe("Checkout refusals are told apart by domain code alone", () => {
+  test("a refusal without a domain code is the generic failure, whatever its message says", async () => {
+    placeOrderAnswers = [
+      {
+        error: {
+          code: "PRECONDITION_FAILED",
+          httpStatus: 412,
+          message: `HOLD_EXPIRED: ${HOLD_ID}`,
+        },
+      },
+    ];
+    const form = await holdingOneSeat();
+    fillContact(form, "alice@example.com");
+
+    submit(form);
+
+    const alert = await within(form).findByRole("alert");
+    expect(alert.textContent).toContain("Your order could not be placed");
+    expect(screen.getByRole("region", { name: "Your hold" })).toBeTruthy();
   });
 });
 
@@ -456,7 +497,8 @@ describe("Checkout at the hold deadline", () => {
         error: {
           code: "PRECONDITION_FAILED",
           httpStatus: 412,
-          message: `HOLD_EXPIRED: ${HOLD_ID}`,
+          message: "Refused",
+          domainCode: "HOLD_EXPIRED",
         },
       },
     ];

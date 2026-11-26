@@ -33,7 +33,18 @@ New modules are added when a slice needs them, not speculatively.
 - **Packages ship TypeScript source** (`exports` → `src/index.ts`); there is no package build
   step. Turborepo caches `typecheck`, `test`, `build` and `db:generate`.
 - **Errors:** validate at boundaries (zod), fail fast with actionable messages, and surface
-  domain failures as typed tRPC errors rather than thrown strings.
+  domain failures as typed tRPC errors rather than thrown strings. A router maps a domain error
+  to a `TRPCError` with the domain error as its `cause`; the error formatter in `server/trpc.ts`
+  then adds `data.domainCode` (and, for `SEAT_UNAVAILABLE`, `data.seatIds`) via
+  `domainErrorData` (`server/domain-error-data.ts`), so the client tells refusals that share a
+  tRPC code apart without reading the message. Codes exposed: `SEAT_UNAVAILABLE`,
+  `LIMIT_EXCEEDED`, `BOOKING_BUSY`, `INVALID_SEAT_SELECTION`, `NOT_ON_SALE`, `NOT_FOUND` (a hold),
+  `HOLD_EXPIRED`, `HOLD_NOT_ACTIVE`, `HOLD_SEAT_SET_MISSING`, `MIXED_CURRENCY`,
+  `IDEMPOTENCY_KEY_REUSED`, and the admin reset's `RESET_BLOCKED` and `NOT_DEMO_EVENT`; the client
+  sees `domainCode` as that union, inferred from `AppRouter`. Any other error (a missing
+  admission, input validation, an infrastructure cause, or a domain error no router mapped, which
+  is an `INTERNAL_SERVER_ERROR`) has no `domainCode`. `data` is only `code`, `httpStatus`, `path`
+  and those two fields: tRPC's development `stack` is never sent; the route's `onError` logs it.
 
 ## Request path today
 
@@ -82,9 +93,23 @@ Decision: [ADR 0012](../adr/0012-identity-service-seam.md). Code: `apps/web/src/
   `SESSION_SECRET` logs out operators too; changing `ADMIN_PASSWORD` does not revoke issued cookies.
   `proxy.ts` redirects `/admin` and `/admin/*` (except `/admin/login`) to the login page without a
   valid cookie; `createTRPCContext` sets `ctx.isAdmin`, and `adminProcedure` rejects every admin
-  procedure with `UNAUTHORIZED` unless it is `true`. Login is not rate-limited and there is no
-  logout yet. `ADMIN_PASSWORD` (at least 12 characters) is validated in `parseServerEnv`, and by
+  procedure with `UNAUTHORIZED` unless it is `true`. `ADMIN_PASSWORD` (at least 12 characters) is validated in `parseServerEnv`, and by
   `parseAdminEnv` for the login route only, so it cannot break buyer requests.
+- **Login rate limit:** every `POST /api/admin/login`, right or wrong, first takes the admin
+  limiter for action `login` (`admin:rate:login`, the same global 1-per-10 s limiter as the demo
+  actions, see [Admin API](#admin-api)); only an allowed attempt reads the form and compares the
+  password. A refused attempt sets no cookie and redirects (303) to
+  `/admin/login?error=rate-limited&retry=<seconds>` with a matching `Retry-After` header; the page
+  shows the wait. A limiter that cannot be reached or configured fails closed: the attempt is
+  logged and redirected to `/admin/login?error=unavailable`. **Accepted for the demo:** the limit
+  is global, not per IP, so an attacker posting one guess every 10 s keeps the real operator's
+  login waiting (they can still log in in a gap); per-IP limits would need trusted proxy headers
+  and more state.
+- **Logout:** `POST /api/admin/logout` (the "Log out" button on `/admin`, a plain form) expires
+  the `ta_admin` cookie (`Max-Age=0`, same attributes) and redirects (303) to `/admin/login`; that
+  browser then sends no admin cookie, so admin procedures answer `UNAUTHORIZED`. There is no
+  server-side session store, so logout **cannot revoke a copied cookie**: a copy stays valid until
+  its signed 8-hour expiry (only rotating `SESSION_SECRET` ends it sooner). Accepted for the demo.
 - **Known MVP limitation:** clearing cookies yields a new guest session, so per-session guest
   limits (e.g. the 6-ticket limit) can be bypassed until authentication exists.
 - **API:** `session.whoami` returns the caller's principal.
@@ -107,7 +132,8 @@ exactly one is `PRECONDITION_FAILED`), so no request can aim them at a real even
 to **1 per 10 s per action, globally** (not per session) by `ctx.rateLimiter()`
 (`rate-limiter.ts`: `SET admin:rate:<action> 1 NX PX 10000` on the Upstash store, shared by every
 instance; a refusal is `TOO_MANY_REQUESTS` naming the seconds to wait from `PTTL`). The limit is
-taken first, so a refused call has no effect.
+taken first, so a refused call has no effect. The same limiter guards the admin login (action
+`login`, see [Identity](#identity)).
 
 - `admin.runRace`: picks the demo event's first `AVAILABLE` seat (none: `PRECONDITION_FAILED`,
   reset first) and has 100 synthetic sessions (fresh random session id = buyer key each) call
@@ -117,7 +143,9 @@ taken first, so a refused call has no effect.
   normal `seat.held`; that row is the race's entry for the live feed (ticket 36), found by the
   winner's `correlationId`. Counters go to `ctx.metrics()` when configured.
 - `admin.resetDemo`: `BookingService.resetEvent(demoId)` (see
-  [database](../database/index.md#demo-reset)); `RESET_BLOCKED`/`NOT_DEMO_EVENT` become
+  [database](../database/index.md#demo-reset): frees every demo seat and deletes holds without an
+  order, keeps every order, order line and ledger row; returns `holdsDeleted`, `ordersKept`,
+  `seatsFreed`); `RESET_BLOCKED`/`NOT_DEMO_EVENT` become
   `PRECONDITION_FAILED`. After it commits, the demo event's booking counters
   (`ctx.metricsReset()`, `DEL` of the counter hash) and its waiting-room keys
   (`QueueStore.clearEvent`) are deleted. Postgres goes first because it is the authority; a Redis
@@ -128,7 +156,8 @@ taken first, so a refused call has no effect.
 Routers in `apps/web/src/server/routers/`: `events` (`list`, `get`) and `seats` (`map`), sharing
 zod schemas in `catalog-schemas.ts`. They read through `ctx.db`, a process-wide Prisma client
 created lazily from `DATABASE_URL` and `DATABASE_DRIVER` (`neon`, the default, or `pg` for a local
-Postgres; `parseDatabaseEnv` validates only these two). A missing
+Postgres; `parseDatabaseEnv` validates only these two and refuses a direct `*.neon.tech` host:
+the web app must use the `-pooler` endpoint). A missing
 event is a `NOT_FOUND` tRPC error. Integration tests run against real Postgres. See
 [database](../database/index.md).
 
@@ -139,7 +168,9 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
 - **Pages:** `/events` lists events (venue, on-sale date, on-sale status) and links to
   `/events/[eventId]`, which shows the event (venue, on-sale status, a "Prices per section" table),
   the queue step and its seat map. `/admin/login` is a plain HTML form posting to
-  `/api/admin/login`; `/admin` (behind the proxy guard) shows the admin dashboard.
+  `/api/admin/login` that shows the route's `error` (wrong password, the seconds to wait when
+  rate-limited, or login unavailable); `/admin` (behind the proxy guard) shows the admin
+  dashboard and a "Log out" form posting to `/api/admin/logout`.
   `/orders/[orderId]` shows one order's status (owner only; another buyer's or a malformed id
   reads "Order not found."). Checkout is not its own route: it is the live hold on the event page.
 - **Queue room** (`components/queue/queue-room.tsx`): a step on `/events/[eventId]`, not its own
@@ -164,10 +195,10 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
   or the event keeps the last data and the hold controls on screen (with a "could not be
   refreshed" status), so the hold, the checkout and its key survive a transient error; only a
   first load without data shows the error instead. Refusals are told apart by
-  `hold-failure.ts`: `SEAT_UNAVAILABLE` (listing the taken seats by section, row and number) and
-  `LIMIT_EXCEEDED` both arrive as `CONFLICT` and are split by the domain code that starts the
-  error message; `BOOKING_BUSY` is `TOO_MANY_REQUESTS`, `FORBIDDEN` asks the buyer to join the queue
-  again (and re-reads `queue.status`), and `NOT_ON_SALE` is `PRECONDITION_FAILED`. Each has its own
+  `hold-failure.ts` from `error.data` alone, never the message: `domainCode` `SEAT_UNAVAILABLE`
+  (listing `data.seatIds` by section, row and number), `LIMIT_EXCEEDED` (both are tRPC
+  `CONFLICT`), `BOOKING_BUSY` and `NOT_ON_SALE`; tRPC `FORBIDDEN` (no domain code) asks the buyer
+  to join the queue again (and re-reads `queue.status`). Each has its own
   `role="alert"` message. The hold is not kept across a page reload.
 - **Checkout** (`components/checkout/checkout-form.tsx`): a "Checkout" form inside the "Your hold"
   region, so the countdown, the release button and the heartbeat stay on while the buyer types.
@@ -185,9 +216,8 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
   expired, because the server answers a replay with the order it already placed even after the
   hold expired. The order it returns replaces the hold; `HOLD_EXPIRED` ends it; another
   ambiguous answer keeps the form for a manual retry with the same key. Refusals are told apart by
-  `checkout-failure.ts`: `HOLD_EXPIRED` (`PRECONDITION_FAILED`) drops the hold with a "Your hold
-  expired before your order was placed" alert; `IDEMPOTENCY_KEY_REUSED` (`CONFLICT`, recognised by
-  the domain code starting the message) says the checkout was already submitted with different
+  `checkout-failure.ts` from `data.domainCode` alone: `HOLD_EXPIRED` drops the hold with a "Your
+  hold expired before your order was placed" alert; `IDEMPOTENCY_KEY_REUSED` says the checkout was already submitted with different
   details and discards the key, so the next submit is a new attempt; anything else, network
   failures included, asks to try again.
 - **Order status** (`components/checkout/order-status.tsx`): once `placeOrder` succeeds the hold
@@ -211,7 +241,7 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
   `UNAUTHORIZED`, and the page offers a link back to the login. A "Demo event" card has "Run race"
   and "Reset demo" buttons (`useMutation`); the result shows in a `role="status"` line ("Race
   result": successes, seat unavailable, booking busy, duration, winner's correlation id; "Reset
-  result": holds, orders and ledger rows deleted, seats freed) and a failure, such as the rate
+  result": seats freed, holds deleted, orders kept with their payments) and a failure, such as the rate
   limit, in a `role="alert"` line. The next poll shows the new seat state.
 - **Server state:** components read `events.list`, `events.get`, `seats.map`, `queue.status`, `booking.getOrder` and `admin.snapshot` through TanStack
   Query (`useTRPC().….queryOptions`) under `TRPCReactProvider`; no server data is copied into

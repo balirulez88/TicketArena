@@ -5,7 +5,9 @@
 ## Stack
 
 - **Neon** serverless PostgreSQL. Use the **pooled** connection string at runtime because
-  serverless functions open many short-lived connections.
+  serverless functions open many short-lived connections; the web app's `parseServerEnv` refuses a
+  direct Neon host. Migrations (`prisma migrate deploy` in the deploy workflow) and the worker use
+  the direct one ([operations](../operations/deployment.md)).
 - **Prisma 7** with the `prisma-client` generator (output `packages/db/src/generated/prisma`,
   git-ignored) and an injected driver adapter.
 - Configuration in `packages/db/prisma.config.ts`; the schema lives in
@@ -261,28 +263,35 @@ proves they do not depend on each other's writes.
 
 ### Demo reset
 
-`BookingService.resetEvent(eventId)` returns the demo event to its seeded state so the race can run
-again. One transaction: it refuses any event whose `demo` flag is not set (`NOT_DEMO_EVENT`), then
+`BookingService.resetEvent(eventId)` frees the demo event so the race can run again, without ever
+deleting financial history. One transaction: it refuses any event whose `demo` flag is not set (`NOT_DEMO_EVENT`), then
 locks the event's `holds`, their `orders` and its `seats` (each `ORDER BY id FOR UPDATE`, in that
 order, which no booking path inverts: `placeOrder` locks a hold before seats, the saga and sweeper
 an order before seats). It is `RESET_BLOCKED` while an order is `PENDING_PAYMENT` or a refund
 obligation is open (an `order_payments` row `REFUND_REQUESTED` or `MANUAL_REVIEW`), and also when a
 seat carries a hold it did not lock (a booking committed mid-reset); blocked means nothing
 changed. Otherwise it sets every seat not plain `AVAILABLE` back to `AVAILABLE` (`holdId`,
-`claimBuyerKey` cleared) and deletes the event's `order_payments`, `order_lines`, `orders` and
-`holds`; it returns the counts. Kept on purpose: `public.outbox_events` (history the relay may
+`claimBuyerKey` cleared) and deletes only the holds that never became an order; it returns
+`holdsDeleted`, `ordersKept` and `seatsFreed`. **Kept:** every demo `orders` row (whatever its
+status), its `order_lines`, its `order_payments` ledger rows and the hold it was placed from,
+unchanged. A kept order's lines still name seats that are now free and may be sold again; they are
+history only, since no live check reads them (seat state lives on `seats`, and the saga locks an
+order's seats only while it is `PENDING_PAYMENT`, which a reset never leaves behind). The per-buyer
+limit counts a buyer's claimed seats (`claimBuyerKey`), so after a reset it counts nothing from
+before. Also kept on purpose: `public.outbox_events` (history the relay may
 still be publishing; a new hold has a new id, so `placeOrder`'s `seat.held` lookup is unaffected),
 `processed_messages`, and everything in the `payment` and `notification` schemas (ADR 0009: no
 cross-schema deletes). Only `admin.resetDemo` calls it. `reset-event.test.ts` races the reset
 against `holdSeats`, `placeOrder`, the payment saga and both sweepers on real Postgres to pin these
 guarantees.
 
-The reset deletes `EXPIRED` and `CANCELLED` demo orders even while a late capture for one may
-still be in flight, so the later `payment.succeeded` meets an unknown order. The saga refunds it
-(reason `unknown_order`): no ledger row can reference the deleted order, so the
-`payment.refund_requested` outbox row, written once per `paymentId` under an advisory lock, is the
-only record of that obligation, and the reconciler, which scans ledger rows, will not re-emit it.
-Ticket 64 makes the case rare by keeping orders on a reset.
+Because orders survive a reset, a late or duplicate `payment.succeeded` for a demo order that was
+`EXPIRED`, `CANCELLED` or `CONFIRMED` before it finds its order and follows the saga's normal rule
+for that state: a capture not yet in the ledger becomes a refund obligation (`REFUND_REQUESTED`
+ledger row plus `payment.refund_requested`), a redelivery of a known `paymentId` is a no-op, and
+neither changes a seat, so seats a new buyer holds after the reset are
+not reclaimed. The `unknown_order` refund (an order with no row at all) remains as a safety net
+for an order that truly does not exist; a reset no longer creates that case.
 
 Catalog API (`apps/web`): `events.list`, `events.get`, `seats.map`. Inputs and outputs are zod
 validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.

@@ -9,7 +9,8 @@ import type { AppRouter } from "@/server/routers/_app";
 import type { AdminSnapshot, RaceResult, ResetDemoResult } from "@/server/routers/admin";
 import { TRPCProvider } from "@/trpc/react";
 import { AdminDashboard } from "./admin-dashboard";
-import { AdminLoginForm } from "./admin-login-form";
+import { AdminLoginForm, loginFailureFrom } from "./admin-login-form";
+import { AdminLogoutButton } from "./admin-logout-button";
 
 const EVENT_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -56,8 +57,7 @@ const RACE: RaceResult = {
 const RESET: ResetDemoResult = {
   eventId: EVENT_ID,
   holdsDeleted: 2,
-  ordersDeleted: 1,
-  ledgerRowsDeleted: 1,
+  ordersKept: 1,
   seatsFreed: 3,
 };
 
@@ -200,16 +200,15 @@ describe("AdminDashboard demo actions", () => {
     expect(result.textContent).toContain(RACE.winner?.correlationId);
   });
 
-  test("Reset demo shows what was cleared", async () => {
+  test("Reset demo shows what was cleared and what was kept", async () => {
     renderWithApi(<AdminDashboard />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Reset demo" }));
 
     const result = await screen.findByRole("status", { name: "Reset result" });
     expect(actionCalls).toEqual(["admin.resetDemo"]);
-    expect(result.textContent).toContain("2 holds");
-    expect(result.textContent).toContain("1 order");
-    expect(result.textContent).toContain("1 ledger row");
+    expect(result.textContent).toContain("2 holds deleted");
+    expect(result.textContent).toContain("1 order kept");
     expect(result.textContent).toContain("3 seats freed");
   });
 
@@ -226,7 +225,7 @@ describe("AdminDashboard demo actions", () => {
 
 describe("AdminLoginForm", () => {
   test("posts the password to the login route", () => {
-    render(<AdminLoginForm failed={false} />);
+    render(<AdminLoginForm failure={null} />);
 
     const password = screen.getByLabelText("Admin password");
     expect(password.getAttribute("type")).toBe("password");
@@ -238,8 +237,40 @@ describe("AdminLoginForm", () => {
   });
 
   test("a failed attempt says the password was wrong", () => {
-    render(<AdminLoginForm failed={true} />);
+    render(<AdminLoginForm failure={loginFailureFrom({ error: "invalid" })} />);
 
     expect(screen.getByRole("alert").textContent).toContain("Wrong password");
+  });
+
+  test("a rate-limited attempt says how many seconds to wait", () => {
+    render(<AdminLoginForm failure={loginFailureFrom({ error: "rate-limited", retry: "7" })} />);
+
+    expect(screen.getByRole("alert").textContent).toContain("Try again in 7 s");
+  });
+
+  test("an attempt refused for an unavailable limiter says login is unavailable", () => {
+    render(<AdminLoginForm failure={loginFailureFrom({ error: "unavailable" })} />);
+
+    expect(screen.getByRole("alert").textContent).toContain("Login is unavailable");
+  });
+
+  test("unknown or malformed query parameters show no error", () => {
+    expect(loginFailureFrom({})).toBeNull();
+    expect(loginFailureFrom({ error: "other" })).toBeNull();
+    expect(loginFailureFrom({ error: "rate-limited", retry: "soon" })).toEqual({
+      kind: "rate-limited",
+      retrySeconds: null,
+    });
+  });
+});
+
+describe("AdminLogoutButton", () => {
+  test("posts to the logout route", () => {
+    render(<AdminLogoutButton />);
+
+    const button = screen.getByRole("button", { name: "Log out" });
+    const form = button.closest("form");
+    expect(form?.getAttribute("method")).toBe("post");
+    expect(form?.getAttribute("action")).toBe("/api/admin/logout");
   });
 });

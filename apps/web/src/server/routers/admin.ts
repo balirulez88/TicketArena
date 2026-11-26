@@ -104,9 +104,10 @@ export type RaceResult = z.infer<typeof raceOutput>;
 
 const resetOutput = z.object({
   eventId: z.uuid(),
+  /** Holds that never became an order. */
   holdsDeleted: count,
-  ordersDeleted: count,
-  ledgerRowsDeleted: count,
+  /** Orders left in place with their lines and ledger rows: the reset never deletes money's trail. */
+  ordersKept: count,
   seatsFreed: count,
 });
 
@@ -272,7 +273,8 @@ export const adminRouter = createTRPCRouter({
   }),
 
   /**
-   * Returns the demo event to its seeded state. Postgres goes first because it is the authority
+   * Frees the demo event's seats and queue so the demo can run again, keeping every order and its
+   * ledger rows (see `BookingService.resetEvent`). Postgres goes first because it is the authority
    * (ADR 0005): if a Redis step then fails, the call fails and can simply be repeated, since a
    * reset of an already reset event is a no-op.
    */

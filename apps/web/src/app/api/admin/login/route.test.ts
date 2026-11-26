@@ -1,61 +1,36 @@
-import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { proxy } from "@/proxy";
 import { POST } from "./route";
+
+// The login behaviour itself is proven in `server/identity/admin-login.test.ts`; this file proves
+// the route wires it to its configuration and to the shared admin limiter.
 
 const PASSWORD = "correct horse battery";
 
 beforeEach(() => {
   vi.stubEnv("SESSION_SECRET", "s".repeat(32));
   vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+  // Nothing listens here: the limiter cannot be reached.
+  vi.stubEnv("UPSTASH_REDIS_REST_URL", "http://localhost:1");
+  vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "token");
 });
 
 afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-function login(password?: string): Request {
+function login(password: string): Request {
   const body = new FormData();
-  if (password !== undefined) {
-    body.set("password", password);
-  }
+  body.set("password", password);
   return new Request("https://ticketarena.example/api/admin/login", { method: "POST", body });
 }
 
 describe("POST /api/admin/login", () => {
-  test("the admin password sets a signed, httpOnly, Secure, SameSite=Strict ta_admin cookie and redirects to /admin", async () => {
+  test("takes the admin limiter first: with the limiter unreachable even the right password is refused", async () => {
     const response = await POST(login(PASSWORD));
-
-    expect(response.status).toBe(303);
-    expect(response.headers.get("location")).toBe("https://ticketarena.example/admin");
-    const setCookie = response.headers.get("set-cookie") ?? "";
-    expect(setCookie).toMatch(/^ta_admin=\d+\.[0-9a-f]{64};/);
-    expect(setCookie).toMatch(/HttpOnly/i);
-    expect(setCookie).toMatch(/Secure/i);
-    expect(setCookie).toMatch(/SameSite=strict/i);
-    expect(setCookie).toMatch(/Max-Age=28800/);
-  });
-
-  test("the issued cookie opens /admin through the proxy", async () => {
-    const response = await POST(login(PASSWORD));
-    const cookie = (response.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
-
-    const page = await proxy(
-      new NextRequest("https://ticketarena.example/admin", { headers: { cookie } }),
-    );
-
-    expect(page.headers.get("location")).toBeNull();
-  });
-
-  test.each([
-    ["a wrong password", "wrong password!"],
-    ["no password", undefined],
-  ])("%s sets no cookie and returns to the login page with an error", async (_case, password) => {
-    const response = await POST(login(password));
 
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe(
-      "https://ticketarena.example/admin/login?error=invalid",
+      "https://ticketarena.example/admin/login?error=unavailable",
     );
     expect(response.headers.get("set-cookie")).toBeNull();
   });

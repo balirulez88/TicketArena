@@ -543,7 +543,7 @@ async function refundRequestExists(tx: TransactionClient, paymentId: string): Pr
 }
 
 /**
- * Refunds a capture whose order no longer exists (a demo reset deletes settled orders). There is
+ * Refunds a capture whose order does not exist (a demo reset keeps orders, so it is not a cause). There is
  * no order to attach a ledger row to, so the outbox row is the obligation, and it is what makes
  * the refund happen once per payment: a duplicate payment event carries a new message id, so the
  * consumer's `processed_messages` cannot catch it. The caller holds the payment's advisory lock,

@@ -114,9 +114,9 @@ export function decide(
   }
   if (order === null) {
     // The order always commits before `order.placed` is published, so a missing order never
-    // means the message arrived early. A capture still took real money, and the order can be
-    // gone for good (a demo reset deletes settled orders), so it is refunded, never kept; any
-    // other event for a missing order is a bad message.
+    // means the message arrived early. A capture still took real money for an order this
+    // database does not have (a demo reset keeps orders, so it is not a cause), so it is
+    // refunded, never kept; any other event for a missing order is a bad message.
     return event.type === "payment.succeeded"
       ? { kind: "refund", reason: "unknown_order", paymentId: event.paymentId, at: T }
       : { kind: "poison", reason: "unknown_order" };

@@ -124,9 +124,11 @@ export interface BookingService {
    */
   sweepExpired(): Promise<SweepResult>;
   /**
-   * Returns the demo event to its seeded state so the demo can run again: deletes its holds,
-   * orders, order lines and ledger rows and sets every seat back to `AVAILABLE`, in one
-   * transaction. `NOT_DEMO_EVENT` for any other event; `RESET_BLOCKED` while a demo order is
+   * Frees the demo event so the demo can run again: sets every seat back to `AVAILABLE` with no
+   * hold and no buyer and deletes the holds that never became an order, in one transaction. It
+   * never deletes financial history: orders, their lines, their ledger rows and the holds they
+   * were placed from stay, so a late or duplicate payment still finds its order and the saga
+   * reconciles it. `NOT_DEMO_EVENT` for any other event; `RESET_BLOCKED` while a demo order is
    * `PENDING_PAYMENT` or a refund obligation is open, since either still owes a buyer an outcome.
    * Outbox events stay: they are history the relay may still be publishing.
    */
@@ -135,9 +137,10 @@ export interface BookingService {
 
 export interface ResetResult {
   readonly eventId: string;
+  /** Holds that never became an order; a hold with an order is kept with it. */
   readonly holdsDeleted: number;
-  readonly ordersDeleted: number;
-  readonly ledgerRowsDeleted: number;
+  /** Every demo order, of any status, left in place with its lines and ledger rows. */
+  readonly ordersKept: number;
   /** Seats that were not already plain `AVAILABLE`. */
   readonly seatsFreed: number;
 }
@@ -1276,8 +1279,8 @@ export function createBookingService({
           SELECT id::text AS id FROM holds
           WHERE "eventId" = ${eventId}::uuid ORDER BY id FOR UPDATE`;
         const holdIds = holds.map((hold) => hold.id);
-        const orders = await tx.$queryRaw<{ id: string; status: string }[]>`
-          SELECT id::text AS id, status::text AS status FROM orders
+        const orders = await tx.$queryRaw<{ id: string; status: string; holdId: string }[]>`
+          SELECT id::text AS id, status::text AS status, "holdId"::text AS "holdId" FROM orders
           WHERE "holdId" = ANY(${holdIds}::uuid[]) ORDER BY id FOR UPDATE`;
         const pending = orders.filter((order) => order.status === "PENDING_PAYMENT").length;
         if (pending > 0) {
@@ -1312,20 +1315,20 @@ export function createBookingService({
           )
           .map((seat) => seat.id);
 
-        // Children before parents: seats and ledger rows reference holds and orders.
+        // Freeing the seats alone is what lets the event sell again: the per-buyer limit counts a
+        // buyer's claimed seats, so with every claim cleared nothing from before counts. Orders
+        // keep their lines (which name seats) as history only; no live check reads them.
         await tx.seat.updateMany({
           where: { id: { in: dirty } },
           data: { status: "AVAILABLE", holdId: null, claimBuyerKey: null },
         });
-        const ledger = await tx.orderPayment.deleteMany({ where: { orderId: { in: orderIds } } });
-        await tx.orderLine.deleteMany({ where: { orderId: { in: orderIds } } });
-        await tx.order.deleteMany({ where: { id: { in: orderIds } } });
-        await tx.hold.deleteMany({ where: { id: { in: holdIds } } });
+        const ordered = new Set(orders.map((order) => order.holdId));
+        const unordered = holdIds.filter((id) => !ordered.has(id));
+        await tx.hold.deleteMany({ where: { id: { in: unordered } } });
         return {
           eventId,
-          holdsDeleted: holdIds.length,
-          ordersDeleted: orderIds.length,
-          ledgerRowsDeleted: ledger.count,
+          holdsDeleted: unordered.length,
+          ordersKept: orders.length,
           seatsFreed: dirty.length,
         };
       });

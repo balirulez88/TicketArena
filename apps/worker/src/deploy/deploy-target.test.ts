@@ -49,6 +49,25 @@ describe("decideDeployTarget", () => {
     expect(decideDeployTarget(moved)).toMatchObject({ action: "fail" });
   });
 
+  it("a re-run job fails when a later deployment moved main past the commit its gate pinned", () => {
+    // Run A's gate pinned OLDER and its web job failed; run B then shipped TIP. "Re-run failed
+    // jobs" on A keeps A's gate output, so the web job re-checks OLDER against main's tip now.
+    const rerun = facts({
+      event: "recheck",
+      candidateSha: OLDER,
+      ciRuns: [ci({ headSha: OLDER })],
+    });
+
+    expect(decideDeployTarget(rerun)).toMatchObject({
+      action: "fail",
+      reason: expect.stringContaining("a re-run job never ships it"),
+    });
+  });
+
+  it("a job re-check passes while the pinned commit is still the tip of main", () => {
+    expect(decideDeployTarget(facts({ event: "recheck" }))).toEqual({ action: "deploy", sha: TIP });
+  });
+
   it.each([
     ["pending", ci({ status: "in_progress", conclusion: null }), /still in_progress/],
     ["failed", ci({ conclusion: "failure" }), /ended failure/],

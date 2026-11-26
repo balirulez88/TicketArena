@@ -85,7 +85,10 @@ Where each secret lives (also listed, without values, at the end of `.env.exampl
    and only if the latest CI run of a push of that exact commit passed. A re-run of an old CI run
    is skipped with a notice, since migrations never roll back and older code would land on a newer
    schema; a manual run fails if its commit's CI is pending, failed, missing, or if `main` moved
-   meanwhile. Every later job checks out that pinned commit (`needs.gate.outputs.sha`). Then it
+   meanwhile. Every later job checks out that pinned commit (`needs.gate.outputs.sha`) and, right
+   before it changes production, re-checks it with the same script (`EVENT_NAME: recheck`): a
+   partial re-run ("Re-run failed jobs") keeps the old gate's outputs, so a job re-run after a
+   newer deployment fails instead of shipping the older commit. Then the gate
    checks which targets have their secrets. A target whose secrets are absent is skipped with a
    notice, so the workflow is green (not red) before the setup below or on a fork.
 2. `migrate`: `prisma migrate deploy` with `DATABASE_URL_UNPOOLED`.

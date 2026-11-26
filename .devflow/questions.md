@@ -713,7 +713,7 @@ When does the deploy workflow run, and what if secrets are missing?
 
 Assumed: New deploy.yml (ci.yml untouched): workflow_run after CI succeeds on main, or workflow_dispatch; migrate (direct URL) then web (Vercel CLI, git deploys off) and worker; a gate job skips each target whose secrets are missing; NATS deployed by hand; Fly apps ticketarena-nats/ticketarena-worker in fra, single machine, NATS unauthenticated on the private network only
 
-Answer: Accepted with a fix (2026-11-24): deploying after green main CI, skipping clearly on missing secrets, and NATS by hand are right. A manual run must also require green CI of the exact commit, and redeploying an old commit is excluded (fixed in 72fad6f). NATS without auth stays only with an explicitly accepted, trusted Fly-org boundary.
+Answer: Accepted with a fix (2026-11-24): deploying after green main CI, skipping clearly on missing secrets, and NATS by hand are right. A manual run must also require green CI of the exact commit, and redeploying an old commit is excluded (fixed in 72fad6f). A partial job re-run reuses the old gate output, so each production job re-checks its pinned commit right before acting (re-review of e22945c). NATS without auth stays only with an explicitly accepted, trusted Fly-org boundary.
 
 ## 2026-11-24 19:21 ticket 38
 

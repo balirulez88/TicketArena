@@ -9,7 +9,8 @@
 # Only the current tip of main ships, and only after CI passed on a push of that exact commit
 # (apps/worker/src/deploy/deploy-target.ts): a replayed old CI run is skipped, because migrations
 # never roll back, and a manual run whose commit has no green CI fails. Every job deploys the one
-# commit the gate pinned. A rollback is a revert pushed to main.
+# commit the gate pinned, and re-checks it right before it changes production, because a partial
+# re-run ("Re-run failed jobs") reuses the old gate's outputs. A rollback is a revert pushed to main.
 name: Deploy
 
 on:
@@ -119,6 +120,15 @@ jobs:
       - name: Install the Prisma CLI
         run: pnpm install --frozen-lockfile --filter @ticketarena/db
 
+      # Fresh, right before production changes: "Re-run failed jobs" keeps the old gate's outputs,
+      # so this job checks again that the pinned commit is still main's tip with green push CI.
+      - name: Re-check the pinned commit (still the tip of main, CI passed on its push)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT_NAME: recheck
+          CANDIDATE_SHA: ${{ needs.gate.outputs.sha }}
+        run: node apps/worker/src/deploy/deploy-target.ts
+
       # Migrations need Neon's direct endpoint: they take session-level advisory locks, which a
       # transaction-mode pooler cannot hold. Fail fast, naming the secret, before connecting.
       - name: Apply migrations (prisma migrate deploy)
@@ -167,6 +177,15 @@ jobs:
           pnpm install --frozen-lockfile
           npm install --global vercel@66.6.0
 
+      # Fresh, right before production changes: "Re-run failed jobs" keeps the old gate's outputs,
+      # so this job checks again that the pinned commit is still main's tip with green push CI.
+      - name: Re-check the pinned commit (still the tip of main, CI passed on its push)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT_NAME: recheck
+          CANDIDATE_SHA: ${{ needs.gate.outputs.sha }}
+        run: node apps/worker/src/deploy/deploy-target.ts
+
       # Builds here with the production environment pulled from the Vercel project, then uploads
       # the prebuilt output, so what is deployed is exactly this commit.
       - name: Build and deploy
@@ -187,8 +206,22 @@ jobs:
         with:
           ref: ${{ needs.gate.outputs.sha }}
 
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
       - name: Set up flyctl
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1.6
+
+      # Fresh, right before production changes: "Re-run failed jobs" keeps the old gate's outputs,
+      # so this job checks again that the pinned commit is still main's tip with green push CI.
+      - name: Re-check the pinned commit (still the tip of main, CI passed on its push)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT_NAME: recheck
+          CANDIDATE_SHA: ${{ needs.gate.outputs.sha }}
+        run: node apps/worker/src/deploy/deploy-target.ts
 
       - name: Deploy
         env:

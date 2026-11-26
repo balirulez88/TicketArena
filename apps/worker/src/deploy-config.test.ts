@@ -150,4 +150,21 @@ describe("the deploy workflow", () => {
       expect(refs.map((ref) => ref.trim())).toEqual([`ref: \${{ needs.gate.outputs.sha }}`]);
     }
   });
+
+  it.each([
+    ["migrate", "prisma migrate deploy"],
+    ["web", "vercel deploy"],
+    ["worker", "flyctl deploy"],
+  ])("%s re-checks the pinned commit itself before it changes production", (name, action) => {
+    // A partial re-run reuses the gate's old outputs, so the gate alone cannot stop a stale sha.
+    const lines = job(name);
+    const recheck = lines.indexOf("EVENT_NAME: recheck");
+
+    expect(recheck).toBeGreaterThanOrEqual(0);
+    expect(lines.slice(recheck)).toMatch(
+      /^EVENT_NAME: recheck\n\s+CANDIDATE_SHA: \$\{\{ needs\.gate\.outputs\.sha \}\}\n\s+run: node apps\/worker\/src\/deploy\/deploy-target\.ts\n/,
+    );
+    expect(lines.indexOf("actions/setup-node")).toBeLessThan(recheck);
+    expect(lines.indexOf(action)).toBeGreaterThan(recheck);
+  });
 });

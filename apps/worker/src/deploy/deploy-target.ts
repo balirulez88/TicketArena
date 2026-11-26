@@ -11,7 +11,13 @@ import { appendFileSync } from "node:fs";
  * imports only Node built-ins.
  */
 
-export type DeployEvent = "workflow_run" | "workflow_dispatch";
+/**
+ * What asks for the decision: the gate of a run started by a CI run or by hand, or a production
+ * job re-checking, right before it acts, the commit its gate pinned. A partial re-run of a job
+ * ("Re-run failed jobs") keeps the old gate's outputs, so only that fresh re-check stops it from
+ * shipping a commit a later deployment has already moved past.
+ */
+export type DeployEvent = "workflow_run" | "workflow_dispatch" | "recheck";
 
 /** One run of the CI workflow, as the GitHub Actions API reports it. */
 export interface CiRun {
@@ -43,8 +49,15 @@ export function decideDeployTarget(facts: DeployFacts): DeployDecision {
   if (candidateSha !== mainSha) {
     const reason = `${candidateSha} is not the tip of main (${mainSha})`;
     // A newer push has its own CI run and deployment; an old one replayed must never ship.
-    return event === "workflow_run"
-      ? { action: "skip", reason: `${reason}: a stale or replayed CI run is never deployed` }
+    if (event === "workflow_run") {
+      return { action: "skip", reason: `${reason}: a stale or replayed CI run is never deployed` };
+    }
+    // A job must fail rather than skip: a skipped migrate job would let web and worker run.
+    return event === "recheck"
+      ? {
+          action: "fail",
+          reason: `${reason}: the gate pinned an older commit; a re-run job never ships it`,
+        }
       : { action: "fail", reason: `${reason}: main moved after this run started; run it again` };
   }
 
@@ -80,8 +93,8 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
 }
 
 function deployEvent(value: string): DeployEvent {
-  if (value !== "workflow_run" && value !== "workflow_dispatch") {
-    throw new Error(`deploy-target: EVENT_NAME must be workflow_run or workflow_dispatch`);
+  if (value !== "workflow_run" && value !== "workflow_dispatch" && value !== "recheck") {
+    throw new Error(`deploy-target: EVENT_NAME must be workflow_run, workflow_dispatch or recheck`);
   }
   return value;
 }

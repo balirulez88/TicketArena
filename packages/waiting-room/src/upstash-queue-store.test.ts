@@ -21,6 +21,9 @@ describeQueueStoreContract("Upstash REST", upstash.prefix, {
       // Nothing to release: the REST adapter holds no connection.
     },
   }),
+  async deleteKey(key) {
+    await upstash.command(["DEL", key]);
+  },
 });
 
 describe("UpstashQueueStore", () => {

@@ -57,7 +57,10 @@ export interface QueueStore {
    * `maxActive` allow (see `AdmitRequest`), in one atomic step, and returns them in queue order.
    */
   admit(eventId: string, request: AdmitRequest): Promise<readonly Admission[]>;
-  /** Sets the member's `lastSeenAt` to `now` if it holds a slot; `true` when it does. */
+  /**
+   * Sets the member's `lastSeenAt` to `now` if it holds a slot whose admission is still valid;
+   * `true` when it does. A slot with an expired admission is left to go idle and be reaped.
+   */
   heartbeat(eventId: string, member: string, now: Date): Promise<boolean>;
   /** Frees the member's slot and revokes its admission `jti`; `true` when it held a slot. */
   releaseSlot(eventId: string, member: string): Promise<boolean>;

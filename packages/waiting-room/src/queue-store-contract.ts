@@ -11,6 +11,8 @@ export interface QueueStoreContractHarness {
     prefix: string,
     count: number,
   ): Promise<{ readonly stores: readonly QueueStore[]; close(): void }>;
+  /** Deletes one raw key, to build a state an older version of the scripts left behind. */
+  deleteKey(key: string): Promise<void>;
 }
 
 /**
@@ -201,6 +203,49 @@ export function describeQueueStoreContract(
         freed: [],
         more: false,
       });
+    });
+
+    test("a heartbeat does not keep a slot whose admission expired", async () => {
+      const store = storeWith("heartbeat-expired:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 1);
+      await store.admit(eventId, request(T0, 1, 10));
+
+      expect(await store.heartbeat(eventId, "m1", at(TTL - 1))).toBe(true);
+      expect(await store.heartbeat(eventId, "m1", at(TTL))).toBe(false);
+      expect(await store.heartbeat(eventId, "m1", at(TTL + 60_000))).toBe(false);
+      // lastSeenAt stayed at TTL - 1, so the slot is idle once the cutoff passes it.
+      expect(await reapOnce(store, eventId, at(TTL + 90_000), at(TTL))).toEqual({
+        freed: ["m1"],
+        more: false,
+      });
+    });
+
+    test("a slot admitted before the holders index existed is freed once idle, however often it polls", async () => {
+      const namespace = "legacy-layout:";
+      const store = storeWith(namespace);
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 1);
+      await store.admit(eventId, request(T0, 1, 10));
+      // The layout before ticket 69: the same slot, admission and jti, but no reverse index.
+      await harness.deleteKey(`${filePrefix}${namespace}waiting-room:{${eventId}}:holders`);
+      expect(await store.heartbeat(eventId, "m1", at(TTL - 1))).toBe(true);
+
+      // The reaper finds the expired jti but no holder: it drops the jti and frees nothing.
+      expect(await reapOnce(store, eventId, at(TTL + 1_000), at(TTL - 89_000))).toEqual({
+        freed: [],
+        more: false,
+      });
+      // The buyer keeps polling; with no valid admission the polls no longer refresh the slot.
+      for (let poll = 1; poll <= 30; poll += 1) {
+        expect(await store.heartbeat(eventId, "m1", at(TTL + poll * 3_000))).toBe(false);
+      }
+
+      expect(await reapOnce(store, eventId, at(TTL + 90_000), at(TTL))).toEqual({
+        freed: ["m1"],
+        more: false,
+      });
+      expect(await store.counts(eventId)).toEqual({ queued: 0, active: 0 });
     });
 
     test("releaseSlot frees the slot and revokes the admission jti", async () => {

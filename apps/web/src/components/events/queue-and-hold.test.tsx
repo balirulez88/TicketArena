@@ -75,6 +75,8 @@ let holdAnswer: Answer;
 let releaseAnswer: Answer | null;
 /** booking.activeHold's answer: what the server still holds for this session after a reload. */
 let activeHoldAnswer: Answer;
+/** While set, booking.activeHold answers only once it resolves: a slow restore read. */
+let activeHoldDelay: Promise<void> | null;
 let seatsHeld = false;
 let calls: { procedure: string; input: unknown }[];
 
@@ -122,6 +124,9 @@ async function fakeApi(
       }
       return respond(holdAnswer);
     case "booking.activeHold":
+      if (activeHoldDelay !== null) {
+        await activeHoldDelay;
+      }
       return respond(activeHoldAnswer);
     case "booking.releaseHold":
       seatsHeld = false;
@@ -150,18 +155,21 @@ const QUEUED_AT = (position: number, etaSeconds: number): Answer => ({
 const ADMITTED: Answer = { data: { status: "ADMITTED" } };
 const NOT_QUEUED: Answer = { data: { status: "NOT_QUEUED" } };
 
-function renderEventPage() {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+/** Renders the page; pass the previous render's client to remount as in-app navigation does. */
+function renderEventPage(
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+) {
   const trpcClient = createTRPCClient<AppRouter>({
     links: [httpLink({ url: "http://localhost/api/trpc", transformer: superjson, fetch: fakeApi })],
   });
-  render(
+  const { unmount } = render(
     <QueryClientProvider client={queryClient}>
       <TRPCProvider trpcClient={trpcClient} queryClient={queryClient}>
         <EventPage eventId={EVENT_ID} />
       </TRPCProvider>
     </QueryClientProvider>,
   );
+  return { queryClient, unmount };
 }
 
 async function advance(ms: number) {
@@ -173,7 +181,7 @@ async function advance(ms: number) {
 /** Renders the page already admitted and selects both seats. */
 async function admittedWithBothSeatsSelected() {
   statusAnswers = [ADMITTED];
-  renderEventPage();
+  const page = renderEventPage();
   await screen.findByRole("button", { name: /^Hold/ });
   fireEvent.click(
     await screen.findByRole("button", { name: "Section Floor, row A, seat 1, €99.00, available" }),
@@ -181,6 +189,7 @@ async function admittedWithBothSeatsSelected() {
   fireEvent.click(
     screen.getByRole("button", { name: "Section Floor, row A, seat 2, €99.00, available" }),
   );
+  return page;
 }
 
 beforeEach(() => {
@@ -189,6 +198,7 @@ beforeEach(() => {
   holdAnswer = { data: heldHold() };
   releaseAnswer = null;
   activeHoldAnswer = { data: null };
+  activeHoldDelay = null;
   seatsHeld = false;
   calls = [];
   // Time is the faked boundary; it still advances on its own so Testing Library can wait.
@@ -525,6 +535,56 @@ describe("A reload restores the active hold", () => {
     expect(callsTo("booking.activeHold")).toHaveLength(1);
     expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
     expect(screen.queryByRole("timer")).toBeNull();
+  });
+
+  test("a hold made on the page is shown again after navigating away and back", async () => {
+    const { queryClient, unmount } = await admittedWithBothSeatsSelected();
+    fireEvent.click(screen.getByRole("button", { name: "Hold 2 seats" }));
+    await screen.findByRole("region", { name: "Your hold" });
+    // The first visit cached activeHold's `null`; the server now holds the seats.
+    activeHoldAnswer = { data: restoredHold() };
+
+    unmount();
+    renderEventPage(queryClient);
+
+    const hold = await screen.findByRole("region", { name: "Your hold" });
+    expect(within(hold).getByRole("button", { name: "Release seats" })).toBeTruthy();
+    expect(callsTo("booking.activeHold")).toHaveLength(2);
+  });
+
+  test("a hold ended in another tab is not brought back from the cache on remount", async () => {
+    activeHoldAnswer = { data: restoredHold() };
+    seatsHeld = true;
+    const { queryClient, unmount } = renderEventPage();
+    await screen.findByRole("region", { name: "Your hold" });
+    activeHoldAnswer = { data: null };
+
+    unmount();
+    renderEventPage(queryClient);
+
+    await vi.waitFor(() => expect(callsTo("booking.activeHold")).toHaveLength(2));
+    await vi.waitFor(() => expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull());
+  });
+
+  test("a restore answer that arrives after the hold was released does not bring it back", async () => {
+    let answerRestore: (() => void) | undefined;
+    activeHoldDelay = new Promise((resolve) => {
+      answerRestore = resolve;
+    });
+    await admittedWithBothSeatsSelected();
+    await vi.waitFor(() => expect(callsTo("booking.activeHold")).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "Hold 2 seats" }));
+    const hold = await screen.findByRole("region", { name: "Your hold" });
+    fireEvent.click(within(hold).getByRole("button", { name: "Release seats" }));
+    await screen.findByText(/Seats released/);
+
+    // The read started before the hold existed and answers as if it were still live.
+    activeHoldAnswer = { data: restoredHold() };
+    answerRestore?.();
+    await advance(1000);
+
+    expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
+    expect(screen.getByText(/Seats released/)).toBeTruthy();
   });
 });
 

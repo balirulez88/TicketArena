@@ -60,7 +60,7 @@ export interface QueueService {
   status(eventId: string, sessionId: string): Promise<StatusResult>;
   /** Leaves the queue and frees the session's slot, revoking its admission. */
   leave(eventId: string, sessionId: string): Promise<{ readonly left: boolean }>;
-  /** Refreshes the slot's `lastSeenAt`; `true` when the session holds a slot. */
+  /** Refreshes the slot's `lastSeenAt`; `true` when the session holds a validly admitted slot. */
   heartbeat(eventId: string, sessionId: string): Promise<boolean>;
   /**
    * One admission tick (the worker runs it every second): admits while the limits allow, and no

@@ -128,14 +128,24 @@ redis.call('HSET', KEYS[3], 'tokens', tostring(tokens), 'ts', tostring(now))
 return result
 `;
 
+// A heartbeat keeps a slot alive only while its admission is valid. An expired admission is
+// unusable (the admission script reads it as none), so polling must not hold its slot open: it
+// goes idle and the reaper frees it within the idle timeout. That also bounds a slot the reaper
+// cannot reach from its expired jti, one admitted before the `holders` index existed (PR #18).
 // XX after the ZSCORE guard: a heartbeat never creates a slot, only refreshes one.
-// KEYS: active. ARGV: member, now ms. Returns 1 when the member holds a slot.
+// KEYS: active, admission, admitted. ARGV: member, now ms.
+// Returns 1 when the member holds a slot with a valid admission.
 export const HEARTBEAT_SCRIPT = `
-if redis.call('ZSCORE', KEYS[1], ARGV[1]) then
-  redis.call('ZADD', KEYS[1], 'XX', ARGV[2], ARGV[1])
-  return 1
+if not redis.call('ZSCORE', KEYS[1], ARGV[1]) then
+  return 0
 end
-return 0
+local jti = redis.call('HGET', KEYS[2], ARGV[1])
+local expires = jti and redis.call('ZSCORE', KEYS[3], jti)
+if not expires or tonumber(expires) <= tonumber(ARGV[2]) then
+  return 0
+end
+redis.call('ZADD', KEYS[1], 'XX', ARGV[2], ARGV[1])
+return 1
 `;
 
 // Freeing a slot and revoking its jti are one step, so a freed slot never leaves a valid
@@ -335,9 +345,10 @@ export function createScriptedQueueStore(
     },
 
     async heartbeat(eventId, member, now) {
+      const keys = keysOf(eventId);
       const reply = await run(
         "heartbeat",
-        [keysOf(eventId).active],
+        [keys.active, keys.admission, keys.admitted],
         [member, String(now.getTime())],
       );
       return toInteger(reply, "heartbeat") === 1;

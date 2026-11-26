@@ -73,7 +73,10 @@ scripts need.
 
 `holders` lets the reaper go from an expired `jti`, found by its `admitted` score, to the slot it
 must free. Every script that writes or removes an `admission` entry writes or removes the matching
-`holders` entry in the same step.
+`holders` entry in the same step. A slot admitted before `holders` existed (ticket 69) has no
+entry there: the reaper drops its expired `jti` without freeing the slot, and the slot is freed
+as idle instead, at most 90 s plus one reaper interval after its admission expired, because the
+heartbeat stops refreshing a slot once its admission has expired. No backfill is needed.
 
 ## Scripts
 
@@ -108,7 +111,9 @@ data. Times come from the injected clock (epoch ms), never Redis `TIME`.
 - **admission** (read-only): the member's `jti` and its expiry, only while it holds a slot and
   the admission has not expired by `now`, so an expired admission is never reported or minted
   into a token while it waits for the reaper; `QueueService.status` uses it for the token.
-- **heartbeat**: `ZADD XX` of `now`, only if the member holds a slot.
+- **heartbeat**: `ZADD XX` of `now`, only if the member holds a slot whose admission is still
+  valid. Polling never keeps a slot with an expired admission: it goes idle and is reaped within
+  the 90 s idle timeout, even when the reaper cannot reach it from the expired `jti`.
 - **releaseSlot**: removes the slot, the member's `admission` entry and its `jti` from
   `admitted` and `holders`, in one step.
 - **reap** (one bounded step): examines at most `batchSize` candidates, first slots whose

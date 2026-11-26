@@ -164,6 +164,7 @@ describe("the deploy workflow", () => {
     expect(lines.slice(recheck)).toMatch(
       /^EVENT_NAME: recheck\n\s+CANDIDATE_SHA: \$\{\{ needs\.gate\.outputs\.sha \}\}\n\s+run: node apps\/worker\/src\/deploy\/deploy-target\.ts\n/,
     );
+    expect(lines.indexOf("actions/setup-node")).toBeGreaterThanOrEqual(0);
     expect(lines.indexOf("actions/setup-node")).toBeLessThan(recheck);
     expect(lines.indexOf(action)).toBeGreaterThan(recheck);
   });

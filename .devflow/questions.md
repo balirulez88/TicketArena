@@ -721,7 +721,7 @@ ADR 0013 says Upstash REST in web and worker; the queue and saga counters use no
 
 Assumed: No: keep node-redis over Upstash TLS (switching needs the REST queue's errors mapped to SERVICE_UNAVAILABLE); documented in docs/operations/deployment.md; a human decides on an ADR amendment or ticket
 
-Answer: ADR decision needed (2026-11-24): no forced adapter switch without evidence, but the deviation must be accepted by a reviewed ADR amendment, or the REST wiring finished. A follow-up in the docs is not enough.
+Answer: ADR decision needed (2026-11-24): no forced adapter switch without evidence, but the deviation must be accepted by a reviewed ADR amendment, or the REST wiring finished. A follow-up in the docs is not enough. Resolved (2026-11-26): the maintainer accepted ADR 0025.
 
 ## 2026-11-24 19:30 ticket 66
 

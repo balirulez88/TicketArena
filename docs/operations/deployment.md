@@ -36,8 +36,8 @@ Connections:
   the Upstash REST API (`UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`). The waiting-room
   queue (web and worker) and the worker's saga counters use node-redis over Upstash's TLS Redis
   endpoint (`REDIS_URL=rediss://default:<token>@<host>:6379`), the same database and keys. This
-  split amends ADR 0013's "REST adapter in web and worker"; it is proposed in
-  [ADR 0025](../adr/0025-node-redis-over-tls-for-the-queue.md) and awaits review.
+  split amends ADR 0013's "REST adapter in web and worker", as accepted in
+  [ADR 0025](../adr/0025-node-redis-over-tls-for-the-queue.md).
 
 NATS: JetStream stores on the Fly volume `nats_data` mounted at `/data` (`store_dir:
 /data/jetstream`), with `sync_interval: always` (fsync every write, as locally) and

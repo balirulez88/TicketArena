@@ -1,6 +1,6 @@
 # 0025: The waiting-room queue and worker counters use node-redis over TLS
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer, 2026-11-26)
 - **Date:** 2026-11-24
 - **Amends:** [0013](0013-deployment-topology.md): its Redis line ("Upstash, REST adapter in
   web and worker")

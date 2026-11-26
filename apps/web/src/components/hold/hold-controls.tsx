@@ -240,7 +240,12 @@ export function HoldControls({
     },
     [forgetHold, refreshSeats],
   );
-  const liveHold = hold.data ?? restored.data ?? undefined;
+  // Until this mount's own read answers, the cache holds what an earlier visit saw. Shown, a hold
+  // in it could expire on screen and end (and cancel) the read that brings the newer live hold, so
+  // a restored hold appears only once read on this mount. A hold made here comes first regardless.
+  const freshRestore =
+    restored.isFetchedAfterMount && restored.isSuccess ? restored.data : undefined;
+  const liveHold = hold.data ?? freshRestore ?? undefined;
 
   if (orderId !== null) {
     return (

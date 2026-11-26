@@ -586,6 +586,47 @@ describe("A reload restores the active hold", () => {
     expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
     expect(screen.getByText(/Seats released/)).toBeTruthy();
   });
+
+  test("a cached hold expiring during the remount read does not cancel the newer live hold", async () => {
+    activeHoldAnswer = { data: restoredHold(3000) };
+    seatsHeld = true;
+    const { queryClient, unmount } = renderEventPage();
+    await screen.findByRole("region", { name: "Your hold" });
+    unmount();
+
+    let answerRestore: (() => void) | undefined;
+    activeHoldDelay = new Promise((resolve) => {
+      answerRestore = resolve;
+    });
+    const newerHoldId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const newerSeatId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    activeHoldAnswer = {
+      data: {
+        ...restoredHold(),
+        id: newerHoldId,
+        seatIds: [newerSeatId],
+        seats: [{ id: newerSeatId, priceMinor: 9900, currency: "EUR" }],
+      },
+    };
+    renderEventPage(queryClient);
+    await vi.waitFor(() => expect(callsTo("booking.activeHold")).toHaveLength(2));
+
+    // The cached hold's deadline passes while the fresh read is still out.
+    await advance(4000);
+    answerRestore?.();
+    await advance(1000);
+
+    const hold = await screen.findByRole("region", { name: "Your hold" });
+    expect(hold.textContent).toContain("a seat no longer on the map");
+    expect(hold.textContent).not.toContain("row A, seat 1");
+    expect(screen.queryByText(/Your hold expired/)).toBeNull();
+    fireEvent.click(within(hold).getByRole("button", { name: "Release seats" }));
+    await vi.waitFor(() =>
+      expect(callsTo("booking.releaseHold").map((call) => call.input)).toEqual([
+        { holdId: newerHoldId },
+      ]),
+    );
+  });
 });
 
 describe("Heartbeat", () => {

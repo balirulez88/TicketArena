@@ -777,7 +777,7 @@ When does the UI read activeHold?
 
 Assumed: Once on mount, no refetch on focus; ending a hold on the page sets the cached result to null; a restored hold already past holdExpiresAt ends at once with the usual expiry alert
 
-Answer: Fixed (2026-11-26, PR #18 review): every real mount reads activeHold fresh (refetchOnMount always), so a cached null or an ended hold from an earlier visit is never served; focus refetch stays off. Ending a hold cancels a restore read still in flight before writing null, so its late answer cannot bring the hold back. Ending an already expired restored hold at once is accepted.
+Answer: Fixed (2026-11-26, PR #18 review): every real mount reads activeHold fresh (refetchOnMount always), so a cached null or an ended hold from an earlier visit is never served; focus refetch stays off. Ending a hold cancels a restore read still in flight before writing null, so its late answer cannot bring the hold back. A restored hold is shown only once this mount's own read has answered, so a hold cached from an earlier visit cannot expire on screen and cancel the read that brings a newer live hold (second PR #18 review). Ending an already expired restored hold at once is accepted.
 
 ## 2026-11-26 12:17 ticket 69
 

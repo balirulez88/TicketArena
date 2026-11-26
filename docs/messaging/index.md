@@ -31,7 +31,8 @@ publishing the same row twice in one pass.
 
 `apps/worker` is the long-running process ([ADR 0013](../adr/0013-deployment-topology.md)). On boot it calls
 `ensureTopology()` (creates `TICKETARENA` and `TICKETARENA_DLQ` as in
-[ADR 0004](../adr/0004-nats-jetstream-message-bus.md)) and only then starts the relay. Re-applying the
+[ADR 0004](../adr/0004-nats-jetstream-message-bus.md)), binds its health port, and only then starts the relay. A failed start
+leaves no relay or consumer runner running, and shutdown is bounded (see [Worker](../architecture/index.md#worker)). Re-applying the
 topology is safe at any time: an unchanged stream is left alone, and a stream declared by an older
 topology is updated in place, keeping its messages. Only the broker's "stream name already in use"
 answer to the `add` leads to that `update`; any other failure (invalid configuration such as a

@@ -866,3 +866,19 @@ What delay applies past the 4th delivery?
 Assumed: 2m repeats for every later delivery; ending retries is ticket 25's DLQ gate (deliveryCount > 5), which goes before the handler and leaves RETRY_DELAYS_MS alone
 
 Answer: (open)
+
+## 2026-11-26 19:55 ticket 46
+
+The last AC asks to mark TD-034 and TD-035 RESOLVED in docs/technical-debt.md, but CLAUDE.md freezes that register. Which wins?
+
+Assumed: CLAUDE.md wins, as for tickets 14, 26, 43 and 45: the register is not edited; the verifying tests are named in the commit message and a human updates the entries
+
+Answer: (open)
+
+## 2026-11-26 20:07 ticket 46
+
+What is the worker's shutdown deadline and how is it configured?
+
+Assumed: DEFAULT_SHUTDOWN_DEADLINE_MS = 25000 in apps/worker/src/lifecycle.ts (under Fly's 30 s kill_timeout), overridable via a deadlineMs option, no env variable; one deadline for the whole ordered shutdown; a relay tick cut off at the deadline rolls back and its rows stay PENDING
+
+Answer: (open)

@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { BookingService } from "@ticketarena/booking";
 import { type Logger, silentLogger } from "@ticketarena/contracts";
@@ -12,6 +12,7 @@ import {
 } from "@ticketarena/messaging";
 import type { AdmissionLimits, QueueService } from "@ticketarena/waiting-room";
 import { createAdmissionLoops } from "./admission.js";
+import { type StopPhases, stopPhases, type WorkerComponent } from "./lifecycle.js";
 import { createSweeperLoop } from "./sweeper.js";
 
 /** How often expired holds and overdue orders are swept (spec: Expiry); lazy expiry covers held seats in between. */
@@ -66,65 +67,43 @@ async function healthReport(health: WorkerOptions["health"]): Promise<object> {
 
 export interface RunningWorker {
   readonly port: number;
+  /** The started parts in stop order, named for the shutdown logs (`shutdownWorkerProcess`). */
+  readonly components: StopPhases;
+  /** Stops every component; rejects naming those whose stop failed. */
   stop(): Promise<void>;
+}
+
+/** Binds the health port, rejecting (never an unhandled 'error' event) when it cannot. */
+function listen(server: Server, port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => {
+      reject(
+        new Error(`worker health server cannot listen on port ${port}: ${error.message}`, {
+          cause: error,
+        }),
+      );
+    };
+    server.once("error", onError);
+    server.listen(port, () => {
+      server.off("error", onError);
+      resolve();
+    });
+  });
+}
+
+async function stopAll(phases: StopPhases): Promise<void> {
+  const failures = await stopPhases(phases);
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures.map((failure) => failure.error),
+      `worker components failed to stop: ${failures.map((failure) => failure.component).join(", ")}`,
+    );
+  }
 }
 
 export async function startWorker(options: WorkerOptions): Promise<RunningWorker> {
   // The relay must never publish into a stream that does not exist yet (ADR 0004).
   await options.bus.ensureTopology();
-
-  // exactOptionalPropertyTypes forbids passing `logger: undefined`; omit it so packages default.
-  const loggerOption = options.logger === undefined ? {} : { logger: options.logger };
-
-  const runners = await Promise.all(
-    (options.consumers ?? []).map((consumer) =>
-      createConsumerRunner({
-        ...consumer,
-        bus: options.bus,
-        prisma: options.prisma,
-        ...loggerOption,
-      }),
-    ),
-  );
-  // One relay per service outbox (ADR 0009).
-  const relays = (["booking", "payment", "notification"] as const).map((service) =>
-    createOutboxRelay({
-      bus: options.bus,
-      prisma: options.prisma,
-      service,
-      ...loggerOption,
-      ...options.relay,
-    }),
-  );
-  const sweeper =
-    options.sweeper === undefined
-      ? undefined
-      : createSweeperLoop({
-          booking: options.sweeper.booking,
-          intervalMs: options.sweeper.intervalMs ?? SWEEP_INTERVAL_MS,
-          logger: options.logger ?? silentLogger,
-        });
-  const admission =
-    options.waitingRoom === undefined
-      ? []
-      : createAdmissionLoops({
-          queue: options.waitingRoom.queue,
-          limits: options.waitingRoom.limits,
-          prisma: options.prisma,
-          admitIntervalMs: options.waitingRoom.admitIntervalMs ?? ADMIT_INTERVAL_MS,
-          reapIntervalMs: options.waitingRoom.reapIntervalMs ?? REAP_INTERVAL_MS,
-          logger: options.logger ?? silentLogger,
-        });
-  for (const runner of runners) {
-    runner.start();
-  }
-  sweeper?.start();
-  for (const loop of admission) {
-    loop.start();
-  }
-  for (const relay of relays) {
-    relay.start();
-  }
 
   const server = createServer((request, response) => {
     if (request.method === "GET" && request.url === "/health") {
@@ -136,16 +115,118 @@ export async function startWorker(options: WorkerOptions): Promise<RunningWorker
     }
     response.writeHead(404).end();
   });
-  await new Promise<void>((resolve) => server.listen(options.port, resolve));
+  // Bound before anything starts (TD-034): a port in use rejects with nothing to clean up.
+  await listen(server, options.port);
+
+  // Each loop is recorded the moment it starts, so a later failing step stops exactly what is
+  // running before the error propagates, and no loop outlives a failed start.
+  const started: StartedLoops = { sweepers: [], admission: [], relays: [], runners: [] };
+  const components: StopPhases = [
+    [{ name: "health server", stop: () => closeServer(server) }],
+    started.sweepers,
+    started.admission,
+    started.relays,
+    started.runners,
+  ];
+  try {
+    await startLoops(options, started);
+  } catch (error) {
+    for (const failure of await stopPhases(components)) {
+      (options.logger ?? silentLogger).error(
+        { err: failure.error, component: failure.component },
+        "worker component failed to stop after a failed start",
+      );
+    }
+    throw error;
+  }
 
   return {
     port: (server.address() as AddressInfo).port,
-    async stop() {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      await sweeper?.stop();
-      await Promise.all(admission.map((loop) => loop.stop()));
-      await Promise.all(relays.map((relay) => relay.stop()));
-      await Promise.all(runners.map((runner) => runner.stop()));
-    },
+    components,
+    stop: () => stopAll(components),
   };
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve, reject) =>
+    server.close((error) => (error === undefined ? resolve() : reject(error))),
+  );
+}
+
+/** The started loops by stop phase; each array grows as its loops start. */
+interface StartedLoops {
+  readonly sweepers: WorkerComponent[];
+  readonly admission: WorkerComponent[];
+  readonly relays: WorkerComponent[];
+  readonly runners: WorkerComponent[];
+}
+
+async function startLoops(options: WorkerOptions, started: StartedLoops): Promise<void> {
+  // exactOptionalPropertyTypes forbids passing `logger: undefined`; omit it so packages default.
+  const loggerOption = options.logger === undefined ? {} : { logger: options.logger };
+
+  // One relay per service outbox (ADR 0009).
+  for (const service of ["booking", "payment", "notification"] as const) {
+    const relay = createOutboxRelay({
+      bus: options.bus,
+      prisma: options.prisma,
+      service,
+      ...loggerOption,
+      ...options.relay,
+    });
+    relay.start();
+    started.relays.push({ name: `relay:${service}`, stop: () => relay.stop() });
+  }
+  // allSettled, not all: every subscribe has finished, and its runner started, before a failure
+  // propagates, so no runner starts after the caller's cleanup.
+  const subscribed = await Promise.allSettled(
+    (options.consumers ?? []).map(async (consumer) => {
+      const runner = await createConsumerRunner({
+        ...consumer,
+        bus: options.bus,
+        prisma: options.prisma,
+        ...loggerOption,
+      });
+      runner.start();
+      started.runners.push({ name: `consumer:${consumer.consumer}`, stop: () => runner.stop() });
+    }),
+  );
+  const refused = subscribed.find((result) => result.status === "rejected");
+  if (refused !== undefined) {
+    throw refused.reason;
+  }
+  startSweeper(options, started.sweepers);
+  startAdmission(options, started.admission);
+}
+
+function startSweeper(options: WorkerOptions, sweepers: WorkerComponent[]): void {
+  if (options.sweeper === undefined) {
+    return;
+  }
+  const sweeper = createSweeperLoop({
+    booking: options.sweeper.booking,
+    intervalMs: options.sweeper.intervalMs ?? SWEEP_INTERVAL_MS,
+    logger: options.logger ?? silentLogger,
+  });
+  sweeper.start();
+  sweepers.push({ name: "sweeper", stop: () => sweeper.stop() });
+}
+
+function startAdmission(options: WorkerOptions, admission: WorkerComponent[]): void {
+  if (options.waitingRoom === undefined) {
+    return;
+  }
+  const loops = createAdmissionLoops({
+    queue: options.waitingRoom.queue,
+    limits: options.waitingRoom.limits,
+    prisma: options.prisma,
+    admitIntervalMs: options.waitingRoom.admitIntervalMs ?? ADMIT_INTERVAL_MS,
+    reapIntervalMs: options.waitingRoom.reapIntervalMs ?? REAP_INTERVAL_MS,
+    logger: options.logger ?? silentLogger,
+  });
+  const names = ["admission ticker", "slot reaper"];
+  for (const [index, loop] of loops.entries()) {
+    loop.start();
+    admission.push({ name: names[index] ?? `admission loop ${index}`, stop: () => loop.stop() });
+  }
 }

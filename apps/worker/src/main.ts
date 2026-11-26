@@ -10,6 +10,7 @@ import {
 } from "@ticketarena/waiting-room";
 import { createServiceConsumers } from "./consumers.js";
 import { parseWorkerEnv } from "./env.js";
+import { type StopPhases, shutdownWorkerProcess, startWorkerProcess } from "./lifecycle.js";
 import { createWorkerLogger } from "./logger.js";
 import { createWorkerRedis } from "./redis.js";
 import { startWorker } from "./worker.js";
@@ -52,27 +53,44 @@ const queue = createQueueService({
   newId: randomUUID,
   admitRatePerSecond: env.ADMIT_RATE_PER_SECOND,
 });
-const worker = await startWorker({
-  bus,
-  prisma,
-  port: env.PORT,
+// What this entry point opened, closed after the worker's own components: on a failed start, and
+// on SIGTERM or SIGINT. Each is bounded by DEFAULT_SHUTDOWN_DEADLINE_MS (TD-035).
+const resources: StopPhases = [
+  [{ name: "bus", stop: () => bus.close() }],
+  [{ name: "redis", stop: () => redis.close() }],
+  [{ name: "prisma", stop: () => prisma.$disconnect() }],
+];
+const exit = (code: number) => process.exit(code);
+const worker = await startWorkerProcess({
+  start: () =>
+    startWorker({
+      bus,
+      prisma,
+      port: env.PORT,
+      logger,
+      consumers,
+      sweeper: { booking },
+      waitingRoom: {
+        queue,
+        limits: { admitRate: env.ADMIT_RATE_PER_SECOND, maxActive: env.MAX_ACTIVE },
+      },
+      health: { redis: redis.ping },
+    }),
+  resources,
   logger,
-  consumers,
-  sweeper: { booking },
-  waitingRoom: {
-    queue,
-    limits: { admitRate: env.ADMIT_RATE_PER_SECOND, maxActive: env.MAX_ACTIVE },
-  },
-  health: { redis: redis.ping },
+  exit,
 });
-logger.info({ port: worker.port }, "worker listening");
-
-async function shutdown(): Promise<void> {
-  await worker.stop();
-  await bus.close();
-  redis.close();
-  await prisma.$disconnect();
-  process.exit(0);
+if (worker !== undefined) {
+  logger.info({ port: worker.port }, "worker listening");
+  let stopping = false;
+  // Never rejects (shutdownWorkerProcess logs every failure and exits), so `void` drops nothing.
+  const shutdown = (): void => {
+    if (stopping) {
+      return;
+    }
+    stopping = true;
+    void shutdownWorkerProcess({ phases: [...worker.components, ...resources], logger, exit });
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
 }
-process.once("SIGTERM", shutdown);
-process.once("SIGINT", shutdown);

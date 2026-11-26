@@ -275,11 +275,25 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
 ## Worker
 
 Code: `apps/worker/src/`; decision: [ADR 0013](../adr/0013-deployment-topology.md). `startWorker` ensures
-the JetStream topology first, then starts the outbox **relay** (polls every 250 ms, batch of 100) and one
+the JetStream topology first, binds the `/health` port (a port in use rejects naming the port, before anything has started), then starts the outbox **relay** (polls every 250 ms, batch of 100) and one
 **consumer runner** per registered consumer, and the **sweeper** (`sweeper.ts`: calls
 `BookingService.sweepExpired()`, which expires holds and then overdue orders, at start and then 15 s after each sweep ends, `SWEEP_INTERVAL_MS`; a
 failed sweep is logged and retried next time; `stop()` cancels the wait at once), the waiting-room **admission ticker** (every 1 s, `ADMIT_INTERVAL_MS`) and **slot reaper** (every 15 s, `REAP_INTERVAL_MS`) in `admission.ts` on the generic `periodic-loop.ts` (same run-then-wait, log-and-retry, prompt-stop behaviour), each a pass over every event (see [waiting room](waiting-room.md#admission-and-slots)), and serves `GET /health` (`{ status: "ok", redis: "ok" | "unavailable" }`, Redis probed with a bounded `PING`). Redis is never awaited at start: its client (`redis.ts`, `createWorkerRedis`) connects on first use with bounded connects and commands, so an outage pauses only the ticker and reaper ([waiting room](waiting-room.md#redis-outage)). Configuration is validated once in
 `parseWorkerEnv` (`DATABASE_URL`, `NATS_URL`, `REDIS_URL`, `REDIS_CONNECT_TIMEOUT_MS` default 2000, `REDIS_COMMAND_TIMEOUT_MS` default 1000, `PORT`, `ADMIT_RATE_PER_SECOND` default 10, `MAX_ACTIVE` default 100) and injected. Details: [messaging](../messaging/index.md).
+
+**Start and stop** (`lifecycle.ts`, TD-034, TD-035). If any start step fails after a loop has
+started (a consumer's subscribe rejects, say), `startWorker` stops everything already running and
+closes the server before the error propagates. `RunningWorker.components` lists the started parts
+by name in stop order (health server, sweeper, admission ticker and slot reaper, `relay:<service>`,
+`consumer:<durable>`); each phase stops together, phases one after another. `main.ts` starts and
+stops only through `startWorkerProcess` and `shutdownWorkerProcess`, with `process.exit` injected:
+a failed start is logged (`worker failed to start`), the bus, Redis and Prisma are closed and the
+process exits 1; on SIGTERM or SIGINT every component and then the bus, Redis and Prisma are
+stopped, a failing stop is logged with its component and the rest still close (exit 1), and the
+whole shutdown is bounded by `DEFAULT_SHUTDOWN_DEADLINE_MS` (25 s, under Fly's 30 s
+`kill_timeout`): at the deadline the components still stopping are logged and the process exits 1.
+A relay tick cut off this way holds an uncommitted claim; Postgres rolls it back when the process
+exits, so its rows stay `PENDING` for the next start.
 
 ## Logging and ids
 

@@ -160,6 +160,11 @@ From then on every push to `main` that passes CI deploys itself.
 - **Health.** `fly checks list --app ticketarena-worker` (`/health`, reports Redis too) and
   `--app ticketarena-nats` (`/healthz?js-enabled-only=true`). The `/admin` dashboard shows queue,
   seats, orders and pending payments live.
+- **Stopping.** Fly sends SIGTERM and kills after `kill_timeout = "30s"`. The worker stops its
+  loops and connections within `DEFAULT_SHUTDOWN_DEADLINE_MS` (25 s, `apps/worker/src/lifecycle.ts`),
+  then exits 0; a failed stop or the deadline exits 1 and logs the component (`worker did not stop
+  within ...`). A start that fails (for example the health port is taken) logs `worker failed to
+  start` and exits 1.
 - **Logs.** `fly logs --app ticketarena-worker` (pino JSON, `correlationId` per flow); Vercel →
   Project → Logs for the web app.
 - **Rollback.** The default is a revert commit pushed to `main`: it passes CI and deploys like any

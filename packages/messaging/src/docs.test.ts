@@ -24,6 +24,23 @@ describe("logging docs", () => {
       expect(doc).toContain(term);
     }
   });
+
+  it("docs/architecture states the log redaction policy: what is redacted, where and why (TD-048)", () => {
+    const doc = readFileSync(join(docsDir, "architecture", "index.md"), "utf8");
+    const section = doc.slice(doc.indexOf("## Logging and ids"), doc.indexOf("## Children"));
+    for (const term of [
+      "**Redaction:**",
+      "redactLogLine",
+      "streamWrite",
+      "email",
+      "phone",
+      "serialized error",
+      "[Redacted]",
+      "onProcedureError",
+    ]) {
+      expect(section).toContain(term);
+    }
+  });
 });
 
 describe("provider latency docs", () => {

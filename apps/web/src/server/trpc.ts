@@ -21,7 +21,7 @@ import { domainErrorData } from "./domain-error-data";
 import { parseAdmissionEnv, parseDatabaseEnv, parseSessionEnv } from "./env";
 import { ADMIN_COOKIE, verifyAdminCookieValue } from "./identity/admin-session";
 import { type CookieReader, createIdentityService, type Principal } from "./identity/identity";
-import { createWebLogger } from "./logger";
+import { createWebLogger, logProcedureError } from "./logger";
 import { createLazyQueueStore } from "./queue-store";
 import type { RateLimiter } from "./rate-limiter";
 import {
@@ -161,6 +161,9 @@ export function bookingServiceFor(
 }
 
 const logger = createWebLogger();
+
+/** The API route's `onError`: procedure failures go through the same redacting logger. */
+export const onProcedureError = logProcedureError(logger);
 
 const metrics = createLazyMetrics({ readEnv: () => process.env, logger });
 

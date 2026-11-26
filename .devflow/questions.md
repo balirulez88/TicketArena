@@ -882,3 +882,19 @@ What is the worker's shutdown deadline and how is it configured?
 Assumed: DEFAULT_SHUTDOWN_DEADLINE_MS = 25000 in apps/worker/src/lifecycle.ts (under Fly's 30 s kill_timeout), overridable via a deadlineMs option, no env variable; one deadline for the whole ordered shutdown; a relay tick cut off at the deadline rolls back and its rows stay PENDING
 
 Answer: (open)
+
+## 2026-11-26 20:09 ticket 51
+
+The last AC asks to mark TD-048 RESOLVED in docs/technical-debt.md, but CLAUDE.md freezes that register. Which wins?
+
+Assumed: CLAUDE.md wins, as for tickets 14, 26, 43, 45 and 46: the register is not edited; the verifying tests are named in the commit message and a human updates the entry
+
+Answer: (open)
+
+## 2026-11-26 20:18 ticket 51
+
+Redact buyer contact details by key, by value pattern, or both?
+
+Assumed: Both, in one shared redactLogLine in packages/contracts applied via pino streamWrite: keys matching /e-?mail|phone|recipient/i become [Redacted] at any depth, and emails or 7+ digit phone-like runs inside any string are redacted; over-redaction of bare long numbers is accepted
+
+Answer: (open)

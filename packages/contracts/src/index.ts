@@ -2,6 +2,7 @@ export type { CausedEventInput, JsonValue } from "./caused-event";
 export { type Envelope, envelopeSchema } from "./envelope";
 export { type HoldExpiredPayload, holdExpiredPayloadSchema } from "./hold-expired";
 export { type HoldReleasedPayload, holdReleasedPayloadSchema } from "./hold-released";
+export { REDACTED, redactLogLine } from "./log-redaction";
 export {
   causedBy,
   envelopeLogBindings,

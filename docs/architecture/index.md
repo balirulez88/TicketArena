@@ -309,6 +309,21 @@ exits, so its rows stay `PENDING` for the next start.
   `correlationId` is unchanged and `causationId` is the handled message's `id`; the outbox row
   commits in the handler's transaction and a non-envelope message cannot emit. Events from
   `holdSeats`/`releaseHold`/`placeOrder` start the chain with `causationId: null`.
+- **Redaction:** buyer contact details (email and phone) never reach a log line. Both app loggers
+  (`createWebLogger`, `createWorkerLogger`) pass every serialized line through `redactLogLine`
+  (`packages/contracts`, no pino dependency) in pino's `streamWrite` hook, so the rule covers
+  child bindings, fields and a serialized error (message, stack, own properties, `cause`) before
+  anything is written. Two rules apply at any depth: the value of a key matching `email`,
+  `phone` or `recipient` (case-insensitive: `contactEmail`, `contact.phone`, a notification's
+  `recipient`) becomes `[Redacted]`, and inside any string an email address or a run of 7 or more
+  digits (optional `+`, spaces, dashes, parentheses) not touching a word character becomes
+  `[Redacted]`. Why both: errors are logged whole (`err`) because their name and stack are needed
+  to debug, and a Prisma or validation error can embed the buyer's contact in its message (TD-048),
+  which no key rule sees. The value rule over-redacts on purpose (a bare 7+ digit number or
+  `YYYY-MM-DD` date in a message is lost); UUIDs, ISO timestamps, IP addresses and numeric fields
+  survive, so correlation ids stay traceable. tRPC procedure errors go to the same logger through
+  `onProcedureError` (the API route's `onError`), never `console`. Code that logs a new contact
+  field under another key name must extend `CONTACT_KEY` in `log-redaction.ts`.
 
 ## Children
 

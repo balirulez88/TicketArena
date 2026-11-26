@@ -12,6 +12,9 @@ import type { AdmitRequest, JoinScore, QueueStore } from "./ports";
  * - `bucket`: HASH `tokens`, `ts` (epoch ms of the last refill): the admission token bucket.
  * - `admission`: HASH session id → its admission `jti`.
  * - `admitted`: ZSET member = `jti`, score = admission expiry (epoch ms): the admitted set.
+ * - `holders`: HASH `jti` → session id, the reverse of `admission`, so the reaper can go from an
+ *   expired `jti` (found by its `admitted` score) to the slot it must free. Every script that
+ *   writes or removes an `admission` entry writes or removes the `holders` entry in the same step.
  */
 export function queueKeys(prefix: string, eventId: string) {
   const base = `${prefix}waiting-room:{${eventId}}`;
@@ -22,6 +25,7 @@ export function queueKeys(prefix: string, eventId: string) {
     bucket: `${base}:bucket`,
     admission: `${base}:admission`,
     admitted: `${base}:admitted`,
+    holders: `${base}:holders`,
   };
 }
 
@@ -34,7 +38,7 @@ export function queueKeys(prefix: string, eventId: string) {
 // The ZSCORE guard draws a sequence number only for a new member, so re-joins leave no gaps;
 // ZADD NX is what guarantees an existing score is never overwritten. INCR, ZADD and ZRANK run in
 // one script, so concurrent joins get distinct, increasing scores and an exact position.
-// KEYS: queue, sequence, active, admission, admitted.
+// KEYS: queue, sequence, active, admission, admitted, holders.
 // ARGV: member, pre-queue score ('' for a later join), now ms.
 // Returns the rank, or -1 when the member holds a slot with a valid admission.
 export const JOIN_SCRIPT = `
@@ -48,6 +52,7 @@ if redis.call('ZSCORE', KEYS[3], ARGV[1]) then
   if jti then
     redis.call('HDEL', KEYS[4], ARGV[1])
     redis.call('ZREM', KEYS[5], jti)
+    redis.call('HDEL', KEYS[6], jti)
   end
 end
 if not redis.call('ZSCORE', KEYS[1], ARGV[1]) then
@@ -63,7 +68,7 @@ return redis.call('ZRANK', KEYS[1], ARGV[1])
 // Leaving the queue, freeing the slot and revoking the jti are one step. As separate commands
 // (over Upstash REST, separate HTTP requests in no fixed order) the ticker could pop the member
 // between them and leave it admitted after it left.
-// KEYS: queue, active, admission, admitted. ARGV: member.
+// KEYS: queue, active, admission, admitted, holders. ARGV: member.
 // Returns 1 when the member was queued or held a slot.
 export const LEAVE_SCRIPT = `
 local queued = redis.call('ZREM', KEYS[1], ARGV[1])
@@ -72,6 +77,7 @@ local jti = redis.call('HGET', KEYS[3], ARGV[1])
 if jti then
   redis.call('HDEL', KEYS[3], ARGV[1])
   redis.call('ZREM', KEYS[4], jti)
+  redis.call('HDEL', KEYS[5], jti)
 end
 if queued + held > 0 then
   return 1
@@ -84,7 +90,7 @@ return 0
 // can never admit past either limit. Time is the caller's injected clock, not Redis TIME, and a
 // clock that steps back refills nothing. An empty queue spends no tokens. Re-admitting a member
 // that still holds a slot replaces its jti, so it never keeps two valid admissions.
-// KEYS: queue, active, bucket, admission, admitted.
+// KEYS: queue, active, bucket, admission, admitted, holders.
 // ARGV: now ms, admitRate, maxActive, admission ttl ms, jti... Returns member, jti, member, jti...
 export const ADMIT_SCRIPT = `
 local now = tonumber(ARGV[1])
@@ -107,10 +113,12 @@ if count > 0 then
     local previous = redis.call('HGET', KEYS[4], member)
     if previous then
       redis.call('ZREM', KEYS[5], previous)
+      redis.call('HDEL', KEYS[6], previous)
     end
     redis.call('ZADD', KEYS[2], now, member)
     redis.call('HSET', KEYS[4], member, jti)
     redis.call('ZADD', KEYS[5], now + ttl, jti)
+    redis.call('HSET', KEYS[6], jti, member)
     result[#result + 1] = member
     result[#result + 1] = jti
   end
@@ -120,18 +128,28 @@ redis.call('HSET', KEYS[3], 'tokens', tostring(tokens), 'ts', tostring(now))
 return result
 `;
 
+// A heartbeat keeps a slot alive only while its admission is valid. An expired admission is
+// unusable (the admission script reads it as none), so polling must not hold its slot open: it
+// goes idle and the reaper frees it within the idle timeout. That also bounds a slot the reaper
+// cannot reach from its expired jti, one admitted before the `holders` index existed (PR #18).
 // XX after the ZSCORE guard: a heartbeat never creates a slot, only refreshes one.
-// KEYS: active. ARGV: member, now ms. Returns 1 when the member holds a slot.
+// KEYS: active, admission, admitted. ARGV: member, now ms.
+// Returns 1 when the member holds a slot with a valid admission.
 export const HEARTBEAT_SCRIPT = `
-if redis.call('ZSCORE', KEYS[1], ARGV[1]) then
-  redis.call('ZADD', KEYS[1], 'XX', ARGV[2], ARGV[1])
-  return 1
+if not redis.call('ZSCORE', KEYS[1], ARGV[1]) then
+  return 0
 end
-return 0
+local jti = redis.call('HGET', KEYS[2], ARGV[1])
+local expires = jti and redis.call('ZSCORE', KEYS[3], jti)
+if not expires or tonumber(expires) <= tonumber(ARGV[2]) then
+  return 0
+end
+redis.call('ZADD', KEYS[1], 'XX', ARGV[2], ARGV[1])
+return 1
 `;
 
 // Freeing a slot and revoking its jti are one step, so a freed slot never leaves a valid
-// admission behind (ADR 0008). KEYS: active, admission, admitted. ARGV: member.
+// admission behind (ADR 0008). KEYS: active, admission, admitted, holders. ARGV: member.
 // Returns 1 when the member held a slot.
 export const RELEASE_SLOT_SCRIPT = `
 local removed = redis.call('ZREM', KEYS[1], ARGV[1])
@@ -139,35 +157,57 @@ local jti = redis.call('HGET', KEYS[2], ARGV[1])
 if jti then
   redis.call('HDEL', KEYS[2], ARGV[1])
   redis.call('ZREM', KEYS[3], jti)
+  redis.call('HDEL', KEYS[4], jti)
 end
 return removed
 `;
 
-// Walks the whole active set in one call. While the queue is open maxActive bounds that set; once
-// it closes, immediate admission bypasses maxActive, so the set is bounded only by the buyers seen
-// in the last idle timeout (90 s). Bounded, batched reaping is ticket 69. A slot is freed when it
-// is idle or its admission is missing or expired; expired jtis without a slot are dropped too.
-// KEYS: active, admission, admitted. ARGV: now ms, idle cutoff ms. Returns the freed members.
+// One bounded step of a reaper pass (ticket 69). Once the queue closes, immediate admission
+// bypasses maxActive, so the active set is bounded only by the buyers seen in the last idle
+// timeout (90 s); walking all of it in one script would block the event's other queue operations
+// for as long as it ran. Instead the candidates come from the two sorted indexes: slots by
+// lastSeenAt below the idle cutoff (exclusive), then jtis by expiry at or before now, together at
+// most ARGV[3]. A slot is freed with its jti revoked in the same step (ADR 0008); an expired jti
+// whose holder holds no slot under it is only dropped. The two LIMIT 1 probes tell the caller
+// whether another call has work, without counting the rest.
+// KEYS: active, admission, admitted, holders. ARGV: now ms, idle cutoff ms, batch size.
+// Returns { 1 when candidates remain else 0, { freed member... } }.
 export const REAP_SCRIPT = `
-local now = tonumber(ARGV[1])
-local idle_before = tonumber(ARGV[2])
-local slots = redis.call('ZRANGE', KEYS[1], 0, -1, 'WITHSCORES')
+local idle_below = '(' .. ARGV[2]
+local batch = tonumber(ARGV[3])
 local freed = {}
-for i = 1, #slots, 2 do
-  local member = slots[i]
-  local jti = redis.call('HGET', KEYS[2], member)
-  local expires = jti and redis.call('ZSCORE', KEYS[3], jti)
-  if tonumber(slots[i + 1]) < idle_before or not expires or tonumber(expires) <= now then
-    redis.call('ZREM', KEYS[1], member)
-    if jti then
-      redis.call('HDEL', KEYS[2], member)
+local function free(member, jti)
+  redis.call('ZREM', KEYS[1], member)
+  redis.call('HDEL', KEYS[2], member)
+  if jti then
+    redis.call('ZREM', KEYS[3], jti)
+    redis.call('HDEL', KEYS[4], jti)
+  end
+  freed[#freed + 1] = member
+end
+local idle = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', idle_below, 'LIMIT', 0, batch)
+for _, member in ipairs(idle) do
+  free(member, redis.call('HGET', KEYS[2], member))
+end
+local remaining = batch - #idle
+if remaining > 0 then
+  local expired = redis.call('ZRANGEBYSCORE', KEYS[3], '-inf', ARGV[1], 'LIMIT', 0, remaining)
+  for _, jti in ipairs(expired) do
+    local member = redis.call('HGET', KEYS[4], jti)
+    if member and redis.call('HGET', KEYS[2], member) == jti then
+      free(member, jti)
+    else
       redis.call('ZREM', KEYS[3], jti)
+      redis.call('HDEL', KEYS[4], jti)
     end
-    freed[#freed + 1] = member
   end
 end
-redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', now)
-return freed
+local more = 0
+if #redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', idle_below, 'LIMIT', 0, 1) > 0
+  or #redis.call('ZRANGEBYSCORE', KEYS[3], '-inf', ARGV[1], 'LIMIT', 0, 1) > 0 then
+  more = 1
+end
+return { more, freed }
 `;
 
 // After the queue closes admission is immediate (ADR 0008), so the bucket and maxActive do not
@@ -175,7 +215,7 @@ return freed
 // using. A slot whose admission expired (the reaper has not run yet) is replaced in the same step,
 // so the buyer is not stuck until the next reap. The queue entry goes too, so a ticker never
 // admits the member a second time.
-// KEYS: queue, active, admission, admitted. ARGV: member, now ms, ttl ms, jti.
+// KEYS: queue, active, admission, admitted, holders. ARGV: member, now ms, ttl ms, jti.
 // Returns 1 when a slot was created or replaced, 0 when the member kept a valid one.
 export const ADMIT_IMMEDIATELY_SCRIPT = `
 local now = tonumber(ARGV[2])
@@ -187,12 +227,14 @@ if redis.call('ZSCORE', KEYS[2], ARGV[1]) then
   end
   if old then
     redis.call('ZREM', KEYS[4], old)
+    redis.call('HDEL', KEYS[5], old)
   end
 end
 redis.call('ZREM', KEYS[1], ARGV[1])
 redis.call('ZADD', KEYS[2], now, ARGV[1])
 redis.call('HSET', KEYS[3], ARGV[1], ARGV[4])
 redis.call('ZADD', KEYS[4], now + tonumber(ARGV[3]), ARGV[4])
+redis.call('HSET', KEYS[5], ARGV[4], ARGV[1])
 return 1
 `;
 
@@ -267,7 +309,7 @@ export function createScriptedQueueStore(
   const keysOf = (eventId: string) => queueKeys(prefix, eventId);
   const slotKeys = (eventId: string) => {
     const keys = keysOf(eventId);
-    return [keys.active, keys.admission, keys.admitted];
+    return [keys.active, keys.admission, keys.admitted, keys.holders];
   };
 
   return {
@@ -296,16 +338,17 @@ export function createScriptedQueueStore(
       const keys = keysOf(eventId);
       const reply = await run(
         "admit",
-        [keys.queue, keys.active, keys.bucket, keys.admission, keys.admitted],
+        [keys.queue, keys.active, keys.bucket, keys.admission, keys.admitted, keys.holders],
         admitArguments(request),
       );
       return toAdmissions(reply);
     },
 
     async heartbeat(eventId, member, now) {
+      const keys = keysOf(eventId);
       const reply = await run(
         "heartbeat",
-        [keysOf(eventId).active],
+        [keys.active, keys.admission, keys.admitted],
         [member, String(now.getTime())],
       );
       return toInteger(reply, "heartbeat") === 1;
@@ -315,12 +358,13 @@ export function createScriptedQueueStore(
       return toInteger(await run("releaseSlot", slotKeys(eventId), [member]), "releaseSlot") === 1;
     },
 
-    async reap(eventId, cutoffs) {
+    async reap(eventId, request) {
       const reply = await run("reap", slotKeys(eventId), [
-        String(cutoffs.now.getTime()),
-        String(cutoffs.idleBefore.getTime()),
+        String(request.now.getTime()),
+        String(request.idleBefore.getTime()),
+        String(request.batchSize),
       ]);
-      return toStrings(reply, "reap");
+      return toReapBatch(reply);
     },
 
     async admitImmediately(eventId, member, grant) {
@@ -334,8 +378,13 @@ export function createScriptedQueueStore(
     },
 
     async admission(eventId, member, now) {
+      const keys = keysOf(eventId);
       const reply = toStrings(
-        await run("admission", slotKeys(eventId), [member, String(now.getTime())]),
+        await run(
+          "admission",
+          [keys.active, keys.admission, keys.admitted],
+          [member, String(now.getTime())],
+        ),
         "admission",
       );
       const [jti, expiresAt] = reply;
@@ -399,6 +448,13 @@ export function toAdmissions(reply: unknown): { sessionId: string; jti: string }
     admissions.push({ sessionId: flat[index] ?? "", jti: flat[index + 1] ?? "" });
   }
   return admissions;
+}
+
+export function toReapBatch(reply: unknown): { freed: string[]; more: boolean } {
+  if (!Array.isArray(reply) || reply.length !== 2) {
+    throw new Error(`waiting-room reap script returned ${String(reply)}, expected [more, freed]`);
+  }
+  return { more: toInteger(reply[0], "reap") === 1, freed: toStrings(reply[1], "reap") };
 }
 
 export function toCounts(reply: unknown): { queued: number; active: number } {

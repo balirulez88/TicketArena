@@ -71,8 +71,8 @@ pick it up.
 | `outbox_events_status_createdAt_idx`          | `outbox_events(status, createdAt)`          | Relay polling                                    |
 | `outbox_events_aggregateType_aggregateId_idx` | `outbox_events(aggregateType, aggregateId)` | Aggregate lookup                                 |
 
-Booking: `booking.holdSeats` (1–6 seats of one event, all or nothing) and `booking.getHold` (owner only, else
-`NOT_FOUND`) delegate to `BookingService` (`packages/booking`). `holdSeats` first requires a valid
+Booking: `booking.holdSeats` (1–6 seats of one event, all or nothing), `booking.getHold` (owner only, else
+`NOT_FOUND`) and `booking.activeHold({ eventId })` delegate to `BookingService` (`packages/booking`). `holdSeats` first requires a valid
 admission token for the session and the input `eventId` (`admittedProcedure`, else tRPC
 `FORBIDDEN` with nothing written; see [waiting room](../architecture/waiting-room.md#admission-token)). `holdSeats` rejects an empty, duplicated or longer-than-6 `seatIds` list with `INVALID_SEAT_SELECTION` (tRPC
 `BAD_REQUEST`) before writing. Before the event's `onSaleAt` it refuses with `NOT_ON_SALE` (tRPC
@@ -96,6 +96,13 @@ locks); such a seat is taken over by the new hold while the old hold stays `HELD
 expires it. `IN_CHECKOUT` and `SOLD` are never free. Any other seat fails with `SEAT_UNAVAILABLE`
 (tRPC `CONFLICT`) naming its id.
 No SQL `now()`; the `Clock` is injected.
+
+`booking.activeHold({ eventId })` (public, no admission needed: a hold outlives it) returns the
+latest `holds` row of the event with `sessionId` and `buyerKey` of the caller, `status = HELD` and
+`T < holdExpiresAt`, shaped as `holdSeats` returns it plus `seats` (each seat still carrying the
+hold's id, with its section's `priceMinor` and `currency`), or `null`. Matching on `sessionId` as
+well means another session of the same signed-in user never sees it; an expired hold the sweeper
+has not reached yet is `null`, as on every other path. A read only: it writes nothing.
 
 Metrics: an optional `BookingMetrics` port counts `hold_ok`, `limit_exceeded`, `seat_unavailable` (snapshot refusals,
 and refusals under the lock of seats nobody changed since the snapshot, such as a seat outside

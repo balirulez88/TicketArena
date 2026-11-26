@@ -20,7 +20,9 @@ export type {
   QueuePhase,
   QueueStore,
   Random,
-  ReapCutoffs,
+  ReapBatch,
+  ReapBudget,
+  ReapRequest,
   SlotAdmission,
 } from "./ports";
 export {
@@ -30,6 +32,7 @@ export {
   type QueuedView,
   type QueueService,
   type QueueServiceDeps,
+  REAP_BUDGET,
   SLOT_IDLE_TIMEOUT_MS,
   type StatusResult,
 } from "./queue-service";

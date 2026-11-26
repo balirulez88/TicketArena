@@ -26,6 +26,7 @@ worker keep running.
 | `QueueStore` (port)                        | `join`, `position` (1-based), `leave`, `admit`, `admitImmediately`, `admission`, `heartbeat`, `releaseSlot`, `reap`, `isAdmitted`, `counts`, `clearEvent`                                                                                                                   |
 | `AdmissionLimits`                          | `{ admitRate, maxActive }` per tick; the worker supplies them from its configuration                                                                                                                                                                                        |
 | `SLOT_IDLE_TIMEOUT_MS`, `ADMISSION_TTL_MS` | 90 s idle before reaping; 30 min admission validity from admission (fixed)                                                                                                                                                                                                  |
+| `REAP_BUDGET`                              | `{ batchSize: 100, maxBatches: 50 }`: one `QueueStore.reap` call examines at most `batchSize` candidates, one reaper pass makes at most `maxBatches` calls per event; override with `QueueServiceDeps.reapBudget`                                                           |
 | `createRedisQueueStore`                    | node-redis adapter over the narrow `RedisQueueClient` (`eval`, `zRank`); options: `prefix`                                                                                                                                                                                  |
 | `createLazyConnection`                     | One client per process, connected on first use; bounds the connect (`connectTimeoutMs`) and each command (`commandTimeoutMs`), destroys a client whose connect fails or whose command gets no reply in time and builds a new one on the next use; `run(command)`, `close()` |
 | `RedisUnavailableError`                    | Thrown by `createLazyConnection` when Redis cannot be reached (connect failed or timed out, client offline, no reply in time); a Redis error reply is rethrown as is                                                                                                        |
@@ -68,6 +69,14 @@ scripts need.
 | `<prefix>waiting-room:{<eventId>}:bucket`    | HASH    | token bucket: `tokens` (fractional), `ts` = last refill (epoch ms) |
 | `<prefix>waiting-room:{<eventId>}:admission` | HASH    | session id → its admission `jti`                                   |
 | `<prefix>waiting-room:{<eventId>}:admitted`  | ZSET    | admitted set: member = `jti`, score = expiry (epoch ms)            |
+| `<prefix>waiting-room:{<eventId>}:holders`   | HASH    | `jti` → its session id (the reverse of `admission`)                |
+
+`holders` lets the reaper go from an expired `jti`, found by its `admitted` score, to the slot it
+must free. Every script that writes or removes an `admission` entry writes or removes the matching
+`holders` entry in the same step. A slot admitted before `holders` existed (ticket 69) has no
+entry there: the reaper drops its expired `jti` without freeing the slot, and the slot is freed
+as idle instead, at most 90 s plus one reaper interval after its admission expired, because the
+heartbeat stops refreshing a slot once its admission has expired. No backfill is needed.
 
 ## Scripts
 
@@ -91,8 +100,8 @@ data. Times come from the injected clock (epoch ms), never Redis `TIME`.
   bucket seen for the first time is full; a clock that steps back refills nothing), then admits
   `min(floor(tokens), maxActive − active, jtis supplied)` members with `ZPOPMIN`: each enters
   `active` at `now` and gets its `jti` in `admission` and in `admitted` with expiry
-  `now + 30 min`; one token is spent per admitted member (an empty queue spends none).
-  Re-admitting a member that still holds a slot replaces its old `jti`.
+  `now + 30 min` (and in `holders`); one token is spent per admitted member (an empty queue
+  spends none). Re-admitting a member that still holds a slot replaces its old `jti`.
 - **admitImmediately** (queue closed): if the member holds a slot whose admission is still valid,
   nothing changes (a new `jti` would revoke the token in use); a slot whose admission expired
   before the reaper ran has its old `jti` removed and is replaced; otherwise `ZREM` from the
@@ -102,15 +111,23 @@ data. Times come from the injected clock (epoch ms), never Redis `TIME`.
 - **admission** (read-only): the member's `jti` and its expiry, only while it holds a slot and
   the admission has not expired by `now`, so an expired admission is never reported or minted
   into a token while it waits for the reaper; `QueueService.status` uses it for the token.
-- **heartbeat**: `ZADD XX` of `now`, only if the member holds a slot.
+- **heartbeat**: `ZADD XX` of `now`, only if the member holds a slot whose admission is still
+  valid. Polling never keeps a slot with an expired admission: it goes idle and is reaped within
+  the 90 s idle timeout, even when the reaper cannot reach it from the expired `jti`.
 - **releaseSlot**: removes the slot, the member's `admission` entry and its `jti` from
-  `admitted`, in one step.
-- **reap**: frees every slot last seen before the idle cutoff or whose `jti` is missing or expired
-  (the same three removals as releaseSlot), then drops expired `jti`s; it walks all of `active`.
-  While the queue is open `maxActive` bounds that set; after it closes, immediate admission
-  bypasses `maxActive`, so it is bounded only by the buyers seen in the last 90 s (bounded,
-  batched reaping: ticket 69).
-- **clearEvent**: `DEL` of all six keys of the event in one script, as if no one had joined (the
+  `admitted` and `holders`, in one step.
+- **reap** (one bounded step): examines at most `batchSize` candidates, first slots whose
+  `lastSeenAt` is before the idle cutoff (`ZRANGEBYSCORE active … LIMIT`, oldest first), then, with
+  what is left of the batch, `jti`s expired by `now` (`ZRANGEBYSCORE admitted … LIMIT`, earliest
+  first). A freed slot loses its `admission`, `admitted` and `holders` entries in the same step
+  (AT-39); an expired `jti` whose holder holds no slot under it is only dropped. It returns the
+  freed members and whether candidates remain (two `LIMIT 1` probes). One call is bounded because
+  the active set is not: after the queue closes, immediate admission bypasses `maxActive`, so the
+  set holds every buyer seen in the last 90 s, and one script walking all of it would block the
+  event's other queue operations and admission checks while it ran. `QueueService.reap` repeats
+  the call until none remain or `REAP_BUDGET.maxBatches` calls are spent; the rest waits for the
+  next pass, and other queue operations run between the calls.
+- **clearEvent**: `DEL` of all seven keys of the event in one script, as if no one had joined (the
   bucket starts full again); `admin.resetDemo` uses it for the demo event.
 - **isAdmitted** / **counts**: the `jti`'s `ZSCORE` against `now`; `ZCARD` of `queue` and
   `active` in one snapshot.
@@ -127,7 +144,9 @@ joins, `ZADD NX` re-joins, a re-join by an admitted member (`ADMITTED`, same `jt
 also racing a ticker on another connection) and by a member whose slot was freed (back of the
 queue), leave, prefix isolation and a race of concurrent joins on separate
 connections; admission order and `jti`s, bucket burst and refill, the `maxActive` cap, heartbeat,
-slot release and reaping with revocation, admission expiry, and a race of concurrent admit
+slot release and reaping with revocation, bounded reap calls (one call frees at most the batch
+from a larger set; repeated calls free every idle or expired slot and nothing else), admission
+expiry, and a race of concurrent admit
 ticks on separate connections that never exceeds the bucket or `maxActive` (AT-38). `redis-queue-store.test.ts` runs it against real Redis and
 `upstash-queue-store.test.ts` against an Upstash-compatible endpoint: the `redis-http` service in
 `docker-compose.yml` (serverless-redis-http in front of the same Redis), which `pnpm infra:up` and
@@ -195,7 +214,8 @@ the queue service built in `main.ts` on the same keys as the web app (no prefix)
   worker's `ADMIT_RATE_PER_SECOND` (default 10) and `MAX_ACTIVE` (default 100). The limits are
   worker configuration shared by every event; there are no per-event columns.
 - **Reaper**, every 15 s: `reap(eventId)` frees slots idle for over 90 s (`lastSeenAt` before
-  `now − 90 s`) or whose admission expired (30 min after admission, fixed).
+  `now − 90 s`) or whose admission expired (30 min after admission, fixed), in store calls of at
+  most 100 candidates, up to 50 calls per event per pass (`REAP_BUDGET`).
 
 Each loop runs at start and then its interval after each pass ends; a failed pass is logged and
 retried, so a Redis outage only pauses admission and reaping (see [Redis outage](#redis-outage)).

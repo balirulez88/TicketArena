@@ -754,3 +754,51 @@ Is data.seatIds required by the type when domainCode is SEAT_UNAVAILABLE?
 Assumed: No: both optional on one object type; the UI falls back to [] so domainCode stays readable without narrowing a union
 
 Answer: Accepted (2026-11-24): the optional fields with the empty-array UI fallback meet the ticket. A discriminated union would give a stronger static guarantee but is not needed for this scope.
+
+## 2026-11-26 12:06 ticket 68
+
+What is 'the current session' for activeHold?
+
+Assumed: Both sessionId and buyerKey must match, so another session of the same signed-in user never gets the hold (stricter than getHold, which matches buyerKey only)
+
+Answer: Accepted (2026-11-26): sessionId and buyerKey must both match; another session of the same user does not get the hold back.
+
+## 2026-11-26 12:06 ticket 68
+
+Several live holds for one event: which does activeHold return, and is it admission-gated?
+
+Assumed: The one with the latest holdExpiresAt; public (not admission-gated) since a hold outlives the 30-minute admission; shape is holdSeats output plus seats [{id, priceMinor, currency}]
+
+Answer: Accepted (2026-11-26): the live hold with the latest holdExpiresAt, an owner-filtered public endpoint without admission; the hold data plus priced seats is the right output.
+
+## 2026-11-26 12:06 ticket 68
+
+When does the UI read activeHold?
+
+Assumed: Once on mount, no refetch on focus; ending a hold on the page sets the cached result to null; a restored hold already past holdExpiresAt ends at once with the usual expiry alert
+
+Answer: Fixed (2026-11-26, PR #18 review): every real mount reads activeHold fresh (refetchOnMount always), so a cached null or an ended hold from an earlier visit is never served; focus refetch stays off. Ending a hold cancels a restore read still in flight before writing null, so its late answer cannot bring the hold back. A restored hold is shown only once this mount's own read has answered, so a hold cached from an earlier visit cannot expire on screen and cancel the read that brings a newer live hold (second PR #18 review). Ending an already expired restored hold at once is accepted.
+
+## 2026-11-26 12:17 ticket 69
+
+Batch size and pass budget for the reaper?
+
+Assumed: REAP_BUDGET { batchSize: 100, maxBatches: 50 } (up to 5,000 slots per event per 15 s pass), exported and overridable via QueueServiceDeps.reapBudget; no new env variables
+
+Answer: Accepted (2026-11-26): batchSize 100, maxBatches 50, injectable override, no new env. At most 5,000 examined candidates per event per pass; some candidates only drop orphan jtis rather than free a slot.
+
+## 2026-11-26 12:17 ticket 69
+
+How does the reaper find the slot of an expired admission without scanning active?
+
+Assumed: New per-event hash waiting-room:{eventId}:holders (jti -> session id), kept in sync by every script that writes or removes an admission; idle candidates are examined first, expired admissions take the rest of the batch
+
+Answer: Accepted (2026-11-26): the jti -> session hash, kept atomically by the scripts that change an admission; idle candidates first, then expired ones from the rest of the batch.
+
+## 2026-11-26 12:17 ticket 69
+
+Slots that predate the holders hash, or fresh slots missing a jti?
+
+Assumed: Not migrated: an expired pre-deploy jti is dropped and its slot is freed once 90 s idle or on re-join (gap closes within 30 min of deploy); a fresh slot with no jti is no longer freed immediately, only when idle (no script creates one)
+
+Answer: Changed (2026-11-26, PR #18 review): the 30-minute claim was not guaranteed, since status polls kept heartbeating an old-layout slot. The heartbeat now refreshes a slot only while its admission is valid, so such a slot goes idle and is reaped at most 90 s plus one reaper interval after its admission expired, with no backfill; a contract test starts from the old key layout on both adapters. A slot with no jti at all (state no script produces) is likewise never refreshed and is reaped as idle.

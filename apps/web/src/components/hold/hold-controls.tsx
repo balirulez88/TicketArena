@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { inferRouterOutputs } from "@trpc/server";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
@@ -149,6 +149,9 @@ function ActiveHold({
  * Holding the selected seats for an admitted buyer, then the live hold: a countdown to the
  * server's `holdExpiresAt` and a release button. The hold lives in the `holdSeats` mutation's
  * result (server state), not in the selection store, which is emptied once its seats are held.
+ * A page that has no such result (a reload, a new tab, navigating back) asks `booking.activeHold`
+ * on every mount, so a live hold that still counts against the buyer limit is never hidden; the
+ * server decides whether it is still live, and a hold that ended meanwhile comes back `null`.
  * Mounted whether or not the session is admitted: the admission can lapse (30 min, fixed) while a
  * hold is still live, and the hold and a `FORBIDDEN` refusal must stay on screen when it does.
  * The live hold carries the checkout form; once the order is placed the order's status replaces
@@ -192,14 +195,38 @@ export function HoldControls({
       },
     }),
   );
+  // Read fresh on every mount: the cache outlives this component (in-app navigation keeps the
+  // QueryClient), and a hold made or ended since would otherwise be hidden or brought back. While
+  // mounted the page itself knows how the hold ends, so nothing else refetches it.
+  const restored = useQuery(
+    trpc.booking.activeHold.queryOptions(
+      { eventId },
+      {
+        staleTime: Number.POSITIVE_INFINITY,
+        refetchOnMount: "always",
+        refetchOnWindowFocus: false,
+      },
+    ),
+  );
   const resetHold = hold.reset;
+  const forgetHold = useCallback(() => {
+    resetHold();
+    const queryKey = trpc.booking.activeHold.queryKey({ eventId });
+    queryClient.setQueryData(queryKey, null);
+    // A restore read still in flight started before the hold ended; cancelling drops its late
+    // answer, which would bring the ended hold back. The cancel reverts the cache to what it held
+    // when that read started, so the ending is written again once it settles.
+    void queryClient
+      .cancelQueries({ queryKey })
+      .then(() => queryClient.setQueryData(queryKey, null));
+  }, [resetHold, queryClient, trpc, eventId]);
   const endHold = useCallback(
     (reason: Notice) => {
-      resetHold();
+      forgetHold();
       setNotice(reason);
       void refreshSeats();
     },
-    [resetHold, refreshSeats],
+    [forgetHold, refreshSeats],
   );
   const onReleased = useCallback(() => endHold("RELEASED"), [endHold]);
   const onExpired = useCallback(() => endHold("EXPIRED"), [endHold]);
@@ -207,12 +234,18 @@ export function HoldControls({
   const onPlaced = useCallback(
     (placedOrderId: string) => {
       // The hold is now ORDERED: its countdown no longer applies, so the order takes its place.
-      resetHold();
+      forgetHold();
       setOrderId(placedOrderId);
       void refreshSeats();
     },
-    [resetHold, refreshSeats],
+    [forgetHold, refreshSeats],
   );
+  // Until this mount's own read answers, the cache holds what an earlier visit saw. Shown, a hold
+  // in it could expire on screen and end (and cancel) the read that brings the newer live hold, so
+  // a restored hold appears only once read on this mount. A hold made here comes first regardless.
+  const freshRestore =
+    restored.isFetchedAfterMount && restored.isSuccess ? restored.data : undefined;
+  const liveHold = hold.data ?? freshRestore ?? undefined;
 
   if (orderId !== null) {
     return (
@@ -223,10 +256,10 @@ export function HoldControls({
       </OrderStatus>
     );
   }
-  if (hold.data !== undefined) {
+  if (liveHold !== undefined) {
     return (
       <ActiveHold
-        hold={hold.data}
+        hold={liveHold}
         seats={seats}
         onReleased={onReleased}
         onExpired={onExpired}

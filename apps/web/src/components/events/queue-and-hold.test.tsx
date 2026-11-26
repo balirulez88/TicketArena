@@ -73,6 +73,10 @@ let statusAnswers: Answer[];
 let holdAnswer: Answer;
 /** booking.releaseHold's answer; `null` releases the held seats. */
 let releaseAnswer: Answer | null;
+/** booking.activeHold's answer: what the server still holds for this session after a reload. */
+let activeHoldAnswer: Answer;
+/** While set, booking.activeHold answers only once it resolves: a slow restore read. */
+let activeHoldDelay: Promise<void> | null;
 let seatsHeld = false;
 let calls: { procedure: string; input: unknown }[];
 
@@ -119,6 +123,11 @@ async function fakeApi(
         seatsHeld = true;
       }
       return respond(holdAnswer);
+    case "booking.activeHold":
+      if (activeHoldDelay !== null) {
+        await activeHoldDelay;
+      }
+      return respond(activeHoldAnswer);
     case "booking.releaseHold":
       seatsHeld = false;
       return respond(releaseAnswer ?? { data: { ...heldHold(), status: "RELEASED" } });
@@ -146,18 +155,21 @@ const QUEUED_AT = (position: number, etaSeconds: number): Answer => ({
 const ADMITTED: Answer = { data: { status: "ADMITTED" } };
 const NOT_QUEUED: Answer = { data: { status: "NOT_QUEUED" } };
 
-function renderEventPage() {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+/** Renders the page; pass the previous render's client to remount as in-app navigation does. */
+function renderEventPage(
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+) {
   const trpcClient = createTRPCClient<AppRouter>({
     links: [httpLink({ url: "http://localhost/api/trpc", transformer: superjson, fetch: fakeApi })],
   });
-  render(
+  const { unmount } = render(
     <QueryClientProvider client={queryClient}>
       <TRPCProvider trpcClient={trpcClient} queryClient={queryClient}>
         <EventPage eventId={EVENT_ID} />
       </TRPCProvider>
     </QueryClientProvider>,
   );
+  return { queryClient, unmount };
 }
 
 async function advance(ms: number) {
@@ -169,7 +181,7 @@ async function advance(ms: number) {
 /** Renders the page already admitted and selects both seats. */
 async function admittedWithBothSeatsSelected() {
   statusAnswers = [ADMITTED];
-  renderEventPage();
+  const page = renderEventPage();
   await screen.findByRole("button", { name: /^Hold/ });
   fireEvent.click(
     await screen.findByRole("button", { name: "Section Floor, row A, seat 1, €99.00, available" }),
@@ -177,6 +189,7 @@ async function admittedWithBothSeatsSelected() {
   fireEvent.click(
     screen.getByRole("button", { name: "Section Floor, row A, seat 2, €99.00, available" }),
   );
+  return page;
 }
 
 beforeEach(() => {
@@ -184,6 +197,8 @@ beforeEach(() => {
   statusAnswers = [NOT_QUEUED];
   holdAnswer = { data: heldHold() };
   releaseAnswer = null;
+  activeHoldAnswer = { data: null };
+  activeHoldDelay = null;
   seatsHeld = false;
   calls = [];
   // Time is the faked boundary; it still advances on its own so Testing Library can wait.
@@ -454,6 +469,163 @@ describe("Hold countdown and release", () => {
 
     expect((await screen.findByRole("alert")).textContent).toContain("Your hold expired");
     expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
+  });
+});
+
+/** What activeHold returns: the holdSeats shape plus the seats priced. */
+function restoredHold(expiresInMs = 10 * 60_000) {
+  return {
+    ...heldHold(expiresInMs),
+    seats: [SEAT_A1, SEAT_A2].map((id) => ({ id, priceMinor: 9900, currency: "EUR" })),
+  };
+}
+
+describe("A reload restores the active hold", () => {
+  test("shows the session's live hold with its countdown, asking for this event", async () => {
+    activeHoldAnswer = { data: restoredHold(4 * 60_000) };
+    seatsHeld = true;
+    renderEventPage();
+
+    const hold = await screen.findByRole("region", { name: "Your hold" });
+    expect(hold.textContent).toContain("Section Floor, row A, seat 1");
+    expect(hold.textContent).toContain("Section Floor, row A, seat 2");
+    expect(within(hold).getByRole("form", { name: "Checkout" })).toBeTruthy();
+    const timer = within(hold).getByRole("timer");
+    expect(timer.textContent).toBe("4:00");
+    await advance(1000);
+    expect(timer.textContent).toBe("3:59");
+    expect(callsTo("booking.activeHold").map((call) => call.input)).toEqual([
+      { eventId: EVENT_ID },
+    ]);
+  });
+
+  test("a restored hold can be released, and it stays gone", async () => {
+    activeHoldAnswer = { data: restoredHold() };
+    seatsHeld = true;
+    renderEventPage();
+    const hold = await screen.findByRole("region", { name: "Your hold" });
+
+    fireEvent.click(within(hold).getByRole("button", { name: "Release seats" }));
+
+    await screen.findByText(/Seats released/);
+    expect(callsTo("booking.releaseHold").map((call) => call.input)).toEqual([{ holdId: HOLD_ID }]);
+    await advance(3000);
+    expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
+  });
+
+  test("a restored hold ends at its deadline like any other", async () => {
+    activeHoldAnswer = { data: restoredHold(5_000) };
+    seatsHeld = true;
+    renderEventPage();
+    await screen.findByRole("region", { name: "Your hold" });
+
+    await advance(5_000);
+
+    expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("Your hold expired");
+  });
+
+  test("with no live hold on the server (expired or released while closed) none is shown", async () => {
+    activeHoldAnswer = { data: null };
+    statusAnswers = [ADMITTED];
+    renderEventPage();
+
+    await screen.findByRole("button", { name: /^Hold/ });
+    await screen.findByRole("button", { name: "Section Floor, row A, seat 1, €99.00, available" });
+    expect(callsTo("booking.activeHold")).toHaveLength(1);
+    expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
+    expect(screen.queryByRole("timer")).toBeNull();
+  });
+
+  test("a hold made on the page is shown again after navigating away and back", async () => {
+    const { queryClient, unmount } = await admittedWithBothSeatsSelected();
+    fireEvent.click(screen.getByRole("button", { name: "Hold 2 seats" }));
+    await screen.findByRole("region", { name: "Your hold" });
+    // The first visit cached activeHold's `null`; the server now holds the seats.
+    activeHoldAnswer = { data: restoredHold() };
+
+    unmount();
+    renderEventPage(queryClient);
+
+    const hold = await screen.findByRole("region", { name: "Your hold" });
+    expect(within(hold).getByRole("button", { name: "Release seats" })).toBeTruthy();
+    expect(callsTo("booking.activeHold")).toHaveLength(2);
+  });
+
+  test("a hold ended in another tab is not brought back from the cache on remount", async () => {
+    activeHoldAnswer = { data: restoredHold() };
+    seatsHeld = true;
+    const { queryClient, unmount } = renderEventPage();
+    await screen.findByRole("region", { name: "Your hold" });
+    activeHoldAnswer = { data: null };
+
+    unmount();
+    renderEventPage(queryClient);
+
+    await vi.waitFor(() => expect(callsTo("booking.activeHold")).toHaveLength(2));
+    await vi.waitFor(() => expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull());
+  });
+
+  test("a restore answer that arrives after the hold was released does not bring it back", async () => {
+    let answerRestore: (() => void) | undefined;
+    activeHoldDelay = new Promise((resolve) => {
+      answerRestore = resolve;
+    });
+    await admittedWithBothSeatsSelected();
+    await vi.waitFor(() => expect(callsTo("booking.activeHold")).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "Hold 2 seats" }));
+    const hold = await screen.findByRole("region", { name: "Your hold" });
+    fireEvent.click(within(hold).getByRole("button", { name: "Release seats" }));
+    await screen.findByText(/Seats released/);
+
+    // The read started before the hold existed and answers as if it were still live.
+    activeHoldAnswer = { data: restoredHold() };
+    answerRestore?.();
+    await advance(1000);
+
+    expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
+    expect(screen.getByText(/Seats released/)).toBeTruthy();
+  });
+
+  test("a cached hold expiring during the remount read does not cancel the newer live hold", async () => {
+    activeHoldAnswer = { data: restoredHold(3000) };
+    seatsHeld = true;
+    const { queryClient, unmount } = renderEventPage();
+    await screen.findByRole("region", { name: "Your hold" });
+    unmount();
+
+    let answerRestore: (() => void) | undefined;
+    activeHoldDelay = new Promise((resolve) => {
+      answerRestore = resolve;
+    });
+    const newerHoldId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const newerSeatId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    activeHoldAnswer = {
+      data: {
+        ...restoredHold(),
+        id: newerHoldId,
+        seatIds: [newerSeatId],
+        seats: [{ id: newerSeatId, priceMinor: 9900, currency: "EUR" }],
+      },
+    };
+    renderEventPage(queryClient);
+    await vi.waitFor(() => expect(callsTo("booking.activeHold")).toHaveLength(2));
+
+    // The cached hold's deadline passes while the fresh read is still out.
+    await advance(4000);
+    answerRestore?.();
+    await advance(1000);
+
+    const hold = await screen.findByRole("region", { name: "Your hold" });
+    expect(hold.textContent).toContain("a seat no longer on the map");
+    expect(hold.textContent).not.toContain("row A, seat 1");
+    expect(screen.queryByText(/Your hold expired/)).toBeNull();
+    fireEvent.click(within(hold).getByRole("button", { name: "Release seats" }));
+    await vi.waitFor(() =>
+      expect(callsTo("booking.releaseHold").map((call) => call.input)).toEqual([
+        { holdId: newerHoldId },
+      ]),
+    );
   });
 });
 

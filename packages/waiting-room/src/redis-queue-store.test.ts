@@ -33,6 +33,9 @@ describeQueueStoreContract("node-redis", redis.prefix, {
       },
     };
   },
+  async deleteKey(key) {
+    await client.del(key);
+  },
 });
 
 describe("RedisQueueStore", () => {

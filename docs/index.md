@@ -59,7 +59,8 @@ below shows what is built.
   of native buttons with accessible names; up to 6 seats selectable in a Zustand store, server
   data via TanStack Query). The event page is also the queue room (join, position and ETA,
   `queue.status` polled every 3 s) and, once admitted, holds the selection with a countdown to
-  `holdExpiresAt`, a release button and a distinct message per hold refusal; the seat map and
+  `holdExpiresAt`, a release button and a distinct message per hold refusal (a reload restores a
+  live hold through `booking.activeHold`); the seat map and
   `queue.status` keep polling as the heartbeat. The live hold carries the checkout form (zod
   validated email and optional phone; one `idempotencyKey` per checkout attempt, reused on
   retries; distinct `HOLD_EXPIRED` and `IDEMPOTENCY_KEY_REUSED` messages), and a placed order is
@@ -80,7 +81,7 @@ below shows what is built.
   [architecture/](architecture/index.md#identity).
 - `packages/db`: Prisma 7 on the Neon serverless adapter; the `outbox_events` table and the seeded catalog (venues, sections, rows, events,
   per-event seats). `events.list`, `events.get` and `seats.map` serve it. The `holds` table backs
-  `booking.holdSeats` / `booking.getHold` / `booking.releaseHold` (`packages/booking`), which write
+  `booking.holdSeats` / `booking.getHold` / `booking.activeHold` / `booking.releaseHold` (`packages/booking`), which write
   `seat.held` and `hold.released` outbox events; the worker's sweeper expires abandoned holds every 15 s and writes `hold.expired`, and expires unpaid orders at `paymentDeadline + 60 s` (`order.expired`, seats freed); `orders` and `order_lines` back `booking.placeOrder` / `booking.getOrder`, which write
   `order.placed`; envelope schemas live in `packages/contracts`.
 - `packages/messaging` and `apps/worker`: the `MessageBus` port with its JetStream adapter, the outbox relay (250 ms, batch of 100), the consumer runner, the sweeper, the waiting-room admission ticker and reaper, and the worker app with `/health`.
@@ -88,8 +89,8 @@ below shows what is built.
   REST adapters (the same atomic Lua scripts and key layout, configurable key prefix, one shared
   contract suite run against both) and the schedule `AdmissionPolicy`; served as
   `queue.join` / `queue.status` / `queue.leave` over `REDIS_URL`, with the admission token (JWT, `ADMISSION_SECRET`) gating `booking.holdSeats` (node-redis, every call bounded: a Redis outage fails queue calls fast with `SERVICE_UNAVAILABLE`, issues no admission, skips only the token's revocation lookup, and never stops booking or the worker; choosing Upstash in
-  production belongs to deployment). The worker's admission ticker (1 s) and slot reaper (15 s)
-  run on the same store. See
+  production belongs to deployment). The worker's admission ticker (1 s) and slot reaper (15 s, in
+  bounded calls of at most 100 slots, up to 50 per event per pass) run on the same store. See
   [architecture/waiting-room](architecture/waiting-room.md).
 - Deployment ([operations/](operations/deployment.md)): `.github/workflows/deploy.yml` runs after
   CI passes on `main`: `prisma migrate deploy` on the direct Neon URL, then the web app to Vercel

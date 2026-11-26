@@ -89,6 +89,8 @@ let placeOrderAnswers: Answer[];
 /** getOrder answers in order; the last one repeats. */
 let getOrderAnswers: Answer[];
 let holdIds: string[];
+/** booking.activeHold's answer: `null` unless a test reloads into a live hold. */
+let activeHold: unknown;
 /** While true, `seats.map` fails like a server error, as a background refresh can. */
 let seatMapDown: boolean;
 let calls: { procedure: string; input: unknown }[];
@@ -137,6 +139,8 @@ async function fakeApi(
       return respond({ data: { status: "ADMITTED" } });
     case "booking.holdSeats":
       return respond({ data: hold(holdIds.shift() ?? HOLD_ID) });
+    case "booking.activeHold":
+      return respond({ data: activeHold });
     case "booking.releaseHold":
       return respond({ data: { ...hold(HOLD_ID), status: "RELEASED" } });
     case "booking.placeOrder":
@@ -203,6 +207,7 @@ beforeEach(() => {
   placeOrderAnswers = [{ data: order("PENDING_PAYMENT") }];
   getOrderAnswers = [{ data: order("PENDING_PAYMENT") }];
   holdIds = [HOLD_ID, SECOND_HOLD_ID];
+  activeHold = null;
   seatMapDown = false;
   calls = [];
   keyCount = 0;
@@ -542,6 +547,30 @@ describe("Checkout at the hold deadline", () => {
 
     expect((await screen.findByRole("alert")).textContent).toContain("Your hold expired");
     expect(placeOrderKeys()).toHaveLength(0);
+  });
+});
+
+describe("Checkout after a reload", () => {
+  test("a hold restored by activeHold checks out as before", async () => {
+    activeHold = {
+      ...hold(HOLD_ID),
+      seats: [{ id: SEAT_A1, priceMinor: 9900, currency: "EUR" }],
+    };
+    renderWithApi(<EventPage eventId={EVENT_ID} />);
+    const form = await screen.findByRole("form", { name: "Checkout" });
+
+    fillContact(form, "alice@example.com");
+    submit(form);
+
+    await screen.findByRole("region", { name: "Order status" });
+    expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
+    expect(callsTo("booking.placeOrder").map((call) => call.input)).toEqual([
+      {
+        holdId: HOLD_ID,
+        contact: { email: "alice@example.com" },
+        idempotencyKey: "aaaaaaaa-aaaa-4aaa-8aaa-000000000001",
+      },
+    ]);
   });
 });
 

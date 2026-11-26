@@ -59,7 +59,8 @@ below shows what is built.
   of native buttons with accessible names; up to 6 seats selectable in a Zustand store, server
   data via TanStack Query). The event page is also the queue room (join, position and ETA,
   `queue.status` polled every 3 s) and, once admitted, holds the selection with a countdown to
-  `holdExpiresAt`, a release button and a distinct message per hold refusal; the seat map and
+  `holdExpiresAt`, a release button and a distinct message per hold refusal (a reload restores a
+  live hold through `booking.activeHold`); the seat map and
   `queue.status` keep polling as the heartbeat. The live hold carries the checkout form (zod
   validated email and optional phone; one `idempotencyKey` per checkout attempt, reused on
   retries; distinct `HOLD_EXPIRED` and `IDEMPOTENCY_KEY_REUSED` messages), and a placed order is
@@ -80,7 +81,7 @@ below shows what is built.
   [architecture/](architecture/index.md#identity).
 - `packages/db`: Prisma 7 on the Neon serverless adapter; the `outbox_events` table and the seeded catalog (venues, sections, rows, events,
   per-event seats). `events.list`, `events.get` and `seats.map` serve it. The `holds` table backs
-  `booking.holdSeats` / `booking.getHold` / `booking.releaseHold` (`packages/booking`), which write
+  `booking.holdSeats` / `booking.getHold` / `booking.activeHold` / `booking.releaseHold` (`packages/booking`), which write
   `seat.held` and `hold.released` outbox events; the worker's sweeper expires abandoned holds every 15 s and writes `hold.expired`, and expires unpaid orders at `paymentDeadline + 60 s` (`order.expired`, seats freed); `orders` and `order_lines` back `booking.placeOrder` / `booking.getOrder`, which write
   `order.placed`; envelope schemas live in `packages/contracts`.
 - `packages/messaging` and `apps/worker`: the `MessageBus` port with its JetStream adapter, the outbox relay (250 ms, batch of 100), the consumer runner, the sweeper, the waiting-room admission ticker and reaper, and the worker app with `/health`.

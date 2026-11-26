@@ -73,6 +73,8 @@ let statusAnswers: Answer[];
 let holdAnswer: Answer;
 /** booking.releaseHold's answer; `null` releases the held seats. */
 let releaseAnswer: Answer | null;
+/** booking.activeHold's answer: what the server still holds for this session after a reload. */
+let activeHoldAnswer: Answer;
 let seatsHeld = false;
 let calls: { procedure: string; input: unknown }[];
 
@@ -119,6 +121,8 @@ async function fakeApi(
         seatsHeld = true;
       }
       return respond(holdAnswer);
+    case "booking.activeHold":
+      return respond(activeHoldAnswer);
     case "booking.releaseHold":
       seatsHeld = false;
       return respond(releaseAnswer ?? { data: { ...heldHold(), status: "RELEASED" } });
@@ -184,6 +188,7 @@ beforeEach(() => {
   statusAnswers = [NOT_QUEUED];
   holdAnswer = { data: heldHold() };
   releaseAnswer = null;
+  activeHoldAnswer = { data: null };
   seatsHeld = false;
   calls = [];
   // Time is the faked boundary; it still advances on its own so Testing Library can wait.
@@ -454,6 +459,72 @@ describe("Hold countdown and release", () => {
 
     expect((await screen.findByRole("alert")).textContent).toContain("Your hold expired");
     expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
+  });
+});
+
+/** What activeHold returns: the holdSeats shape plus the seats priced. */
+function restoredHold(expiresInMs = 10 * 60_000) {
+  return {
+    ...heldHold(expiresInMs),
+    seats: [SEAT_A1, SEAT_A2].map((id) => ({ id, priceMinor: 9900, currency: "EUR" })),
+  };
+}
+
+describe("A reload restores the active hold", () => {
+  test("shows the session's live hold with its countdown, asking for this event", async () => {
+    activeHoldAnswer = { data: restoredHold(4 * 60_000) };
+    seatsHeld = true;
+    renderEventPage();
+
+    const hold = await screen.findByRole("region", { name: "Your hold" });
+    expect(hold.textContent).toContain("Section Floor, row A, seat 1");
+    expect(hold.textContent).toContain("Section Floor, row A, seat 2");
+    expect(within(hold).getByRole("form", { name: "Checkout" })).toBeTruthy();
+    const timer = within(hold).getByRole("timer");
+    expect(timer.textContent).toBe("4:00");
+    await advance(1000);
+    expect(timer.textContent).toBe("3:59");
+    expect(callsTo("booking.activeHold").map((call) => call.input)).toEqual([
+      { eventId: EVENT_ID },
+    ]);
+  });
+
+  test("a restored hold can be released, and it stays gone", async () => {
+    activeHoldAnswer = { data: restoredHold() };
+    seatsHeld = true;
+    renderEventPage();
+    const hold = await screen.findByRole("region", { name: "Your hold" });
+
+    fireEvent.click(within(hold).getByRole("button", { name: "Release seats" }));
+
+    await screen.findByText(/Seats released/);
+    expect(callsTo("booking.releaseHold").map((call) => call.input)).toEqual([{ holdId: HOLD_ID }]);
+    await advance(3000);
+    expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
+  });
+
+  test("a restored hold ends at its deadline like any other", async () => {
+    activeHoldAnswer = { data: restoredHold(5_000) };
+    seatsHeld = true;
+    renderEventPage();
+    await screen.findByRole("region", { name: "Your hold" });
+
+    await advance(5_000);
+
+    expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("Your hold expired");
+  });
+
+  test("with no live hold on the server (expired or released while closed) none is shown", async () => {
+    activeHoldAnswer = { data: null };
+    statusAnswers = [ADMITTED];
+    renderEventPage();
+
+    await screen.findByRole("button", { name: /^Hold/ });
+    await screen.findByRole("button", { name: "Section Floor, row A, seat 1, €99.00, available" });
+    expect(callsTo("booking.activeHold")).toHaveLength(1);
+    expect(screen.queryByRole("region", { name: "Your hold" })).toBeNull();
+    expect(screen.queryByRole("timer")).toBeNull();
   });
 });
 

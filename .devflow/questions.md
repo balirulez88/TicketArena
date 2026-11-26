@@ -754,3 +754,27 @@ Is data.seatIds required by the type when domainCode is SEAT_UNAVAILABLE?
 Assumed: No: both optional on one object type; the UI falls back to [] so domainCode stays readable without narrowing a union
 
 Answer: Accepted (2026-11-24): the optional fields with the empty-array UI fallback meet the ticket. A discriminated union would give a stronger static guarantee but is not needed for this scope.
+
+## 2026-11-26 12:06 ticket 68
+
+What is 'the current session' for activeHold?
+
+Assumed: Both sessionId and buyerKey must match, so another session of the same signed-in user never gets the hold (stricter than getHold, which matches buyerKey only)
+
+Answer: (open)
+
+## 2026-11-26 12:06 ticket 68
+
+Several live holds for one event: which does activeHold return, and is it admission-gated?
+
+Assumed: The one with the latest holdExpiresAt; public (not admission-gated) since a hold outlives the 30-minute admission; shape is holdSeats output plus seats [{id, priceMinor, currency}]
+
+Answer: (open)
+
+## 2026-11-26 12:06 ticket 68
+
+When does the UI read activeHold?
+
+Assumed: Once on mount, no refetch on focus; ending a hold on the page sets the cached result to null; a restored hold already past holdExpiresAt ends at once with the usual expiry alert
+
+Answer: (open)

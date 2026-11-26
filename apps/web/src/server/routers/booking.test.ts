@@ -250,6 +250,44 @@ describe("booking.getHold", () => {
   });
 });
 
+describe("booking.activeHold", () => {
+  test("returns the session's live hold for the event, shaped as holdSeats plus priced seats", async () => {
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const seatId = seatIds[0] ?? "";
+    const hold = await caller(alice).booking.holdSeats({ eventId, seatIds: [seatId] });
+
+    const active = await caller(alice).booking.activeHold({ eventId });
+
+    expect(active).toMatchObject({
+      ...hold,
+      seats: [{ id: seatId, priceMinor: expect.any(Number), currency: "EUR" }],
+    });
+  });
+
+  test("is null for another session, after expiry (swept or not) and after release", async () => {
+    const { eventId, seatIds } = await freeSeats(db(), 1);
+    const hold = await caller(alice).booking.holdSeats({ eventId, seatIds });
+
+    expect(await caller(bob).booking.activeHold({ eventId })).toBeNull();
+    expect(await caller(alice, hold.holdExpiresAt).booking.activeHold({ eventId })).toBeNull();
+    await caller(alice).booking.releaseHold({ holdId: hold.id });
+    expect(await caller(alice).booking.activeHold({ eventId })).toBeNull();
+  });
+
+  test("needs no admission, since a hold outlives it: an unadmitted session gets null", async () => {
+    const stranger: Principal = { kind: "guest", sessionId: randomUUID().replaceAll("-", "") };
+
+    expect(await caller(stranger).booking.activeHold({ eventId: await demoEventId() })).toBeNull();
+  });
+
+  test("rejects a malformed event id naming the field", async () => {
+    await expect(caller(alice).booking.activeHold({ eventId: "nope" })).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining("eventId"),
+    });
+  });
+});
+
 describe("booking.releaseHold", () => {
   test("releases the owner's hold and another buyer can hold the seat at once", async () => {
     const { eventId, seatIds } = await freeSeats(db(), 1);

@@ -35,6 +35,8 @@ const holdSeatsInput = z.object({
 
 const getHoldInput = z.object({ holdId: z.uuid() });
 
+const activeHoldInput = z.object({ eventId: z.uuid() });
+
 const releaseHoldInput = z.object({ holdId: z.uuid() });
 
 const placeOrderInput = z.object({
@@ -67,6 +69,13 @@ const holdOutput = z.object({
   holdExpiresAt: z.date(),
   correlationId: z.uuid(),
 });
+
+// holdOutput plus the seats priced, so the page can show a hold it did not get from holdSeats.
+const activeHoldOutput = holdOutput
+  .extend({
+    seats: z.array(z.object({ id: z.uuid(), priceMinor: z.number().int(), currency: z.string() })),
+  })
+  .nullable();
 
 function toBuyer(principal: Principal): Buyer {
   return {
@@ -138,6 +147,14 @@ export const bookingRouter = createTRPCRouter({
       }
       return hold;
     }),
+
+  // Public, not admitted: a hold outlives the admission, and a reload must still find it.
+  activeHold: publicProcedure
+    .input(activeHoldInput)
+    .output(activeHoldOutput)
+    .query(async ({ ctx, input }) =>
+      bookingServiceFor(ctx).activeHold(toBuyer(ctx.principal), input.eventId),
+    ),
 
   // Owner-only and only while the hold is HELD and unexpired; does not touch the buyer's waiting-room slot.
   releaseHold: publicProcedure

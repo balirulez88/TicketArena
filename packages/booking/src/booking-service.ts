@@ -70,6 +70,17 @@ export interface HoldView {
   readonly correlationId: string;
 }
 
+export interface HeldSeatView {
+  readonly id: string;
+  readonly priceMinor: number;
+  readonly currency: string;
+}
+
+/** A `HoldView` plus its seats priced, for a page that lost the `holdSeats` result. */
+export interface ActiveHoldView extends HoldView {
+  readonly seats: HeldSeatView[];
+}
+
 export interface Contact {
   readonly email: string;
   readonly phone?: string | undefined;
@@ -99,6 +110,12 @@ export interface BookingService {
   holdSeats(buyer: Buyer, eventId: string, seatIds: readonly string[]): Promise<HoldView>;
   /** `null` for an unknown hold and for someone else's: existence is not leaked. */
   getHold(buyer: Buyer, holdId: string): Promise<HoldView | null>;
+  /**
+   * The session's latest `HELD` hold for the event with `T < holdExpiresAt`, or `null`. Matched
+   * on `buyer.sessionId` as well as the buyer key, so a signed-in user's other session never sees
+   * it. An expired hold the sweeper has not reached yet is `null`, as everywhere else.
+   */
+  activeHold(buyer: Buyer, eventId: string): Promise<ActiveHoldView | null>;
   /** Idempotent per `(buyer.sessionId, idempotencyKey)`: a replay returns the original order. */
   placeOrder(
     buyer: Buyer,
@@ -1359,6 +1376,40 @@ export function createBookingService({
         status: hold.status,
         holdExpiresAt: hold.holdExpiresAt,
         correlationId: hold.correlationId,
+      };
+    },
+
+    async activeHold(buyer, eventId) {
+      const hold = await db.hold.findFirst({
+        where: {
+          eventId,
+          sessionId: buyer.sessionId,
+          buyerKey: buyer.buyerKey,
+          status: "HELD",
+          holdExpiresAt: { gt: clock.now() },
+        },
+        orderBy: { holdExpiresAt: "desc" },
+        include: {
+          seats: {
+            select: {
+              id: true,
+              row: { select: { section: { select: { priceMinor: true, currency: true } } } },
+            },
+            orderBy: { id: "asc" },
+          },
+        },
+      });
+      if (hold === null) {
+        return null;
+      }
+      return {
+        id: hold.id,
+        eventId: hold.eventId,
+        seatIds: hold.seats.map((seat) => seat.id),
+        status: "HELD",
+        holdExpiresAt: hold.holdExpiresAt,
+        correlationId: hold.correlationId,
+        seats: hold.seats.map((seat) => ({ id: seat.id, ...seat.row.section })),
       };
     },
   };

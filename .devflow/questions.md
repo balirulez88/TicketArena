@@ -858,3 +858,11 @@ How are repeated identical relay/consumer failures rate-limited?
 Assumed: First failure and any new cause (error name+message) log at error; the same cause logs at most once per 60 s (FAILURE_LOG_WINDOW_MS) with failures/suppressed counts; recovery logs one info line with failures and outageMs; shared by relay and consumer runner
 
 Answer: (open)
+
+## 2026-11-26 19:53 ticket 24
+
+What delay applies past the 4th delivery?
+
+Assumed: 2m repeats for every later delivery; ending retries is ticket 25's DLQ gate (deliveryCount > 5), which goes before the handler and leaves RETRY_DELAYS_MS alone
+
+Answer: (open)

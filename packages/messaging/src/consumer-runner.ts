@@ -7,7 +7,8 @@ import type { MessageBus, ReceivedMessage } from "./message-bus.js";
 import { type ServiceName, serviceStore } from "./service-store.js";
 
 const PG_UNIQUE_VIOLATION = "P2002";
-// ADR 0011 transient-failure schedule, indexed by delivery count; the last entry repeats.
+// ADR 0011 transient-failure schedule, indexed by delivery count. Past the 4th delivery the last
+// entry repeats; ending retries is the DLQ gate's job (deliveryCount > 5), not this table's.
 const RETRY_DELAYS_MS = [1_000, 5_000, 30_000, 120_000];
 const FETCH_BATCH = 10;
 // JetStream rejects pull requests that expire sooner than one second.
@@ -59,6 +60,7 @@ export interface ConsumerRunnerOptions {
   ) => Promise<HandlerOutcome | undefined>;
   readonly logger?: Logger;
   readonly ackWaitMs?: number;
+  /** Delay for the `nak` of a failed delivery; defaults to the ADR 0011 schedule. */
   readonly retryDelayMs?: (deliveryCount: number) => number;
 }
 
@@ -139,17 +141,21 @@ export async function createConsumerRunner(
       message.ack();
       return;
     }
+    // JetStream's deliveryCount is the only attempt counter (ADR 0011): it also counts crashes and
+    // AckWait expiries, and survives restarts, which an in-process counter would not.
+    const delayMs = retryDelayMs(deliveryCount);
     if (error instanceof Deferred) {
       const { outcome, reason } = error.result;
       if (outcome === "poison") {
-        log.error({ reason, deliveryCount }, "poison message; no DLQ yet, retrying");
+        log.error({ reason, deliveryCount, delayMs }, "poison message; no DLQ yet, retrying");
       } else {
-        log.info({ reason, deliveryCount }, "message not applicable yet; retrying");
+        log.info({ reason, deliveryCount, delayMs }, "message not applicable yet; retrying");
       }
     } else {
-      log.error({ err: error, deliveryCount }, "handler failed; retrying");
+      log.error({ err: error, deliveryCount, delayMs }, "handler failed; retrying");
     }
-    message.nak(retryDelayMs(deliveryCount));
+    // Always a delayed nak, never a bare one: JetStream redelivers a plain nak immediately.
+    message.nak(delayMs);
   }
 
   async function pollOnce(): Promise<number> {

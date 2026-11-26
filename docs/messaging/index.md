@@ -65,8 +65,14 @@ run during a Redis outage (see [waiting room](../architecture/waiting-room.md#re
   (`{ outcome: "retry" | "poison", reason }`): the transaction rolls back (no `processed_messages` row, no
   outbox writes) and the message is `nak`ed with the same delay; `poison` is logged as an error. Until the DLQ
   exists, poison is redelivered rather than `term`ed, because ADR 0011 forbids `term` without a DLQ copy.
-  A handler (or `beforeTransaction`) failure is logged at `error` with the error and `deliveryCount` before the
-  `nak`. A failed poll (the broker is unreachable for `fetch`, or anything else escapes a batch) is logged at
+  A handler (or `beforeTransaction`) failure is logged at `error` with the error, `deliveryCount` and the chosen
+  `delayMs` before the `nak`.
+  **Retry schedule:** every failed delivery ends in a delayed `nak` (a bare `nak` would redeliver immediately), with the
+  delay picked by JetStream's `deliveryCount`, the only attempt counter (it also counts crashes and `AckWait`
+  expiries and survives restarts): 1 s, 5 s, 30 s, 2 min, and 2 min for every later delivery until the DLQ gate
+  ends retries. The policy lives in code, not in a consumer `BackOff`. A handler (or `beforeTransaction` step) that
+  can outlast `AckWait` calls `message.working()` to keep the delivery from expiring and being redelivered to
+  another worker. AT-27, `consumer-runner-retry.test.ts`. A failed poll (the broker is unreachable for `fetch`, or anything else escapes a batch) is logged at
   `error` with the cause (`consumer poll failed`, same rate limit and `consumer poll recovered` line as the
   relay) and the loop polls again after 1 s.
   The DLQ gate (ticket 25), which would end the endless redelivery of a poison message, and recovery from ADR 0011 are not built yet.

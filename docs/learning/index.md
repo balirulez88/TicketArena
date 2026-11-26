@@ -28,3 +28,4 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [26: Stream backpressure és topology hardening](26-stream-backpressure-and-topology.md): `discard: new` backpressure, outbox `PENDING` marad, szűk catch az `ensureTopology()`-ban, outbox lag
 - [43: Konfiguráció injektálása és venue migráció](43-config-injection-and-venue-migration-hardening.md): seed parancs a worker appban `parseSeedEnv`-vel, `@ticketarena/db/seed` entry point, lusta `ctx.db()`, duplikált venue-k összevonása a unique index előtt
 - [45: Worker loop hibák naplózása](45-worker-loop-error-reporting.md): `FailureReporter`, ok szerinti rate limit (60 s), recovery sor, handler hiba `deliveryCount`-tal a `nak` előtt
+- [24: Késleltetett retry ütemezés](24-delayed-retry-schedule.md): `nak(delay)` 1 s / 5 s / 30 s / 2 m, `deliveryCount` az egyetlen számláló, nincs `BackOff`, `working()`

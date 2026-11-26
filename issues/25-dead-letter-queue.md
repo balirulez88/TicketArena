@@ -4,7 +4,7 @@
 
 **Blocked by:** 24, 49 (Prisma schema drift), 59 (terminal outbox failures)
 
-**Status:** deferred
+**Status:** ready-for-agent
 
 **Status reason:** retry, DLQ and recovery after the MVP (2026-11-18)
 

@@ -4,7 +4,7 @@
 
 **Blocked by:** 20 (refund execution)
 
-**Status:** deferred
+**Status:** ready-for-agent
 
 **Status reason:** after the MVP, but it must land before outbox retention (ticket 27) and the refund reconciler (ticket 23), which both depend on it
 

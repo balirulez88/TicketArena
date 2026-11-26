@@ -4,7 +4,7 @@
 
 **Blocked by:** 06
 
-**Status:** deferred
+**Status:** ready-for-agent
 
 **Status reason:** after the MVP (scope cut 2026-11-18)
 

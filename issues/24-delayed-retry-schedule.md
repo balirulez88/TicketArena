@@ -4,7 +4,7 @@
 
 **Blocked by:** 06, 45 (worker loop error reporting)
 
-**Status:** deferred
+**Status:** ready-for-agent
 
 **Status reason:** retry, DLQ and recovery after the MVP (2026-11-18)
 

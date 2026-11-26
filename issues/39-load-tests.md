@@ -4,7 +4,7 @@
 
 **Blocked by:** 31, 54, 55, 56, 57 (ticket 12 was split into 54–57; every part must be done)
 
-**Status:** deferred
+**Status:** ready-for-agent
 
 **Status reason:** after the MVP (scope cut 2026-11-18)
 

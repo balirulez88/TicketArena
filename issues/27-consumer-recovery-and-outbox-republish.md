@@ -4,7 +4,7 @@
 
 **Blocked by:** 25, 44 (payment latency outside the runner transaction), 49 (Prisma schema drift), 59 (terminal outbox failures), 70 (durable orphan refund obligation, before any outbox retention)
 
-**Status:** deferred
+**Status:** ready-for-agent
 
 **Status reason:** retry, DLQ and recovery after the MVP (2026-11-18)
 

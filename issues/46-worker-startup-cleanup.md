@@ -6,7 +6,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** deferred
+**Status:** ready-for-agent
 
 **Status reason:** hardening, after the MVP (scope cut 2026-11-18)
 

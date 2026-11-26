@@ -4,7 +4,7 @@
 
 **Blocked by:** 35, 25, 23, 26
 
-**Status:** deferred
+**Status:** ready-for-agent
 
 **Status reason:** admin message health and refunds after the MVP (2026-11-18)
 

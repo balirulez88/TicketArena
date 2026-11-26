@@ -4,7 +4,9 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-26 on devflow/run-202611261153 (run 202611261153)
 
 - [ ] One reap call examines at most a configured batch of slots (idle candidates selected by `lastSeenAt` score, expired admissions by expiry) and reports whether more remain; the reaper repeats calls until none remain or the pass budget is spent.
 - [ ] A contract test on both `QueueStore` adapters shows that one call frees at most the batch size from a set larger than it, and that repeated calls free every idle or expired slot and nothing else.

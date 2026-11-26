@@ -62,10 +62,12 @@ export interface QueueStore {
   /** Frees the member's slot and revokes its admission `jti`; `true` when it held a slot. */
   releaseSlot(eventId: string, member: string): Promise<boolean>;
   /**
-   * Frees every slot last seen before `idleBefore` or whose admission expired by `now`, revoking
-   * their `jti`s, and drops expired `jti`s; returns the freed members.
+   * One bounded reap step, atomic: examines at most `batchSize` candidates, first slots last seen
+   * before `idleBefore` (oldest first), then `jti`s expired by `now` (earliest first). Each freed
+   * slot has its `jti` revoked in the same step; an expired `jti` without a slot is dropped. The
+   * reply names the freed members and whether candidates remain, so the caller repeats it.
    */
-  reap(eventId: string, cutoffs: ReapCutoffs): Promise<readonly string[]>;
+  reap(eventId: string, request: ReapRequest): Promise<ReapBatch>;
   /**
    * Gives the member a slot and the admission `jti` valid until `now + admissionTtlMs`, outside
    * the queue and the token bucket (the queue has closed: admission is immediate), and removes it
@@ -120,9 +122,23 @@ export interface Admission {
   readonly jti: string;
 }
 
-export interface ReapCutoffs {
+export interface ReapRequest {
   readonly now: Date;
   readonly idleBefore: Date;
+  /** Most candidates (idle slots plus expired admissions) one call examines; a positive integer. */
+  readonly batchSize: number;
+}
+
+export interface ReapBatch {
+  readonly freed: readonly string[];
+  /** `true` when idle slots or expired admissions are left for another call. */
+  readonly more: boolean;
+}
+
+/** How much one reaper pass may do per event: at most `maxBatches` calls of `batchSize`. */
+export interface ReapBudget {
+  readonly batchSize: number;
+  readonly maxBatches: number;
 }
 
 export interface QueueCounts {

@@ -8,6 +8,7 @@ import type {
   QueueCounts,
   QueueStore,
   Random,
+  ReapBudget,
   SlotAdmission,
 } from "./ports";
 
@@ -16,6 +17,13 @@ export const SLOT_IDLE_TIMEOUT_MS = 90_000;
 
 /** An admission is valid this long from `admittedAt`, fixed, never renewed (ADR 0008). */
 export const ADMISSION_TTL_MS = 30 * 60_000;
+
+/**
+ * One reap call examines at most 100 candidates, so the atomic script never blocks the event's
+ * other queue operations for long; a pass makes up to 50 calls (5,000 slots per event every 15 s)
+ * and leaves the rest to the next pass.
+ */
+export const REAP_BUDGET: ReapBudget = { batchSize: 100, maxBatches: 50 };
 
 export interface QueuedView {
   readonly status: "QUEUED";
@@ -59,7 +67,10 @@ export interface QueueService {
    * one before the event's `onSaleAt`.
    */
   admitTick(event: EventSchedule, limits: AdmissionLimits): Promise<readonly Admission[]>;
-  /** Frees slots idle for over 90 s or with an expired admission; returns the freed sessions. */
+  /**
+   * One reaper pass: frees slots idle for over 90 s or with an expired admission, in bounded
+   * store calls until none remain or the reap budget is spent; returns the freed sessions.
+   */
   reap(eventId: string): Promise<readonly string[]>;
   /** Frees the session's slot and revokes its admission (order placed); `true` when it held one. */
   releaseSlot(eventId: string, sessionId: string): Promise<boolean>;
@@ -78,6 +89,8 @@ export interface QueueServiceDeps {
   readonly newId: () => string;
   /** Expected admissions per second; used only for the ETA. */
   readonly admitRatePerSecond: number;
+  /** Bounds one reaper pass; defaults to `REAP_BUDGET`. */
+  readonly reapBudget?: ReapBudget;
 }
 
 export function createQueueService(deps: QueueServiceDeps): QueueService {
@@ -159,12 +172,26 @@ export function createQueueService(deps: QueueServiceDeps): QueueService {
       });
     },
 
-    reap(eventId) {
+    async reap(eventId) {
       const now = deps.clock.now();
-      return deps.store.reap(eventId, {
+      const budget = deps.reapBudget ?? REAP_BUDGET;
+      const request = {
         now,
         idleBefore: new Date(now.getTime() - SLOT_IDLE_TIMEOUT_MS),
-      });
+        batchSize: budget.batchSize,
+      };
+      // Separate calls, not one long script: other queue operations on the event run between
+      // them. Every call is atomic on its own, so a slot heartbeated or re-admitted in between is
+      // judged by its new state. One `now` keeps the pass's cutoffs fixed.
+      const freed: string[] = [];
+      for (let call = 0; call < budget.maxBatches; call += 1) {
+        const batch = await deps.store.reap(eventId, request);
+        freed.push(...batch.freed);
+        if (!batch.more) {
+          break;
+        }
+      }
+      return freed;
     },
 
     releaseSlot(eventId, sessionId) {

@@ -9,6 +9,7 @@ import {
   createScheduleAdmissionPolicy,
   type EventSchedule,
   type Random,
+  type ReapBudget,
 } from "./index";
 
 const redis = setupTestRedis();
@@ -49,7 +50,12 @@ function scriptedRandom(values: readonly number[]): Random {
   };
 }
 
-function serviceAt(clock: { now: Date }, random: Random = scriptedRandom([]), admitRate = 10) {
+function serviceAt(
+  clock: { now: Date },
+  random: Random = scriptedRandom([]),
+  admitRate = 10,
+  reapBudget?: ReapBudget,
+) {
   return createQueueService({
     store: createRedisQueueStore(client, { prefix: `${redis.prefix}service:` }),
     policy: createScheduleAdmissionPolicy(),
@@ -57,6 +63,7 @@ function serviceAt(clock: { now: Date }, random: Random = scriptedRandom([]), ad
     random,
     newId: randomUUID,
     admitRatePerSecond: admitRate,
+    ...(reapBudget === undefined ? {} : { reapBudget }),
   });
 }
 
@@ -391,6 +398,27 @@ describe("QueueService admission (ticker, slots, reaper)", () => {
 
     expect(await service.reap(event.id)).toEqual(["s1"]);
     expect(await service.isAdmitted(event.id, admission?.jti ?? "")).toBe(false);
+  });
+
+  test("one reap pass repeats bounded store calls until none remain or the pass budget is spent", async () => {
+    const clock = { now: AFTER_ON_SALE };
+    const event = schedule();
+    const service = serviceAt(clock, scriptedRandom([]), 10, { batchSize: 2, maxBatches: 2 });
+    const sessions = ["s1", "s2", "s3", "s4", "s5"];
+    for (const sessionId of sessions) {
+      await service.join(event, sessionId);
+    }
+    await service.admitTick(event, { admitRate: 5, maxActive: 10 });
+    clock.now = atOffset(90_001);
+
+    // Two calls of two slots each: four freed, one left for the next pass.
+    const firstPass = await service.reap(event.id);
+    expect(firstPass).toHaveLength(4);
+    expect(await service.counts(event.id)).toEqual({ queued: 0, active: 1 });
+
+    const secondPass = await service.reap(event.id);
+    expect([...firstPass, ...secondPass].sort()).toEqual(sessions);
+    expect(await service.reap(event.id)).toEqual([]);
   });
 
   test("AT-39: leave frees the slot and revokes the admission, making room for the next buyer", async () => {

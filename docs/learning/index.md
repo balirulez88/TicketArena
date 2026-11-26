@@ -24,3 +24,4 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [38: Deployment](38-deployment.md): pooled Neon URL a webnek, direct a migrációnak, `workflow_run` deploy a CI után, Vercel git deploy kikapcsolva, Fly privát hálózat, JetStream volume-on
 - [67: Típusos domain hibakódok](67-typed-domain-error-codes.md): `cause`-ból `data.domainCode` és `seatIds` az error formatterben, explicit lista, stack soha a `data`-ban, a UI nem parsol üzenetet
 - [68: Az oldalújratöltés visszaállítja az aktív holdot](68-reload-restores-the-active-hold.md): `activeHold` query, szerver dönti el a lejáratot, `sessionId` + `buyerKey`, egyszeri olvasás és cache törlés
+- [69: Korlátos reaping az aktív slotokon](69-bounded-reaping.md): kötegelt atomic Lua `reap` indexekből `LIMIT`-tel, `holders` hash, pass budget, AT-39 egy lépésben

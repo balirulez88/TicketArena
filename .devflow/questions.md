@@ -778,3 +778,27 @@ When does the UI read activeHold?
 Assumed: Once on mount, no refetch on focus; ending a hold on the page sets the cached result to null; a restored hold already past holdExpiresAt ends at once with the usual expiry alert
 
 Answer: (open)
+
+## 2026-11-26 12:17 ticket 69
+
+Batch size and pass budget for the reaper?
+
+Assumed: REAP_BUDGET { batchSize: 100, maxBatches: 50 } (up to 5,000 slots per event per 15 s pass), exported and overridable via QueueServiceDeps.reapBudget; no new env variables
+
+Answer: (open)
+
+## 2026-11-26 12:17 ticket 69
+
+How does the reaper find the slot of an expired admission without scanning active?
+
+Assumed: New per-event hash waiting-room:{eventId}:holders (jti -> session id), kept in sync by every script that writes or removes an admission; idle candidates are examined first, expired admissions take the rest of the batch
+
+Answer: (open)
+
+## 2026-11-26 12:17 ticket 69
+
+Slots that predate the holders hash, or fresh slots missing a jti?
+
+Assumed: Not migrated: an expired pre-deploy jti is dropped and its slot is freed once 90 s idle or on re-join (gap closes within 30 min of deploy); a fresh slot with no jti is no longer freed immediately, only when idle (no script creates one)
+
+Answer: (open)

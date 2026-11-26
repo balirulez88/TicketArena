@@ -89,8 +89,8 @@ below shows what is built.
   REST adapters (the same atomic Lua scripts and key layout, configurable key prefix, one shared
   contract suite run against both) and the schedule `AdmissionPolicy`; served as
   `queue.join` / `queue.status` / `queue.leave` over `REDIS_URL`, with the admission token (JWT, `ADMISSION_SECRET`) gating `booking.holdSeats` (node-redis, every call bounded: a Redis outage fails queue calls fast with `SERVICE_UNAVAILABLE`, issues no admission, skips only the token's revocation lookup, and never stops booking or the worker; choosing Upstash in
-  production belongs to deployment). The worker's admission ticker (1 s) and slot reaper (15 s)
-  run on the same store. See
+  production belongs to deployment). The worker's admission ticker (1 s) and slot reaper (15 s, in
+  bounded calls of at most 100 slots, up to 50 per event per pass) run on the same store. See
   [architecture/waiting-room](architecture/waiting-room.md).
 - Deployment ([operations/](operations/deployment.md)): `.github/workflows/deploy.yml` runs after
   CI passes on `main`: `prisma migrate deploy` on the direct Neon URL, then the web app to Vercel

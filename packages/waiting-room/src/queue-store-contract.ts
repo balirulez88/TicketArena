@@ -124,6 +124,10 @@ export function describeQueueStoreContract(
       jtis: Array.from({ length: count }, () => randomUUID()),
     });
 
+    /** One reap call with a batch large enough for every test that is not about batching. */
+    const reapOnce = (store: QueueStore, eventId: string, now: Date, idleBefore: Date) =>
+      store.reap(eventId, { now, idleBefore, batchSize: 100 });
+
     async function queueOf(store: QueueStore, eventId: string, count: number) {
       for (let index = 1; index <= count; index += 1) {
         await store.join(eventId, `m${index}`, { kind: "SEQUENCE" }, T0);
@@ -193,7 +197,10 @@ export function describeQueueStoreContract(
       expect(await store.heartbeat(eventId, "nobody", at(60_000))).toBe(false);
       expect(await store.counts(eventId)).toEqual({ queued: 1, active: 1 });
       // The heartbeat at 60s keeps m1 out of a reap that frees anything idle since 30s.
-      expect(await store.reap(eventId, { now: at(120_000), idleBefore: at(30_000) })).toEqual([]);
+      expect(await reapOnce(store, eventId, at(120_000), at(30_000))).toEqual({
+        freed: [],
+        more: false,
+      });
     });
 
     test("releaseSlot frees the slot and revokes the admission jti", async () => {
@@ -287,9 +294,10 @@ export function describeQueueStoreContract(
       await store.leave(eventId, "m1");
       await store.releaseSlot(eventId, "m2");
       await store.heartbeat(eventId, "m3", at(TTL));
-      expect(await store.reap(eventId, { now: at(TTL), idleBefore: at(TTL - 5_000) })).toEqual([
-        "m3",
-      ]);
+      expect(await reapOnce(store, eventId, at(TTL), at(TTL - 5_000))).toEqual({
+        freed: ["m3"],
+        more: false,
+      });
 
       expect(await store.join(eventId, "m2", { kind: "SEQUENCE" }, T0)).toEqual(queuedAt(2));
       expect(await store.join(eventId, "m1", { kind: "SEQUENCE" }, T0)).toEqual(queuedAt(3));
@@ -417,15 +425,53 @@ export function describeQueueStoreContract(
       await store.heartbeat(eventId, "m1", at(TTL));
       await store.heartbeat(eventId, "m3", at(TTL));
 
-      const freed = await store.reap(eventId, { now: at(TTL), idleBefore: at(TTL - 5_000) });
+      const { freed, more } = await reapOnce(store, eventId, at(TTL), at(TTL - 5_000));
 
       expect([...freed].sort()).toEqual(["m1", "m2"]);
+      expect(more).toBe(false);
       const jtiOf = (member: string) =>
         [...first, ...later].find((admission) => admission.sessionId === member)?.jti ?? "";
       expect(await store.isAdmitted(eventId, jtiOf("m1"), at(TTL - 1))).toBe(false);
       expect(await store.isAdmitted(eventId, jtiOf("m2"), at(TTL))).toBe(false);
       expect(await store.isAdmitted(eventId, jtiOf("m3"), at(TTL))).toBe(true);
       expect(await store.counts(eventId)).toEqual({ queued: 0, active: 1 });
+    });
+
+    test("one reap call frees at most the batch size; repeated calls free every idle or expired slot and nothing else", async () => {
+      const store = storeWith("reap-batch:");
+      const eventId = randomUUID();
+      await queueOf(store, eventId, 9);
+      const early = await store.admit(eventId, request(T0, 5, 20));
+      const late = await store.admit(eventId, request(at(TTL - 10_000), 4, 20));
+      // m1-m3 poll but their admissions expire at TTL; m4, m5 are idle and expired; m6, m7 are
+      // idle with a valid admission; m8, m9 poll with a valid admission and must survive.
+      for (const member of ["m1", "m2", "m3", "m8", "m9"]) {
+        await store.heartbeat(eventId, member, at(TTL));
+      }
+      const cutoffs = { now: at(TTL), idleBefore: at(TTL - 5_000), batchSize: 2 };
+
+      const first = await store.reap(eventId, cutoffs);
+      expect(first.freed).toHaveLength(2);
+      expect(first.more).toBe(true);
+      expect(await store.counts(eventId)).toEqual({ queued: 0, active: 7 });
+
+      const freed = [...first.freed];
+      let more = first.more;
+      for (let call = 0; more && call < 10; call += 1) {
+        const next = await store.reap(eventId, cutoffs);
+        expect(next.freed.length).toBeLessThanOrEqual(2);
+        freed.push(...next.freed);
+        more = next.more;
+      }
+
+      expect(more).toBe(false);
+      expect(freed.sort()).toEqual(["m1", "m2", "m3", "m4", "m5", "m6", "m7"]);
+      expect(await store.reap(eventId, cutoffs)).toEqual({ freed: [], more: false });
+      expect(await store.counts(eventId)).toEqual({ queued: 0, active: 2 });
+      for (const admission of [...early, ...late]) {
+        const kept = admission.sessionId === "m8" || admission.sessionId === "m9";
+        expect(await store.isAdmitted(eventId, admission.jti, at(TTL - 1))).toBe(kept);
+      }
     });
 
     test("clearEvent drops the event's queue, slots, admissions and bucket, and no other event's", async () => {

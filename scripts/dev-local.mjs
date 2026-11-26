@@ -79,7 +79,7 @@ step(
 step("generating the Prisma client", "pnpm --filter @ticketarena/db db:generate", env);
 step("applying migrations", "pnpm --filter @ticketarena/db db:deploy", env);
 // The seed only inserts what is missing, so running it on every start is safe.
-step("seeding the catalog", "pnpm --filter @ticketarena/db db:seed", env);
+step("seeding the catalog", "pnpm --filter @ticketarena/worker db:seed", env);
 
 const children = [];
 let stopping = false;

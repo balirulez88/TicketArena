@@ -1,7 +1,7 @@
 import { DEFAULT_BOOKING_TIMEOUTS } from "@ticketarena/booking";
 import { NOW, testClients, withClient } from "@ticketarena/booking/testing";
 import { silentLogger } from "@ticketarena/contracts";
-import { seedCatalog } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db/seed";
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { TRPCError } from "@trpc/server";
 import { beforeAll, describe, expect, test } from "vitest";
@@ -17,7 +17,7 @@ function caller() {
     principal: { kind: "guest", sessionId: "0123456789abcdef0123456789abcdef" },
     isAdmin: false,
     bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
-    db: db(),
+    db,
     logger: silentLogger,
     metrics: () => ({ increment: async () => undefined }),
     metricsReader: () => {

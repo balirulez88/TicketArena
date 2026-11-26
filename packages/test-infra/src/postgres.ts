@@ -116,6 +116,13 @@ export async function createDatabaseFromTemplate(
   return databaseUrl(adminUrl, name);
 }
 
+/** Creates a fresh database with no migration applied and returns its URL. */
+export async function createEmptyDatabase(adminUrl: string): Promise<string> {
+  const name = `ta_t_${randomBytes(6).toString("hex")}`;
+  await withClient(adminUrl, (admin) => admin.query(`CREATE DATABASE ${quoteIdentifier(name)}`));
+  return databaseUrl(adminUrl, name);
+}
+
 export async function dropDatabase(adminUrl: string, url: string): Promise<void> {
   const name = new URL(url).pathname.slice(1);
   await withClient(adminUrl, (admin) =>

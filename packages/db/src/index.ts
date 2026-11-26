@@ -18,7 +18,6 @@ export type {
   Section,
   Venue,
 } from "./generated/prisma/client";
-export { seedCatalog } from "./seed";
 export { PrismaClient };
 
 /**

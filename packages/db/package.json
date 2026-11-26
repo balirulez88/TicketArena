@@ -4,13 +4,13 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./seed": "./src/seed.ts"
   },
   "scripts": {
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
-    "db:seed": "tsx src/seed-main.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

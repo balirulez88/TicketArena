@@ -13,7 +13,8 @@ import {
   withTrigger,
 } from "@ticketarena/booking/testing";
 import { silentLogger } from "@ticketarena/contracts";
-import { type PrismaClient, seedCatalog } from "@ticketarena/db";
+import type { PrismaClient } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db/seed";
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { TRPCError } from "@trpc/server";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
@@ -44,7 +45,7 @@ function contextFor(db: PrismaClient, principal: Principal): TRPCContext {
     principal,
     isAdmin: false,
     bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
-    db,
+    db: () => db,
     logger: silentLogger,
     metrics: unused("metrics"),
     metricsReader: unused("metricsReader"),
@@ -163,7 +164,10 @@ describe("booking service timeouts", () => {
       composeBooking({ DATABASE_URL: database.url, DATABASE_DRIVER: "pg" }, timeouts),
     );
     try {
-      const ctx = await createTRPCContextFactory(() => runtime)({
+      const ctx = await createTRPCContextFactory({
+        timeouts: runtime.timeouts,
+        db: () => runtime.db,
+      })({
         req: new Request("https://ticketarena.example/api/trpc"),
         resHeaders: new Headers(),
       });

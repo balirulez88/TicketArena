@@ -6,7 +6,7 @@ import {
 } from "@ticketarena/booking";
 import { NOW, testClients, withClient } from "@ticketarena/booking/testing";
 import { silentLogger } from "@ticketarena/contracts";
-import { seedCatalog } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db/seed";
 import { setupTestDatabase, setupTestRedis, setupTestUpstash } from "@ticketarena/test-infra";
 import { createRedisQueueStore } from "@ticketarena/waiting-room";
 import { createClient } from "redis";
@@ -106,7 +106,7 @@ describe("admin.snapshot", () => {
       principal,
       isAdmin: true,
       bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
-      db: db(),
+      db,
       logger: silentLogger,
       // Booking records counters fire-and-forget; the test writes them itself, awaited.
       metrics: () => ({ increment: async () => undefined }),

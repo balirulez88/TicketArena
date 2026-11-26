@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { DEFAULT_BOOKING_TIMEOUTS } from "@ticketarena/booking";
 import { freeSeats, NOW, testClients, withClient } from "@ticketarena/booking/testing";
 import { silentLogger } from "@ticketarena/contracts";
-import { seedCatalog } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db/seed";
 import { setupTestDatabase, setupTestRedis } from "@ticketarena/test-infra";
 import {
   createQueueService,
@@ -53,7 +53,7 @@ function caller(principal: Principal, now: Date, random: Random = { next: () => 
     principal,
     isAdmin: false,
     bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
-    db: db(),
+    db,
     logger: silentLogger,
     metrics: () => ({ increment: async () => undefined }),
     metricsReader: () => {
@@ -349,7 +349,7 @@ describe("admission slots", () => {
         principal: alice,
         isAdmin: false,
         bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
-        db: db(),
+        db,
         logger: silentLogger,
         metrics: () => ({ increment: async () => undefined }),
         metricsReader: () => {

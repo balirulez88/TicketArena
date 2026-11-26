@@ -45,9 +45,13 @@ export interface TRPCContext {
    * purpose: operator access is not a buyer identity (ADR 0012). Checked by `adminProcedure`.
    */
   readonly isAdmin: boolean;
-  readonly db: PrismaClient;
   /**
-   * The timeouts `db` was built with: both come from one `BookingRuntime`, so the services
+   * The database client, built on first call and shared per process, so `DATABASE_URL` is read
+   * only by procedures that use the database (TD-003); throws naming it when it is invalid.
+   */
+  readonly db: () => PrismaClient;
+  /**
+   * The timeouts `db` is built with: both come from one `LazyBookingRuntime`, so the services
    * `bookingServiceFor` builds never wait longer than the client's transaction budget allows.
    */
   readonly bookingTimeouts: BookingTimeouts;
@@ -113,16 +117,33 @@ export function connectBooking(composition: BookingComposition): BookingRuntime 
   return { db: createPrismaClient(composition.client), timeouts: composition.timeouts };
 }
 
+/** A request's booking timeouts, and the client built for them only when a procedure needs it. */
+export interface LazyBookingRuntime {
+  readonly timeouts: BookingTimeouts;
+  readonly db: () => PrismaClient;
+}
+
+/**
+ * Reads and validates the database environment on the first `db()` call and keeps that client;
+ * a failed read is not cached, so a corrected environment is picked up by the next call.
+ */
+export function lazyBooking(
+  readEnv: () => Parameters<typeof parseDatabaseEnv>[0],
+  timeouts: BookingTimeouts = DEFAULT_BOOKING_TIMEOUTS,
+): LazyBookingRuntime {
+  let runtime: BookingRuntime | undefined;
+  return {
+    timeouts,
+    db: () => {
+      runtime ??= connectBooking(composeBooking(parseDatabaseEnv(readEnv()), timeouts));
+      return runtime.db;
+    },
+  };
+}
+
 // One client per server process: the Neon driver pools internally, and a fresh client per
 // request would open a new connection pool on every call.
-let shared: BookingRuntime | undefined;
-
-function sharedBooking(): BookingRuntime {
-  if (shared === undefined) {
-    shared = connectBooking(composeBooking(parseDatabaseEnv(process.env)));
-  }
-  return shared;
-}
+const sharedBooking = lazyBooking(() => process.env);
 
 /** A booking service over the request's client and clock, with the timeouts that client fits. */
 export function bookingServiceFor(
@@ -130,7 +151,7 @@ export function bookingServiceFor(
   metrics?: BookingMetrics,
 ): BookingService {
   return createBookingService({
-    db: ctx.db,
+    db: ctx.db(),
     clock: { now: ctx.now },
     newId: randomUUID,
     logger: ctx.logger,
@@ -160,11 +181,11 @@ export interface ContextRequest {
 }
 
 /**
- * Builds the per-request context over a booking runtime resolved on first use, so the request's
- * `db` and `bookingTimeouts` always come from the same composition.
+ * Builds the per-request context over one booking runtime, so the request's `db` and
+ * `bookingTimeouts` always come from the same composition.
  */
 export function createTRPCContextFactory(
-  booking: () => BookingRuntime,
+  booking: LazyBookingRuntime,
 ): (request: ContextRequest) => Promise<TRPCContext> {
   return (request) => buildContext(request, booking);
 }
@@ -173,7 +194,7 @@ export const createTRPCContext = createTRPCContextFactory(sharedBooking);
 
 async function buildContext(
   { req, resHeaders }: ContextRequest,
-  booking: () => BookingRuntime,
+  booking: LazyBookingRuntime,
 ): Promise<TRPCContext> {
   const { SESSION_SECRET } = parseSessionEnv(process.env);
   const identity = createIdentityService({ sessionSecret: SESSION_SECRET });
@@ -185,13 +206,12 @@ async function buildContext(
     new Date(),
   );
   const now = () => new Date();
-  const { db, timeouts } = booking();
   return {
     now,
     principal,
     isAdmin,
-    db,
-    bookingTimeouts: timeouts,
+    db: booking.db,
+    bookingTimeouts: booking.timeouts,
     logger,
     metrics,
     metricsReader,

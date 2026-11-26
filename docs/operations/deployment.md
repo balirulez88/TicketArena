@@ -122,7 +122,7 @@ for NATS, the host in the worker's `NATS_URL`) and the commands below.
    token, and the TLS Redis URL (`rediss://default:<token>@<host>:6379`).
 3. **Database schema and catalog.** From a checkout, with the direct URL:
    `DATABASE_URL=<direct> pnpm --filter @ticketarena/db exec prisma migrate deploy`, then
-   `DATABASE_URL=<direct> pnpm --filter @ticketarena/db db:seed` (the demo catalog; seeding is
+   `DATABASE_URL=<direct> pnpm --filter @ticketarena/worker db:seed` (the demo catalog; seeding is
    not part of the deploy workflow).
 4. **NATS on Fly.** `fly apps create ticketarena-nats`, then
    `fly volumes create nats_data --app ticketarena-nats --region fra --size 1`, then

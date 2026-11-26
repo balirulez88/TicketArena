@@ -24,9 +24,11 @@ New modules are added when a slice needs them, not speculatively.
   procedures through `TRPCContext`. Procedures never import a client directly, which keeps them
   testable through `createCaller` with fakes at system boundaries only. Booking procedures get
   their service from `bookingServiceFor(ctx)`; `composeBooking` and `connectBooking` turn one
-  `BookingTimeouts` value into a `BookingRuntime` (client plus those timeouts), and
-  `createTRPCContextFactory(runtime)` sets both `ctx.db` and the required `ctx.bookingTimeouts`
-  from it (see
+  `BookingTimeouts` value into a `BookingRuntime` (client plus those timeouts). `lazyBooking`
+  wraps that in a `LazyBookingRuntime` that builds the client on the first `db()` call, and
+  `createTRPCContextFactory(runtime)` sets both `ctx.db()` and the required `ctx.bookingTimeouts`
+  from it, so `DATABASE_URL` is read only by procedures that use the database: `health.check`
+  and `session.whoami` work without it, and a database procedure fails naming it (see
   [database](../database/index.md#transaction-timeouts-retries-and-booking_busy)).
 - **Deep modules, narrow interfaces:** each module exposes a small surface (e.g.
   `join/status/leave` for the waiting room) and hides its storage layout.
@@ -154,8 +156,8 @@ taken first, so a refused call has no effect. The same limiter guards the admin 
 ## Catalog API
 
 Routers in `apps/web/src/server/routers/`: `events` (`list`, `get`) and `seats` (`map`), sharing
-zod schemas in `catalog-schemas.ts`. They read through `ctx.db`, a process-wide Prisma client
-created lazily from `DATABASE_URL` and `DATABASE_DRIVER` (`neon`, the default, or `pg` for a local
+zod schemas in `catalog-schemas.ts`. They read through `ctx.db()`, a process-wide Prisma client
+created on first call from `DATABASE_URL` and `DATABASE_DRIVER` (`neon`, the default, or `pg` for a local
 Postgres; `parseDatabaseEnv` validates only these two and refuses a direct `*.neon.tech` host:
 the web app must use the `-pooler` endpoint). A missing
 event is a `NOT_FOUND` tRPC error. Integration tests run against real Postgres. See

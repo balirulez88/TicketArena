@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { afterAll, describe, expect, it } from "vitest";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "./index";
+import { createPrismaClient, type PrismaClient } from "./index";
+import { seedCatalog } from "./seed";
 
 const database = setupTestDatabase();
 let prisma: PrismaClient | undefined;

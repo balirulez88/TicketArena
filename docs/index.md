@@ -54,7 +54,8 @@ below shows what is built.
 - Turborepo + pnpm monorepo: `apps/web`, `apps/worker`, `packages/db`, `packages/contracts`,
   `packages/booking`, `packages/messaging`, `packages/waiting-room`.
 - `apps/web`: Next.js App Router with an end-to-end tRPC tracer (`health.check`), validated
-  server env (`parseServerEnv`), shadcn/ui tokens on Tailwind v4.
+  server env (`parseServerEnv`), shadcn/ui tokens on Tailwind v4. The database client is built on
+  a procedure's first `ctx.db()` call, so requests that do not use it never need `DATABASE_URL`.
 - Web UI: `/events` and `/events/[eventId]` (venue, on-sale status, prices per section, seat map
   of native buttons with accessible names; up to 6 seats selectable in a Zustand store, server
   data via TanStack Query). The event page is also the queue room (join, position and ETA,
@@ -80,7 +81,8 @@ below shows what is built.
   `Principal` onto the tRPC context (`session.whoami`). See
   [architecture/](architecture/index.md#identity).
 - `packages/db`: Prisma 7 on the Neon serverless adapter; the `outbox_events` table and the seeded catalog (venues, sections, rows, events,
-  per-event seats). `events.list`, `events.get` and `seats.map` serve it. The `holds` table backs
+  per-event seats; the seeder is a separate `@ticketarena/db/seed` entry point, run by the worker's
+  `db:seed` command, and a migration merges duplicate venue names before `venues.name` became unique). `events.list`, `events.get` and `seats.map` serve it. The `holds` table backs
   `booking.holdSeats` / `booking.getHold` / `booking.activeHold` / `booking.releaseHold` (`packages/booking`), which write
   `seat.held` and `hold.released` outbox events; the worker's sweeper expires abandoned holds every 15 s and writes `hold.expired`, and expires unpaid orders at `paymentDeadline + 60 s` (`order.expired`, seats freed); `orders` and `order_lines` back `booking.placeOrder` / `booking.getOrder`, which write
   `order.placed`; envelope schemas live in `packages/contracts`.

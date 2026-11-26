@@ -96,6 +96,8 @@ Upstash adapters.
     builds the template once per migration set (its name hashes the migrations) by applying the
     committed migration SQL; clones and template builds are serialized by a Postgres advisory
     lock. The clone is dropped after the file.
+  - `setupEmptyTestDatabase()`: a fresh database with no migration applied, for tests that apply
+    migrations themselves (the duplicate-venue merge test); dropped after the file.
   - `setupTestRedis()`: a unique key prefix, deleted after the file.
   - `setupRedisStandIn(mode)`: a local TCP stand-in in front of the test Redis, on one fixed port,
     that a test switches between `forward`, `silent` (accepts, never answers) and `closed`

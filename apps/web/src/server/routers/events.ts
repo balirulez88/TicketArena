@@ -4,7 +4,7 @@ import { eventNotFound } from "./event-not-found";
 
 export const eventsRouter = createTRPCRouter({
   list: publicProcedure.output(eventListOutput).query(async ({ ctx }) => {
-    const events = await ctx.db.event.findMany({
+    const events = await ctx.db().event.findMany({
       include: { venue: true },
       orderBy: [{ onSaleAt: "asc" }, { name: "asc" }],
     });
@@ -15,7 +15,7 @@ export const eventsRouter = createTRPCRouter({
     .input(eventInput)
     .output(eventDetailOutput)
     .query(async ({ ctx, input }) => {
-      const event = await ctx.db.event.findUnique({
+      const event = await ctx.db().event.findUnique({
         where: { id: input.eventId },
         include: { venue: { include: { sections: { orderBy: { priceMinor: "desc" } } } } },
       });

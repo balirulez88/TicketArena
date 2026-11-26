@@ -810,3 +810,35 @@ The last AC asks to mark TD-036 RESOLVED in docs/technical-debt.md, but CLAUDE.m
 Assumed: CLAUDE.md wins, as for ticket 14: the register is not edited; the TD-036 tests are named in the commit message and a human updates TD-036 if wanted
 
 Answer: (open)
+
+## 2026-11-26 17:29 ticket 43
+
+The last AC asks to mark TD-001, TD-003, TD-010, TD-011 and TD-028 RESOLVED in docs/technical-debt.md, but CLAUDE.md freezes that register. Which wins?
+
+Assumed: CLAUDE.md wins, as for tickets 14 and 26: the register is not edited; the verifying tests are named in the commit message and a human updates the entries
+
+Answer: (open)
+
+## 2026-11-26 19:36 ticket 43
+
+Fix TD-028 by editing the unique venues.name migration or by adding a new one?
+
+Assumed: A new migration 20261030025000_merge_duplicate_venues runs just before the unique index; the applied migration is untouched (no checksum change); lowest-id venue survives, same-name sections and same-label rows merge into the survivor's, no seat is deleted
+
+Answer: (open)
+
+## 2026-11-26 19:36 ticket 43
+
+Where does the seed command live once packages/db stops reading process.env?
+
+Assumed: apps/worker (pnpm --filter @ticketarena/worker db:seed), validated by parseSeedEnv; the URL is not a CLI argument so the secret stays out of the process list
+
+Answer: (open)
+
+## 2026-11-26 19:36 ticket 43
+
+How is the database made lazy for procedures that do not use it?
+
+Assumed: ctx.db becomes a function () => PrismaClient (not a getter, since tests spread the context); the env scan skips packages/test-infra and the generated Prisma client
+
+Answer: (open)

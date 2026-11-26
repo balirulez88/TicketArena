@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { createBookingService, createRedisBookingMetrics } from "@ticketarena/booking";
 import { silentLogger } from "@ticketarena/contracts";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
+import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db/seed";
 import { connectJetStreamMessageBus } from "@ticketarena/messaging";
 import {
   setupRedisStandIn,

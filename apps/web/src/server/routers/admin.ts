@@ -129,7 +129,7 @@ async function rateLimit(ctx: Pick<TRPCContext, "rateLimiter">, action: string):
  * can point them at a real event. Exactly one demo event is required: two would be ambiguous.
  */
 async function demoEventId(ctx: Pick<TRPCContext, "db">): Promise<string> {
-  const demos = await ctx.db.event.findMany({ where: { demo: true }, select: { id: true } });
+  const demos = await ctx.db().event.findMany({ where: { demo: true }, select: { id: true } });
   const [demo] = demos;
   if (demo === undefined || demos.length > 1) {
     throw new TRPCError({
@@ -162,12 +162,12 @@ export const adminRouter = createTRPCRouter({
   snapshot: adminProcedure.output(snapshotOutput).query(async ({ ctx }) => {
     const takenAt = ctx.now();
     const [events, seatGroups, orderGroups, store] = await Promise.all([
-      ctx.db.event.findMany({
+      ctx.db().event.findMany({
         select: { id: true, name: true, demo: true },
         orderBy: { onSaleAt: "asc" },
       }),
-      ctx.db.seat.groupBy({ by: ["eventId", "status"], _count: { _all: true } }),
-      ctx.db.order.groupBy({ by: ["status"], _count: { _all: true } }),
+      ctx.db().seat.groupBy({ by: ["eventId", "status"], _count: { _all: true } }),
+      ctx.db().order.groupBy({ by: ["status"], _count: { _all: true } }),
       ctx.queueStore(),
     ]);
     const eventIds = events.map((event) => event.id);
@@ -214,7 +214,7 @@ export const adminRouter = createTRPCRouter({
   runRace: adminProcedure.output(raceOutput).mutation(async ({ ctx }) => {
     await rateLimit(ctx, "runRace");
     const eventId = await demoEventId(ctx);
-    const seat = await ctx.db.seat.findFirst({
+    const seat = await ctx.db().seat.findFirst({
       where: { eventId, status: "AVAILABLE" },
       orderBy: { id: "asc" },
       select: { id: true },

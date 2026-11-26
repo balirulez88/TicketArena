@@ -40,7 +40,7 @@ enum carries `@@schema("public")`).
 | `order_payments`     | Ledger of captured money: `paymentId` PK, `amount`, `capturedAt`, `disposition` (`APPLIED` for a confirmed order, `REFUND_REQUESTED` with `refundRequestedAt` for a refund obligation, `REFUNDED` once `payment.refunded` closes it) |
 
 Catalog data is seeded, never edited through the API. `seedCatalog(prisma, now)`
-(`packages/db/src/seed.ts`, run with `pnpm --filter @ticketarena/db db:seed`) only inserts
+(`packages/db/src/seed.ts`) only inserts
 missing rows, so re-running it keeps seat state. Seats are unique on `(eventId, rowId, number)`
 and indexed on `(eventId, status)` and on `holdId`. `venues.name` is unique, so `seedCatalog` upserts venues
 and concurrent seed runs leave one row per venue. The demo event goes on sale one day before the
@@ -48,6 +48,37 @@ seeding instant (its queue window has closed), so holds and `admin.runRace` work
 other events go on sale 14 and 30 days after it. A database seeded before this rule keeps its
 demo event's later `onSaleAt` (re-running the seed never updates a row); reset the database to
 pick it up.
+
+`seedCatalog` is not part of the runtime entry point (`@ticketarena/db`, `src/index.ts`), so no
+request path can reach it: tests and the seed command import it from `@ticketarena/db/seed`
+(`packages/db/src/entry-points.test.ts`). The seed command is
+`DATABASE_URL=<url> pnpm --filter @ticketarena/worker db:seed` (`apps/worker/src/seed-main.ts`):
+`parseSeedEnv` validates only `DATABASE_URL` and the command seeds over the `pg` driver, then
+disconnects. It lives in the worker because packages never read the environment
+(`packages/db/src/no-process-env.test.ts` fails on any `process.env` read under `packages/*/src`
+outside tests and test-infra); `apps/worker/src/seed-main.test.ts` runs it against the test
+database.
+
+### Duplicate venue merge
+
+The old check-then-create seed could insert a venue twice, which `venues_name_key` would refuse.
+Migration `20261030025000_merge_duplicate_venues` runs just before the one that creates that index
+and merges such duplicates; on a database without duplicates it changes nothing. The rule:
+
+- Per venue name, the venue with the lowest `id` survives; the others are deleted after their
+  references move to it.
+- Their events point at the surviving venue.
+- A duplicate's section moves to the surviving venue, unless a section of that name is already in
+  the group: then the sections merge into one (the surviving venue's own, else the lowest `id`),
+  which keeps its own price.
+- Rows of merged sections move the same way: a row whose label the merged section already holds
+  merges into one row (the surviving section's own, else the lowest `id`), and its seats move to
+  that row. No seat is deleted; two seats of one event on one merged row and number would abort the
+  migration on `seats_eventId_rowId_number_key`, which seeded data cannot produce.
+
+`packages/db/src/venue-merge-migration.test.ts` migrates a database to just before this step,
+inserts two same-name venues with sections, rows, events and seats, applies the remaining
+migrations and checks the result.
 
 ### Indexes and unique constraints
 

@@ -36,4 +36,24 @@ describe("docs/database", () => {
     expect(rows.length).toBeGreaterThanOrEqual(6);
     expect(rows.map((row) => row.name).filter((name) => !doc.includes(`\`${name}\``))).toEqual([]);
   });
+
+  it("documents the duplicate-venue merge rule next to the migration that applies it", () => {
+    const doc = readFileSync(resolve(__dirname, "../../../docs/database/index.md"), "utf8");
+    const section = doc.split(/^### /m).find((part) => part.startsWith("Duplicate venue merge"));
+    const migration = readFileSync(
+      resolve(
+        __dirname,
+        "../prisma/migrations/20261030025000_merge_duplicate_venues/migration.sql",
+      ),
+      "utf8",
+    );
+
+    expect(migration).toContain("docs/database/index.md");
+    expect(section).toBeDefined();
+    expect(section).toContain("`20261030025000_merge_duplicate_venues`");
+    expect(section).toContain("lowest `id`");
+    expect(section).toMatch(/sections?.*merge/is);
+    expect(section).toMatch(/rows?.*seats/is);
+    expect(section).toMatch(/events/);
+  });
 });

@@ -145,6 +145,25 @@ after the outcome is decided, fire-and-forget; a failure is logged and never fai
 Redis adapter (`createRedisBookingMetrics`) keeps one hash per event,
 `booking:metrics:<eventId>`, with the metric as field. Seat state is never decided by Redis.
 
+In production the web app counts into Upstash: `booking.holdSeats` and `booking.placeOrder` take
+their `BookingMetrics` from the context (`ctx.metrics()`: `createRedisBookingMetrics` over the
+Upstash REST client, built once per process from `UPSTASH_REDIS_REST_*`), so each increment is one
+`HINCRBY booking:metrics:<eventId> <metric> 1`. No other booking procedure resolves it. What each
+operation sends:
+
+| Operation    | Counters sent                                                                                                                                                                       |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `holdSeats`  | `hold_ok` after commit; or one refusal (`seat_unavailable`, `race_lost`, `limit_exceeded`); `deadlock_retry` per retried attempt; `booking_busy` on saturation or exhausted retries |
+| `placeOrder` | nothing on success; `deadlock_retry` per retried attempt; `booking_busy` on saturation or exhausted retries (key `unknown` before the hold is read)                                 |
+
+These counts are best-effort. A failed increment (an Upstash error, a refused connection, the
+client's 2 s request timeout) is logged once with its metric (`metric failed`) and the booking
+returns its normal result without waiting for it. Missing or invalid Upstash variables leave the
+booking uncounted (logged once at the boundary) rather than failing it. Because the increment is
+not awaited, a request the platform cuts short after its response (a serverless function frozen or
+stopped) may lose an increment; the counters are for the dashboard, never for decisions.
+Tests: `apps/web/src/server/routers/booking-metrics.test.ts`.
+
 Orders: `booking.placeOrder` (no admission required) and `booking.getOrder` (owner only, else
 `NOT_FOUND`). `placeOrder` runs one transaction with the lock order buyer lock (same key as `holdSeats`, taken after an unlocked read of the hold's event), hold `FOR UPDATE`, seats
 `ORDER BY id FOR UPDATE`, then `T = clock.now()`. It requires a `HELD` hold owned by the caller's

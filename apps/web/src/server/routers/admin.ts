@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import {
   BookingBusyError,
   type BookingMetricCounts,
-  type BookingMetrics,
   type HoldView,
   NotDemoEventError,
   ResetBlockedError,
@@ -10,7 +9,13 @@ import {
 } from "@ticketarena/booking";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
-import { adminProcedure, bookingServiceFor, createTRPCRouter, type TRPCContext } from "../trpc";
+import {
+  adminProcedure,
+  bookingServiceFor,
+  createTRPCRouter,
+  optionalMetrics,
+  type TRPCContext,
+} from "../trpc";
 
 const count = z.number().int().nonnegative();
 
@@ -138,15 +143,6 @@ async function demoEventId(ctx: Pick<TRPCContext, "db">): Promise<string> {
     });
   }
   return demo.id;
-}
-
-/** Counters are best-effort: a race still runs, uncounted, when they are not configured. */
-function optionalMetrics(ctx: Pick<TRPCContext, "metrics">): BookingMetrics | undefined {
-  try {
-    return ctx.metrics();
-  } catch {
-    return undefined;
-  }
 }
 
 type RaceOutcome =

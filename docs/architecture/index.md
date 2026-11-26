@@ -85,6 +85,13 @@ Decision: [ADR 0012](../adr/0012-identity-service-seam.md). Code: `apps/web/src/
   naming the variable; the failure is logged once through the app logger and later calls rethrow it
   without re-parsing. Health and session requests are unaffected. Same per-concern parsing as
   `parseSessionEnv` and `parseDatabaseEnv`.
+  `booking.holdSeats` and `booking.placeOrder` resolve `ctx.metrics()` (through `optionalMetrics`)
+  and hand it to the booking service; they are the only booking procedures that do, and with the
+  metrics unconfigured they book uncounted instead of failing
+  ([database](../database/index.md)). The lazy dependencies (`metrics`, `metricsReader`,
+  `metricsReset`, `rateLimiter`, `queueStore`) and the logger are one `ContextServices` per process
+  (`createContextServices` over `process.env`); `createTRPCContextFactory(booking, services)` lets
+  a test build the real context over its own environment.
 - **Admin access** (`identity/admin-session.ts`, `identity/admin-login.ts`): separate from the
   Principal. `POST /api/admin/login` (form field `password`) compares the password with
   `ADMIN_PASSWORD` in constant time (both as HMACs through `subtle.verify`) and answers with a 303:

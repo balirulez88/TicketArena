@@ -145,6 +145,19 @@ export function lazyBooking(
 // request would open a new connection pool on every call.
 const sharedBooking = lazyBooking(() => process.env);
 
+/**
+ * The booking counters for a procedure that books, or none when they are not configured: counters
+ * are best-effort and never fail a booking. A configuration failure was already logged, once, by
+ * the lazy dependency at the boundary (ticket 56), so it is not logged again per request.
+ */
+export function optionalMetrics(ctx: Pick<TRPCContext, "metrics">): BookingMetrics | undefined {
+  try {
+    return ctx.metrics();
+  } catch {
+    return undefined;
+  }
+}
+
 /** A booking service over the request's client and clock, with the timeouts that client fits. */
 export function bookingServiceFor(
   ctx: Pick<TRPCContext, "db" | "now" | "logger" | "bookingTimeouts">,
@@ -160,20 +173,44 @@ export function bookingServiceFor(
   });
 }
 
+/**
+ * The context's process-wide dependencies: each is built on first use and cached, so a request
+ * only needs the configuration of the dependencies its procedure resolves (TD-003, ticket 56).
+ */
+export type ContextServices = Pick<
+  TRPCContext,
+  "logger" | "metrics" | "metricsReader" | "metricsReset" | "rateLimiter" | "queueStore"
+>;
+
+export interface ContextServicesConfig {
+  readonly readEnv: () => Readonly<Record<string, string | undefined>>;
+  readonly logger: Logger;
+  /** Key prefix of the waiting-room keys; production uses none. */
+  readonly queuePrefix?: string;
+}
+
+/** The services one process shares across requests, over one environment and one logger. */
+export function createContextServices({
+  readEnv,
+  logger,
+  queuePrefix = "",
+}: ContextServicesConfig): ContextServices {
+  return {
+    logger,
+    metrics: createLazyMetrics({ readEnv, logger }),
+    metricsReader: createLazyMetricsReader({ readEnv, logger }),
+    metricsReset: createLazyMetricsReset({ readEnv, logger }),
+    rateLimiter: createLazyAdminRateLimiter({ readEnv, logger }),
+    queueStore: createLazyQueueStore({ readEnv, logger, prefix: queuePrefix }),
+  };
+}
+
 const logger = createWebLogger();
 
 /** The API route's `onError`: procedure failures go through the same redacting logger. */
 export const onProcedureError = logProcedureError(logger);
 
-const metrics = createLazyMetrics({ readEnv: () => process.env, logger });
-
-const metricsReader = createLazyMetricsReader({ readEnv: () => process.env, logger });
-
-const metricsReset = createLazyMetricsReset({ readEnv: () => process.env, logger });
-
-const rateLimiter = createLazyAdminRateLimiter({ readEnv: () => process.env, logger });
-
-const queueStore = createLazyQueueStore({ readEnv: () => process.env, logger, prefix: "" });
+const sharedServices = createContextServices({ readEnv: () => process.env, logger });
 
 const random: Random = { next: () => Math.random() };
 
@@ -185,12 +222,13 @@ export interface ContextRequest {
 
 /**
  * Builds the per-request context over one booking runtime, so the request's `db` and
- * `bookingTimeouts` always come from the same composition.
+ * `bookingTimeouts` always come from the same composition, and over the process's services.
  */
 export function createTRPCContextFactory(
   booking: LazyBookingRuntime,
+  services: ContextServices = sharedServices,
 ): (request: ContextRequest) => Promise<TRPCContext> {
-  return (request) => buildContext(request, booking);
+  return (request) => buildContext(request, booking, services);
 }
 
 export const createTRPCContext = createTRPCContextFactory(sharedBooking);
@@ -198,6 +236,7 @@ export const createTRPCContext = createTRPCContextFactory(sharedBooking);
 async function buildContext(
   { req, resHeaders }: ContextRequest,
   booking: LazyBookingRuntime,
+  services: ContextServices,
 ): Promise<TRPCContext> {
   const { SESSION_SECRET } = parseSessionEnv(process.env);
   const identity = createIdentityService({ sessionSecret: SESSION_SECRET });
@@ -215,12 +254,7 @@ async function buildContext(
     isAdmin,
     db: booking.db,
     bookingTimeouts: booking.timeouts,
-    logger,
-    metrics,
-    metricsReader,
-    metricsReset,
-    rateLimiter,
-    queueStore,
+    ...services,
     random,
     admissionTokens: createAdmissionTokens({
       secret: () => parseAdmissionEnv(process.env).ADMISSION_SECRET,

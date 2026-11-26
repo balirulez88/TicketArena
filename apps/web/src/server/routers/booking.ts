@@ -21,6 +21,7 @@ import {
   admittedProcedure,
   bookingServiceFor,
   createTRPCRouter,
+  optionalMetrics,
   publicProcedure,
   type TRPCContext,
 } from "../trpc";
@@ -112,7 +113,8 @@ export const bookingRouter = createTRPCRouter({
       await onSlot(ctx, "heartbeat", (queue) =>
         queue.heartbeat(input.eventId, ctx.principal.sessionId),
       );
-      const booking = bookingServiceFor(ctx);
+      // Only the procedures that book resolve the counters (ADR 0005 outcomes, TD-070).
+      const booking = bookingServiceFor(ctx, optionalMetrics(ctx));
       try {
         return await booking.holdSeats(toBuyer(ctx.principal), input.eventId, input.seatIds);
       } catch (error) {
@@ -185,7 +187,7 @@ export const bookingRouter = createTRPCRouter({
     .input(placeOrderInput)
     .output(orderOutput)
     .mutation(async ({ ctx, input }) => {
-      const booking = bookingServiceFor(ctx);
+      const booking = bookingServiceFor(ctx, optionalMetrics(ctx));
       const buyer = toBuyer(ctx.principal);
       try {
         const order = await booking.placeOrder(

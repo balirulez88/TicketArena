@@ -898,3 +898,19 @@ Redact buyer contact details by key, by value pattern, or both?
 Assumed: Both, in one shared redactLogLine in packages/contracts applied via pino streamWrite: keys matching /e-?mail|phone|recipient/i become [Redacted] at any depth, and emails or 7+ digit phone-like runs inside any string are redacted; over-redaction of bare long numbers is accepted
 
 Answer: (open)
+
+## 2026-11-26 20:20 ticket 57
+
+The last AC asks to mark TD-070 RESOLVED in docs/technical-debt.md, but CLAUDE.md freezes that register. Which wins?
+
+Assumed: CLAUDE.md wins, as for the earlier tickets of this run: the register is not edited; the verifying tests are named in the commit message and a human updates the entry
+
+Answer: (open)
+
+## 2026-11-26 20:31 ticket 57
+
+What do holdSeats and placeOrder do when Upstash is missing or misconfigured?
+
+Assumed: Book uncounted (optionalMetrics, as admin.runRace does); the lazy metrics dependency logs the configuration error once at the boundary, not per request
+
+Answer: (open)

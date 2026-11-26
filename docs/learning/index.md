@@ -31,3 +31,4 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [24: Késleltetett retry ütemezés](24-delayed-retry-schedule.md): `nak(delay)` 1 s / 5 s / 30 s / 2 m, `deliveryCount` az egyetlen számláló, nincs `BackOff`, `working()`
 - [46: Worker indítás és leállítás takarítása](46-worker-startup-cleanup.md): port kötése először, elindított ciklusok leállítása hibánál, fázisos hibatűrő `stopPhases`, injektált 25 s deadline, `exit` injektálva
 - [51: Log redaction policy](51-log-redaction-policy.md): `streamWrite` hook a serializált soron, kulcs és alak szerinti redaction, TD-048, tRPC hibák a loggeren át
+- [57: Produkciós booking metrikák](57-production-booking-metrics.md): `optionalMetrics` a context-ből, nem várt `HINCRBY` Upstashba, best-effort, `unknown` kulcs, fake Upstash a rendszerhatáron

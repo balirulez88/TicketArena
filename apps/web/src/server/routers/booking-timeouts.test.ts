@@ -47,7 +47,7 @@ function contextFor(db: PrismaClient, principal: Principal): TRPCContext {
     bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
     db: () => db,
     logger: silentLogger,
-    metrics: unused("metrics"),
+    metrics: () => ({ increment: async () => undefined }),
     metricsReader: unused("metricsReader"),
     metricsReset: unused("metricsReset"),
     rateLimiter: unused("rateLimiter"),

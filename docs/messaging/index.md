@@ -47,6 +47,12 @@ run during a Redis outage (see [waiting room](../architecture/waiting-room.md#re
   `attempts`, stores `lastError` and leaves the row `PENDING`. Only the oldest `PENDING` row of an aggregate is
   claimable (`NOT EXISTS` an older `PENDING` row), so order per aggregate holds across concurrent relays: later
   rows wait for a failed or in-flight earlier one, at one row per aggregate per tick. Rows of a rolled-back transaction never exist for the relay.
+  A tick that fails outside a row's publish (claim query, mark or commit; e.g. the database is unreachable)
+  rolls back, leaves its rows `PENDING`, and the loop retries on the next tick. It is logged at `error` with the
+  cause (`outbox relay tick failed`), rate-limited by `failure-reporter.ts`: the first failure, any failure with a
+  different cause, and then one line per 60 s window (`FAILURE_LOG_WINDOW_MS`) while the same cause persists,
+  carrying `failures` and `suppressed` counts. The first successful tick after them logs `outbox relay recovered`
+  at `info` with `failures` and `outageMs`. The relay takes an optional `now` clock for this.
 - **Consumer runner** (`consumer-runner.ts`): durable pull consumer per consumer name (`AckWait` 30 s,
   no `BackOff`, `MaxDeliver` -1). Each message runs in one transaction that first inserts
   `processed_messages(consumer, messageId, streamSeq)` and then calls the handler. A unique violation of
@@ -59,7 +65,11 @@ run during a Redis outage (see [waiting room](../architecture/waiting-room.md#re
   (`{ outcome: "retry" | "poison", reason }`): the transaction rolls back (no `processed_messages` row, no
   outbox writes) and the message is `nak`ed with the same delay; `poison` is logged as an error. Until the DLQ
   exists, poison is redelivered rather than `term`ed, because ADR 0011 forbids `term` without a DLQ copy.
-  The DLQ gate and recovery from ADR 0011 are not built yet.
+  A handler (or `beforeTransaction`) failure is logged at `error` with the error and `deliveryCount` before the
+  `nak`. A failed poll (the broker is unreachable for `fetch`, or anything else escapes a batch) is logged at
+  `error` with the cause (`consumer poll failed`, same rate limit and `consumer poll recovered` line as the
+  relay) and the loop polls again after 1 s.
+  The DLQ gate (ticket 25), which would end the endless redelivery of a poison message, and recovery from ADR 0011 are not built yet.
 - **Port:** `MessageBus` hides the broker; `jetstream-message-bus.ts` is the only module importing
   `@nats-io/*` (a test enforces it). `message-bus.contract.ts` is the contract suite run against real NATS.
 

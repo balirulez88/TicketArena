@@ -2,6 +2,7 @@ import { type Logger, logBindingsFor, silentLogger } from "@ticketarena/contract
 import type { PrismaClient, TransactionClient } from "@ticketarena/db";
 import { createBackgroundLoop, sleep } from "./background-loop.js";
 import { createEmitCausedEvent, type EmitCausedEvent } from "./caused-event.js";
+import { createFailureReporter } from "./failure-reporter.js";
 import type { MessageBus, ReceivedMessage } from "./message-bus.js";
 import { type ServiceName, serviceStore } from "./service-store.js";
 
@@ -162,11 +163,20 @@ export async function createConsumerRunner(
     return messages.length;
   }
 
+  const reporter = createFailureReporter({
+    logger,
+    now: Date.now,
+    failureMessage: "consumer poll failed",
+    recoveryMessage: "consumer poll recovered",
+  });
+
   const loop = createBackgroundLoop(async () => {
     try {
       await pollOnce();
-    } catch {
+      reporter.succeeded();
+    } catch (error) {
       // A broker or database outage must not kill the loop; the next poll retries.
+      reporter.failed(error);
       await sleep(FETCH_EXPIRES_MS);
     }
   });

@@ -842,3 +842,19 @@ How is the database made lazy for procedures that do not use it?
 Assumed: ctx.db becomes a function () => PrismaClient (not a getter, since tests spread the context); the env scan skips packages/test-infra and the generated Prisma client
 
 Answer: (open)
+
+## 2026-11-26 19:38 ticket 45
+
+The last AC asks to mark TD-031 and TD-032 RESOLVED in docs/technical-debt.md, but CLAUDE.md freezes that register. Which wins?
+
+Assumed: CLAUDE.md wins, as for tickets 14, 26 and 43: the register is not edited; the verifying tests are named in the commit message and a human updates the entries
+
+Answer: (open)
+
+## 2026-11-26 19:44 ticket 45
+
+How are repeated identical relay/consumer failures rate-limited?
+
+Assumed: First failure and any new cause (error name+message) log at error; the same cause logs at most once per 60 s (FAILURE_LOG_WINDOW_MS) with failures/suppressed counts; recovery logs one info line with failures and outageMs; shared by relay and consumer runner
+
+Answer: (open)

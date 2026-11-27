@@ -6,7 +6,7 @@ import {
   type MessageBus,
 } from "@ticketarena/messaging";
 import { setupTestDatabase, setupTestNats } from "@ticketarena/test-infra";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createMockNotificationProvider, type MockNotificationProvider } from "./mock-provider.js";
 import { createNotificationHandler } from "./notification-handler.js";
 
@@ -727,6 +727,109 @@ describe("Notification handler", () => {
     expect(provider.deliveries()).toMatchObject([{ idempotencyKey: oldRowId, channel: "EMAIL" }]);
     const rows = await prisma.notification.findMany({ where: { sourceEventId: envelope.id } });
     expect(rows.map((row) => [row.id, row.status])).toEqual([[oldRowId, "SENT"]]);
+  });
+
+  /** A PENDING refund-completed EMAIL row as a pre-migration worker left it: no dedupe key. */
+  async function legacyPendingRow(envelope: ReturnType<typeof refunded>, recipient: string) {
+    const id = randomUUID();
+    await prisma.notification.create({
+      data: {
+        id,
+        sourceEventId: envelope.id,
+        channel: "EMAIL",
+        recipient,
+        template: "refund-completed",
+        createdAt: NOW,
+      },
+    });
+    return id;
+  }
+
+  async function rowsTo(recipient: string) {
+    return prisma.notification.findMany({ where: { recipient } });
+  }
+
+  it("cutover: resuming an older worker's row gives it the refund key, so a later re-announcement under a new event id sends nothing new", async () => {
+    const recipient = "buyer+cutover-again@example.com";
+    const original = refunded({ email: recipient });
+    const reannounced = { ...original, id: randomUUID() };
+    const oldRowId = await legacyPendingRow(original, recipient);
+    const provider = createMockNotificationProvider();
+
+    await deliver(original, provider);
+    await deliver(reannounced, provider);
+
+    expect(provider.deliveries()).toEqual([
+      {
+        idempotencyKey: oldRowId,
+        channel: "EMAIL",
+        recipient,
+        template: "refund-completed",
+      },
+    ]);
+    expect((await rowsTo(recipient)).map((row) => [row.id, row.dedupeKey, row.status])).toEqual([
+      [oldRowId, `refund:${original.payload.paymentId}:refund-completed`, "SENT"],
+    ]);
+  });
+
+  it("cutover: a re-announcement arriving while the original is still sending reuses the promoted row and its original provider key", async () => {
+    const recipient = "buyer+cutover-race@example.com";
+    const original = refunded({ email: recipient });
+    const reannounced = { ...original, id: randomUUID() };
+    const oldRowId = await legacyPendingRow(original, recipient);
+    const recorded = createMockNotificationProvider();
+    let firstSendStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      firstSendStarted = resolve;
+    });
+    let releaseFirstSend: () => void = () => undefined;
+    const released = new Promise<void>((resolve) => {
+      releaseFirstSend = resolve;
+    });
+    let sends = 0;
+    const provider: MockNotificationProvider = {
+      deliveries: () => recorded.deliveries(),
+      async send(message) {
+        sends += 1;
+        if (sends === 1) {
+          firstSendStarted();
+          await released;
+        }
+        await recorded.send(message);
+      },
+    };
+
+    const originalDelivery = deliver(original, provider);
+    await started;
+    const reannouncedDelivery = deliver(reannounced, provider);
+    await vi.waitFor(() => expect(sends).toBe(2), { timeout: 15_000 });
+    releaseFirstSend();
+    await Promise.all([originalDelivery, reannouncedDelivery]);
+
+    expect(provider.deliveries().map((delivery) => delivery.idempotencyKey)).toEqual([oldRowId]);
+    expect((await rowsTo(recipient)).map((row) => [row.id, row.status])).toEqual([
+      [oldRowId, "SENT"],
+    ]);
+  });
+
+  it("cutover: when another delivery already holds the refund key, the original event uses that winner and sends nothing under the old row", async () => {
+    const recipient = "buyer+cutover-winner@example.com";
+    const original = refunded({ email: recipient });
+    const reannounced = { ...original, id: randomUUID() };
+    const oldRowId = await legacyPendingRow(original, recipient);
+    const provider = createMockNotificationProvider();
+
+    await deliver(reannounced, provider);
+    await deliver(original, provider);
+
+    const rows = await rowsTo(recipient);
+    const winner = rows.find((row) => row.sourceEventId === reannounced.id);
+    expect(provider.deliveries().map((delivery) => delivery.idempotencyKey)).toEqual([winner?.id]);
+    // The old row lost the key: it was never handed to the provider here, so it stays unchecked.
+    expect(rows.find((row) => row.id === oldRowId)).toMatchObject({
+      dedupeKey: null,
+      status: "PENDING",
+    });
   });
 
   it("keeps order events keyed by their own event id: two confirmations of different orders both send", async () => {

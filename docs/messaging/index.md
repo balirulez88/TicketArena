@@ -199,9 +199,13 @@ yet the buyer hears about each refund step once per channel. Two such events del
 upsert the same row; whichever finishes first records it `SENT`, and a send that overlaps reuses
 the row's id, so the provider's key dedupe absorbs it (`notification-handler.test.ts`, the
 "concurrently" cases). A `PENDING` row a pre-migration worker wrote without a key is found by
-`(sourceEventId, channel)` and resumed under its own id. Refund rows written before migration
-`20261129000000_notification_dedupe_key` are keyed by their event, so a later re-announcement of
-such a refund can message the buyer once more.
+`(sourceEventId, channel)` when its own event is redelivered, and promoted to the key in one
+conditional `UPDATE`, keeping its id as the provider key; a later re-announcement then finds it by
+key and sends nothing new. If another delivery already holds the key, the unique index refuses the
+promotion and that winner's row is used, so nothing is sent under the old id; the old row keeps no
+key and stays `PENDING` (only rows under the key are checkpointed `SENT`). Refund rows written
+before migration `20261129000000_notification_dedupe_key` and never redelivered stay keyed by
+their event, so a later re-announcement of such a refund can message the buyer once more.
 The mock provider records deliveries and dedupes by key.
 **External delivery is at-least-once**: a crash between the call and the `SENT` commit repeats it on redelivery, and only
 the provider's key dedupe absorbs that.

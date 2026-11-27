@@ -88,19 +88,35 @@ liveness failure.
   call; it may commit its own short writes, never the dedupe row), must be safe to repeat, and a throw `nak`s like a
   handler failure. A handler may instead resolve to a `HandlerOutcome`
   (`{ outcome: "retry" | "poison", reason }`): the transaction rolls back (no `processed_messages` row, no
-  outbox writes) and the message is `nak`ed with the same delay; `poison` is logged as an error. Until the DLQ
-  exists, poison is redelivered rather than `term`ed, because ADR 0011 forbids `term` without a DLQ copy.
+  outbox writes); `retry` is `nak`ed with the same delay, `poison` is dead-lettered (below).
   A handler (or `beforeTransaction`) failure is logged at `error` with the error, `deliveryCount` and the chosen
   `delayMs` before the `nak`.
   **Retry schedule:** every failed delivery ends in a delayed `nak` (a bare `nak` would redeliver immediately), with the
   delay picked by JetStream's `deliveryCount`, the only attempt counter (it also counts crashes and `AckWait`
-  expiries and survives restarts): 1 s, 5 s, 30 s, 2 min, and 2 min for every later delivery until the DLQ gate
-  ends retries. The policy lives in code, not in a consumer `BackOff`. A handler (or `beforeTransaction` step) that
+  expiries and survives restarts): 1 s, 5 s, 30 s, 2 min, and 2 min for the 5th delivery; the 6th goes to the
+  DLQ. The policy lives in code, not in a consumer `BackOff`. A handler (or `beforeTransaction` step) that
   can outlast `AckWait` calls `message.working()` to keep the delivery from expiring and being redelivered to
   another worker. AT-27, `consumer-runner-retry.test.ts`. A failed poll (the broker is unreachable for `fetch`, or anything else escapes a batch) is logged at
   `error` with the cause (`consumer poll failed`, same rate limit and `consumer poll recovered` line as the
   relay) and the loop polls again after 1 s.
-  The DLQ gate (ticket 25), which would end the endless redelivery of a poison message, and recovery from ADR 0011 are not built yet.
+  **DLQ gate and routing** ([ADR 0011](../adr/0011-delivery-retry-dlq-recovery.md)): before `beforeTransaction` and the
+  handler, a delivery past the retry budget (`deliveryCount > 5`, cause `retry_budget_exhausted`) is dead-lettered
+  without running any consumer code, so a message that crashes the process every time still ends there. A runner
+  given `schemas` (envelope schema per `version`, structurally a zod `safeParse`) also dead-letters, on the first
+  delivery and without running the handler, a message that is not JSON or fails its version's schema
+  (`schema_invalid`) or whose `version` has no schema (`unknown_version`); without `schemas` the gate checks only
+  the budget. Every consumer in `createServiceConsumers` passes `schemas: { 1: envelopeSchema(<its subject's
+  payload schema>) }` from `@ticketarena/contracts`, so in the worker a schema-invalid or unknown-version message
+  is dead-lettered on its first delivery, before the payment provider step or any handler runs. A `poison` handler outcome is dead-lettered after the rollback
+  (`handler_poison`, with the handler's reason). Dead-lettering publishes a `DeadLetter` JSON body (`consumer`,
+  `subject`, `streamSeq`, `deliveryCount`, `error: { cause, message }`, and `envelope`: the original data byte
+  for byte) to `ta.dlq.<consumer>` with `Nats-Msg-Id = dlq:<consumer>:<envelope id>` (the message's
+  `Nats-Msg-Id`, which the relay sets to the envelope id), awaits the PubAck, logs `message dead-lettered` at
+  `error`, and only then `term`s. A crash between PubAck and `term` redelivers the message, which publishes the
+  same id again inside the DLQ's 10-minute duplicate window: no second copy (AT-28). A failed DLQ publish (stream
+  full, broker unreachable, any error) logs `DLQ publish failed; retrying` and `nak`s with 2 min, never `term`
+  (AT-29). `consumer-runner-dlq.test.ts` (AT-28, AT-30), `consumer-runner-dlq-failure.test.ts` (AT-29). Nothing
+  replays the DLQ yet; recovery from ADR 0011 (the recreation script) is not built either.
 - **Port:** `MessageBus` hides the broker; `jetstream-message-bus.ts` is the only module importing
   `@nats-io/*` (a test enforces it). The adapter reconnects to the broker without limit (`maxReconnectAttempts: -1`;
   the client's default of 10 attempts would close the connection for good after about 20 s, stopping the
@@ -263,8 +279,9 @@ result twice under distinct event ids. An `order.placed` repeated under a new ev
 `processed_messages`; the attempt insert skips the existing `(orderId, attemptNo)` row instead, so the
 repeat is acked as handled with no second attempt and no second result (the first attempt's result
 already went out with it). A concurrent repeat waits on the uncommitted row, then skips it. An
-`order.placed` whose payload fails its schema writes nothing and is `nak`ed on the ADR 0011 delay
-schedule, redelivered without end until the DLQ gate exists.
+`order.placed` that fails its envelope schema, or carries a version other than 1, is dead-lettered by
+the DLQ gate on its first delivery (`schema_invalid` / `unknown_version`) without running the provider
+latency step or the handler, so it writes nothing.
 
 **Provider latency runs outside the transaction**, in the runner's `beforeTransaction` step, i.e.
 before dedupe-and-capture (TD-051). Awaited inside the runner's transaction it would hold a pooled
@@ -330,7 +347,7 @@ Relay and runner take a `service` (`booking` default, `payment` or `notification
 
 ## Decided, not yet built
 
-The DLQ gate and consumer recovery script are still to come. Broker: NATS JetStream behind a `MessageBus` port ([ADR 0004](../adr/0004-nats-jetstream-message-bus.md)).
+The consumer recovery script and a DLQ replay tool are still to come. Broker: NATS JetStream behind a `MessageBus` port ([ADR 0004](../adr/0004-nats-jetstream-message-bus.md)).
 Retries, DLQ and consumer recovery: [ADR 0011](../adr/0011-delivery-retry-dlq-recovery.md).
 Planned subjects and the envelope: [MVP spec, Messaging](../specs/ticketarena-mvp.md#messaging).
 The catalogue above is filled in as slices emit events.

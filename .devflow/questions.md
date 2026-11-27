@@ -970,3 +970,19 @@ History table shape?
 Assumed: Per-service outbox_event_history, insert-only, text columns with CHECK constraints, ON DELETE CASCADE from the outbox row (FAILED rows are never deleted)
 
 Answer: (open)
+
+## 2026-11-27 12:55 ticket 25
+
+Where do the envelope schemas for the DLQ gate come from?
+
+Assumed: Runner takes an optional schemas option (per version, safeParse-shaped); no worker consumer passes it yet, so their schema-invalid messages reach the DLQ via the delivery budget; wiring schemas into createServiceConsumers is a follow-up
+
+Answer: (open)
+
+## 2026-11-27 12:55 ticket 25
+
+DLQ body shape and failure delay?
+
+Assumed: DeadLetter {consumer, subject, streamSeq, deliveryCount, error {cause, message}, envelope as the raw data string}; envelope id = Nats-Msg-Id; a failed DLQ publish naks a fixed 2 min indefinitely; budget gate runs before the dedupe check per ADR 0011
+
+Answer: (open)

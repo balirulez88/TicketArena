@@ -68,7 +68,7 @@ const MAIN_SUBJECTS = [
 
 /**
  * A bus on streams of this run's own. With `missing`, the main stream first captures every subject
- * but that one, so its events fail permanently until `fix`.
+ * but that one, so its events fail permanently until `fix`; the DLQ stream is declared intact.
  */
 async function pipe(missing?: string): Promise<Pipe> {
   testCase += 1;
@@ -85,6 +85,7 @@ async function pipe(missing?: string): Promise<Pipe> {
         (subject) => `${subjectPrefix}.${subject}`,
       ),
     );
+    await declareStream(nats.url, `${streamPrefix}TICKETARENA_DLQ`, [`${subjectPrefix}.ta.dlq.>`]);
   }
   return { bus, streamPrefix, fix: () => bus.ensureTopology(), close: () => bus.close() };
 }
@@ -422,9 +423,18 @@ describe("the payment aggregate (payment outbox): payment.succeeded FAILED, paym
             .status,
         ).toBe("FAILED");
         await consume(notification, "notification", "notification-refunded", refundedId);
-        // Booking refuses a refund of a payment it has not recorded, changing nothing.
+        // Booking refuses a refund of a payment it has not recorded (poison), changing nothing,
+        // and dead-letters it (ADR 0011).
         expect(await sagaRefunded.pollOnce()).toBe(1);
         expect(await PROCESSED.booking("booking-saga-refunded", refundedId)).toBe(0);
+        const dlq = await io.bus.subscribe({
+          stream: "dlq",
+          consumer: "inspect",
+          filterSubject: "ta.dlq.booking-saga-refunded",
+        });
+        expect(
+          (await dlq.fetch({ maxMessages: 10, expiresMs: 1_000 })).map((copy) => copy.msgId),
+        ).toEqual([`dlq:booking-saga-refunded:${refundedId}`]);
         expect(await prisma.orderPayment.count({ where: { orderId: order.id } })).toBe(0);
         expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
           "PENDING_PAYMENT",
@@ -439,8 +449,15 @@ describe("the payment aggregate (payment outbox): payment.succeeded FAILED, paym
         });
         expect(await relay.tick()).toBe(1);
         await consume(await runner(io.bus, "booking-saga"), "booking", "booking-saga", succeededId);
-        // The refused payment.refunded is redelivered and now applies.
-        await consume(sagaRefunded, "booking", "booking-saga-refunded", refundedId);
+        // The operator replays the dead-lettered payment.refunded by recreating the durable (ADR
+        // 0011 consumer recovery: replay from the earliest retained message); it now applies.
+        await deleteConsumer(nats.url, `${io.streamPrefix}TICKETARENA`, "booking-saga-refunded");
+        await consume(
+          await runner(io.bus, "booking-saga-refunded"),
+          "booking",
+          "booking-saga-refunded",
+          refundedId,
+        );
       } else {
         const saga = await runner(io.bus, "booking-saga");
         expect(await relay.tick()).toBe(1);
@@ -477,7 +494,7 @@ describe("the payment aggregate (payment outbox): payment.succeeded FAILED, paym
     }
   }
 
-  it("refuses payment.refunded without any change while payment.succeeded is FAILED, then ends as in-order delivery with every effect once", async () => {
+  it("refuses payment.refunded without any change while payment.succeeded is FAILED, dead-letters it, then ends as in-order delivery with every effect once after its replay", async () => {
     const inOrder = await run(false);
     const outOfOrder = await run(true);
 

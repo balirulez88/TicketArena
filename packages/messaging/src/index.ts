@@ -5,8 +5,11 @@ export {
   type ConsumerRunner,
   type ConsumerRunnerOptions,
   createConsumerRunner,
+  type DeadLetter,
+  type DeadLetterCause,
   type HandlerContext,
   type HandlerOutcome,
+  type MessageSchema,
 } from "./consumer-runner.js";
 export {
   connectJetStreamMessageBus,

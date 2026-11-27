@@ -4,7 +4,9 @@
 
 **Blocked by:** 24, 49 (Prisma schema drift), 59 (terminal outbox failures)
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-27 on devflow/run-202611271130 (run 202611271130)
 
 **Status reason:** retry, DLQ and recovery after the MVP (2026-11-18)
 

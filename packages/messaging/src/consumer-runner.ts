@@ -3,13 +3,18 @@ import type { PrismaClient, TransactionClient } from "@ticketarena/db";
 import { createBackgroundLoop, sleep } from "./background-loop.js";
 import { createEmitCausedEvent, type EmitCausedEvent } from "./caused-event.js";
 import { createFailureReporter } from "./failure-reporter.js";
-import type { MessageBus, ReceivedMessage } from "./message-bus.js";
+import type { MessageBus, PublishAck, ReceivedMessage } from "./message-bus.js";
 import { type ServiceName, serviceStore } from "./service-store.js";
 
 const PG_UNIQUE_VIOLATION = "P2002";
 // ADR 0011 transient-failure schedule, indexed by delivery count. Past the 4th delivery the last
 // entry repeats; ending retries is the DLQ gate's job (deliveryCount > 5), not this table's.
 const RETRY_DELAYS_MS = [1_000, 5_000, 30_000, 120_000];
+// ADR 0011 application budget: deliveries past it go to the DLQ before the handler runs.
+const RETRY_BUDGET = 5;
+// ADR 0011: a DLQ publish that fails is retried after 2 min; the message is never `term`ed
+// without a confirmed DLQ copy.
+const DLQ_FAILURE_DELAY_MS = 120_000;
 const FETCH_BATCH = 10;
 // JetStream rejects pull requests that expire sooner than one second.
 const FETCH_EXPIRES_MS = 1_000;
@@ -21,15 +26,41 @@ export interface HandlerContext {
 
 /**
  * What a handler returns when the message must not count as processed: the runner rolls the
- * transaction back (no `processed_messages` row, no outbox writes) and redelivers later.
- * `retry`: the state the message needs is not reached yet. `poison`: the message can never be
- * applied; ADR 0011 routes it to the DLQ, which does not exist yet, so until then it is logged as
- * an error and redelivered on the same delayed schedule, never terminated without a DLQ copy.
+ * transaction back (no `processed_messages` row, no outbox writes). `retry`: the state the
+ * message needs is not reached yet; it is redelivered on the delayed schedule. `poison`: the
+ * message can never be applied; it is dead-lettered (ADR 0011).
  */
 export interface HandlerOutcome {
   readonly outcome: "retry" | "poison";
   /** A reason code, logged with the message. */
   readonly reason: string;
+}
+
+/** Structurally what a zod schema's `safeParse` offers, so this package need not depend on zod. */
+export interface MessageSchema {
+  safeParse(value: unknown): {
+    readonly success: boolean;
+    readonly error?: { readonly message: string } | undefined;
+  };
+}
+
+/** Why a message was dead-lettered. */
+export type DeadLetterCause =
+  | "retry_budget_exhausted"
+  | "schema_invalid"
+  | "unknown_version"
+  | "handler_poison";
+
+/** The JSON body of a DLQ copy on `ta.dlq.<consumer>` (`Nats-Msg-Id = dlq:<consumer>:<id>`). */
+export interface DeadLetter {
+  readonly consumer: string;
+  /** The original subject, without any namespace the adapter adds. */
+  readonly subject: string;
+  readonly streamSeq: number;
+  readonly deliveryCount: number;
+  readonly error: { readonly cause: DeadLetterCause; readonly message: string };
+  /** The original message data, byte for byte (it may not even be JSON). */
+  readonly envelope: string;
 }
 
 export interface ConsumerRunnerOptions {
@@ -40,6 +71,13 @@ export interface ConsumerRunnerOptions {
   /** Durable name; also the `consumer` half of the `processed_messages` key. */
   readonly consumer: string;
   readonly filterSubject: string;
+  /**
+   * The envelope schema per `version` this consumer understands. When given, the DLQ gate
+   * dead-letters a message that is not JSON, carries a version not listed, or fails its
+   * version's schema, before `beforeTransaction` and the handler see it. Without it the gate
+   * checks only the retry budget.
+   */
+  readonly schemas?: Readonly<Record<number, MessageSchema>>;
   /**
    * Runs before the transaction opens, on every delivery including duplicates, for slow work
    * that must not hold the transaction (e.g. a provider's latency or call; it may commit its own
@@ -104,6 +142,13 @@ export async function createConsumerRunner(
       message.term("missing Nats-Msg-Id");
       return;
     }
+    // The gate runs before any consumer code, so a message that crashes the process on every
+    // delivery still reaches the DLQ once its budget is spent (ADR 0011).
+    const rejection = gate(message);
+    if (rejection !== undefined) {
+      await deadLetter(message, messageId, rejection, log);
+      return;
+    }
     try {
       await options.beforeTransaction?.(message);
       await options.prisma.$transaction(async (tx) => {
@@ -126,6 +171,16 @@ export async function createConsumerRunner(
         }
       });
     } catch (error) {
+      if (error instanceof Deferred && error.result.outcome === "poison") {
+        // The transaction has rolled back, so the DLQ copy is the only trace the message leaves.
+        await deadLetter(
+          message,
+          messageId,
+          { cause: "handler_poison", message: error.result.reason },
+          log,
+        );
+        return;
+      }
       settleFailure(message, error, log);
       return;
     }
@@ -133,7 +188,67 @@ export async function createConsumerRunner(
     message.ack();
   }
 
-  /** Every path that does not commit ends in an ack (duplicate) or a delayed nak, never `term`. */
+  function gate(message: ReceivedMessage): DeadLetter["error"] | undefined {
+    // JetStream's deliveryCount is the only attempt counter (ADR 0011): it also counts crashes and
+    // AckWait expiries, and survives restarts, which an in-process counter would not.
+    if (message.deliveryCount > RETRY_BUDGET) {
+      return {
+        cause: "retry_budget_exhausted",
+        message: `delivery ${message.deliveryCount} exceeds the retry budget of ${RETRY_BUDGET}`,
+      };
+    }
+    return options.schemas === undefined ? undefined : checkSchema(options.schemas, message.data);
+  }
+
+  /**
+   * Publishes the DLQ copy and `term`s only after its PubAck. The DLQ id is derived from the
+   * envelope id, so a crash between PubAck and `term` republishes inside the DLQ stream's
+   * duplicate window and the broker stores no second copy. A failed publish naks, never terms.
+   */
+  async function deadLetter(
+    message: ReceivedMessage,
+    envelopeId: string,
+    error: DeadLetter["error"],
+    log: Logger,
+  ): Promise<void> {
+    const deliveryCount = message.deliveryCount;
+    const letter: DeadLetter = {
+      consumer: options.consumer,
+      subject: message.subject,
+      streamSeq: message.streamSeq,
+      deliveryCount,
+      error,
+      envelope: message.data,
+    };
+    let ack: PublishAck;
+    try {
+      ack = await options.bus.publish({
+        subject: `ta.dlq.${options.consumer}`,
+        data: JSON.stringify(letter),
+        msgId: `dlq:${options.consumer}:${envelopeId}`,
+      });
+    } catch (publishError) {
+      log.error(
+        { err: publishError, cause: error.cause, deliveryCount, delayMs: DLQ_FAILURE_DELAY_MS },
+        "DLQ publish failed; retrying",
+      );
+      message.nak(DLQ_FAILURE_DELAY_MS);
+      return;
+    }
+    log.error(
+      {
+        cause: error.cause,
+        reason: error.message,
+        deliveryCount,
+        dlqStreamSeq: ack.streamSeq,
+        duplicate: ack.duplicate,
+      },
+      "message dead-lettered",
+    );
+    message.term(`dead-lettered: ${error.cause}`);
+  }
+
+  /** Every other failure ends in an ack (duplicate) or a delayed nak, never `term`. */
   function settleFailure(message: ReceivedMessage, error: unknown, log: Logger): void {
     const deliveryCount = message.deliveryCount;
     if (error instanceof AlreadyProcessed) {
@@ -141,16 +256,12 @@ export async function createConsumerRunner(
       message.ack();
       return;
     }
-    // JetStream's deliveryCount is the only attempt counter (ADR 0011): it also counts crashes and
-    // AckWait expiries, and survives restarts, which an in-process counter would not.
     const delayMs = retryDelayMs(deliveryCount);
     if (error instanceof Deferred) {
-      const { outcome, reason } = error.result;
-      if (outcome === "poison") {
-        log.error({ reason, deliveryCount, delayMs }, "poison message; no DLQ yet, retrying");
-      } else {
-        log.info({ reason, deliveryCount, delayMs }, "message not applicable yet; retrying");
-      }
+      log.info(
+        { reason: error.result.reason, deliveryCount, delayMs },
+        "message not applicable yet; retrying",
+      );
     } else {
       log.error({ err: error, deliveryCount, delayMs }, "handler failed; retrying");
     }
@@ -196,6 +307,29 @@ function parseJson(data: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+function checkSchema(
+  schemas: Readonly<Record<number, MessageSchema>>,
+  data: string,
+): DeadLetter["error"] | undefined {
+  const raw = parseJson(data);
+  if (raw === undefined) {
+    return { cause: "schema_invalid", message: "message data is not JSON" };
+  }
+  const version =
+    typeof raw === "object" && raw !== null && "version" in raw ? raw.version : undefined;
+  const schema = typeof version === "number" ? schemas[version] : undefined;
+  if (schema === undefined) {
+    return {
+      cause: "unknown_version",
+      message: `no schema for envelope version ${String(version)}`,
+    };
+  }
+  const result = schema.safeParse(raw);
+  return result.success
+    ? undefined
+    : { cause: "schema_invalid", message: result.error?.message ?? "schema validation failed" };
 }
 
 function defaultRetryDelayMs(deliveryCount: number): number {

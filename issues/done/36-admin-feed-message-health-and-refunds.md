@@ -4,7 +4,9 @@
 
 **Blocked by:** 35, 25, 23, 26
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-27 on devflow/run-202611271130 (run 202611271130)
 
 **Status reason:** admin message health and refunds after the MVP (2026-11-18)
 

@@ -28,6 +28,7 @@ import type {
   RetainedStreamState,
   StoredMessageRef,
 } from "./consumer-admin.js";
+import type { DeliveryHealth, DeliveryHealthProbe } from "./delivery-health.js";
 import {
   type ConsumerSpec,
   type FetchOptions,
@@ -113,7 +114,7 @@ const STREAMS: Readonly<Record<StreamKind, StreamDefinition>> = {
 /** The only module allowed to import `@nats-io/*`. */
 export async function connectJetStreamMessageBus(
   options: JetStreamMessageBusOptions,
-): Promise<MessageBus> {
+): Promise<MessageBus & DeliveryHealthProbe> {
   const parts = await openJetStream(options);
   return new JetStreamMessageBus(
     parts.connection,
@@ -198,7 +199,7 @@ function durableConsumerConfig(consumer: string, filterSubject: string, ackWaitM
   } as const satisfies Partial<ConsumerConfig>;
 }
 
-class JetStreamMessageBus implements MessageBus {
+class JetStreamMessageBus implements MessageBus, DeliveryHealthProbe {
   private readonly streamPrefix: string;
   private readonly subjectPrefix: string;
 
@@ -300,6 +301,43 @@ class JetStreamMessageBus implements MessageBus {
     }
     const consumer = await this.client.consumers.get(stream, spec.consumer);
     return new JetStreamSubscription(consumer, this.subjectPrefix);
+  }
+
+  async deliveryHealth(consumers: readonly string[], now: Date): Promise<DeliveryHealth> {
+    const main = this.streamName("main");
+    const [infos, dlq] = await Promise.all([
+      Promise.all(
+        consumers.map(async (consumer) => {
+          try {
+            const info = await this.manager.consumers.info(main, consumer);
+            return {
+              lag: info.num_pending,
+              pendingAcks: info.num_ack_pending,
+              redeliveries: info.num_redelivered,
+            };
+          } catch (error) {
+            if (
+              error instanceof JetStreamApiError &&
+              error.code === JetStreamApiCodes.ConsumerNotFound
+            ) {
+              return null;
+            }
+            throw error;
+          }
+        }),
+      ),
+      this.manager.streams.info(this.streamName("dlq")),
+    ]);
+    const { messages, first_ts } = dlq.state;
+    return {
+      consumers: Object.fromEntries(consumers.map((consumer, i) => [consumer, infos[i] ?? null])),
+      dlq: {
+        size: messages,
+        // Stamped by the broker's clock; a caller clock behind it reads 0, never a negative age.
+        oldestAgeMs:
+          messages === 0 ? null : Math.max(0, now.getTime() - new Date(first_ts).getTime()),
+      },
+    };
   }
 
   async close(): Promise<void> {

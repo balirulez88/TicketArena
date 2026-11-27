@@ -14,6 +14,9 @@ import {
 } from "@/components/ui/table";
 import type { AdminSnapshot, RaceResult, ResetDemoResult } from "@/server/routers/admin";
 import { useTRPC } from "@/trpc/react";
+import { LiveFeed } from "./live-feed";
+import { MessageHealth } from "./message-health";
+import { StuckRefunds } from "./stuck-refunds";
 
 /** The spec's refresh rate for the live snapshot. */
 export const SNAPSHOT_POLL_MS = 1000;
@@ -37,7 +40,9 @@ const METRICS = [
   ["seat_unavailable", "Seat unavailable"],
   ["race_lost", "Races lost"],
   ["booking_busy", "Busy"],
+  ["deadlock_retry", "Deadlock retries"],
   ["limit_exceeded", "Limit exceeded"],
+  ["late_delivery_refund", "Late-delivery refunds"],
 ] as const;
 
 function OrdersCard({ snapshot }: { readonly snapshot: AdminSnapshot }) {
@@ -230,6 +235,9 @@ export function AdminDashboard() {
       <DemoActions />
       <OrdersCard snapshot={snapshot.data} />
       <EventsTable snapshot={snapshot.data} />
+      <MessageHealth snapshot={snapshot.data} />
+      <StuckRefunds />
+      <LiveFeed />
     </div>
   );
 }

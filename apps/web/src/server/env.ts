@@ -87,6 +87,11 @@ const serverEnvSchema = z.object({
   ADMISSION_SECRET: atLeast32Bytes,
   /** The operator password for `/admin` (ADR 0012); only the login route reads it. */
   ADMIN_PASSWORD: z.string().min(12, "must be at least 12 characters"),
+  /**
+   * The worker's `/health` URL, the source of the dashboard's NATS figures. Optional: without it
+   * the snapshot reports them as unavailable and everything else still works.
+   */
+  WORKER_HEALTH_URL: z.url({ protocol: /^https?$/ }).optional(),
 });
 
 const sessionEnvSchema = serverEnvSchema.pick({ SESSION_SECRET: true });
@@ -104,6 +109,10 @@ const queueEnvSchema = serverEnvSchema.pick({
   REDIS_URL: true,
   REDIS_CONNECT_TIMEOUT_MS: true,
   REDIS_COMMAND_TIMEOUT_MS: true,
+});
+
+const workerHealthEnvSchema = z.object({
+  WORKER_HEALTH_URL: serverEnvSchema.shape.WORKER_HEALTH_URL.unwrap(),
 });
 
 const databaseEnvSchema = serverEnvSchema.pick({ DATABASE_URL: true, DATABASE_DRIVER: true });
@@ -181,4 +190,12 @@ export function parseQueueEnv(
   source: EnvSource,
 ): Pick<ServerEnv, "REDIS_URL" | "REDIS_CONNECT_TIMEOUT_MS" | "REDIS_COMMAND_TIMEOUT_MS"> {
   return parseEnv(queueEnvSchema, source, "queue");
+}
+
+/**
+ * Validates only the worker health URL, resolved lazily by the admin snapshot, so a missing value
+ * only leaves the dashboard's NATS figures unavailable.
+ */
+export function parseWorkerHealthEnv(source: EnvSource): { WORKER_HEALTH_URL: string } {
+  return parseEnv(workerHealthEnvSchema, source, "worker health");
 }

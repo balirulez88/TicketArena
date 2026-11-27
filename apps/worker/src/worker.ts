@@ -7,6 +7,7 @@ import {
   type ConsumerRunnerOptions,
   createConsumerRunner,
   createOutboxRelay,
+  type DeliveryHealth,
   type MessageBus,
   type OutboxFailureMetrics,
   type OutboxRelayOptions,
@@ -77,11 +78,13 @@ export interface WorkerOptions {
   /**
    * Dependencies `/health` reports on separately, each a bounded probe that rejects when the
    * dependency is unreachable. Redis is reported, never required: the worker runs without it.
-   * `outbox` reads the FAILED outbox metrics (`measureOutboxFailures`) for the alert flag.
+   * `outbox` reads the FAILED outbox metrics (`measureOutboxFailures`) for the alert flag;
+   * `delivery` reads the broker's consumer and DLQ figures (`deliveryHealth`) for the dashboard.
    */
   readonly health?: {
     readonly redis?: () => Promise<unknown>;
     readonly outbox?: () => Promise<Record<ServiceName, OutboxFailureMetrics>>;
+    readonly delivery?: () => Promise<DeliveryHealth>;
   };
   /**
    * The deadline for stopping what a failed start already started, after which the start error
@@ -94,7 +97,10 @@ export interface WorkerOptions {
 /**
  * `/health`: the worker itself is up (`status` is always `ok`, so neither a dependency nor a FAILED
  * outbox row ever fails liveness); Redis, when probed, is `ok` or `unavailable`; the outbox, when
- * measured, carries the FAILED metrics per service and `alert`, set while any row is FAILED.
+ * measured, carries the FAILED metrics per service and `alert`, set while any row is FAILED; the
+ * delivery figures, when probed, are the broker's consumer lag, pending acks, redeliveries and DLQ
+ * size and age, or `unavailable`. Every part is optional and added, never changed, so existing
+ * readers of `/health` keep working.
  */
 async function healthReport(health: WorkerOptions["health"]): Promise<object> {
   const redis =
@@ -118,7 +124,16 @@ async function healthReport(health: WorkerOptions["health"]): Promise<object> {
             () => "unavailable",
           ),
         };
-  return { status: "ok", ...redis, ...outbox };
+  const delivery =
+    health?.delivery === undefined
+      ? {}
+      : {
+          delivery: await health.delivery().then(
+            (figures): DeliveryHealth | "unavailable" => figures,
+            () => "unavailable",
+          ),
+        };
+  return { status: "ok", ...redis, ...outbox, ...delivery };
 }
 
 export interface RunningWorker {

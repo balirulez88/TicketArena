@@ -111,6 +111,7 @@ changed.
 | `order_payments_open_refund_idx`              | `order_payments(refundLastRequestedAt)`, partial (`REFUND_REQUESTED`, `MANUAL_REVIEW`) | Reconciler scan and `refund_pending_age_max`     |
 | `outbox_events_status_createdAt_idx`          | `outbox_events(status, createdAt)`                                                     | Relay polling                                    |
 | `outbox_events_aggregateType_aggregateId_idx` | `outbox_events(aggregateType, aggregateId)`                                            | Aggregate lookup                                 |
+| `outbox_events_createdAt_id_idx`              | `outbox_events(createdAt, id)`                                                         | Admin live feed cursor                           |
 | `outbox_event_history_outboxId_id_idx`        | `outbox_event_history(outboxId, id)`                                                   | History of one outbox row, in order              |
 
 Booking: `booking.holdSeats` (1–6 seats of one event, all or nothing), `booking.getHold` (owner only, else
@@ -486,8 +487,9 @@ The same shape in each service's schema (`public`, `payment`, `notification`).
 | `failedAt` (timestamptz)       | When the row became `FAILED`; set exactly while `status = 'FAILED'` (CHECK `outbox_events_failed_at_check`)         |
 | `createdAt`, `publishedAt`     | Ordering and lag monitoring; `publishedAt` stays null on a `FAILED` row                                             |
 
-Indexes: `(status, createdAt)` serves the relay's "oldest pending first" poll;
-`(aggregateType, aggregateId)` serves per-aggregate lookups.
+Indexes: `(status, createdAt)` serves the relay's "oldest pending first" poll and the outbox lag;
+`(aggregateType, aggregateId)` serves per-aggregate lookups; `(createdAt, id)` serves the admin live
+feed's cursor (`20261201000000_outbox_feed_index`, on all three service outboxes).
 
 **`FAILED` rows** ([ADR 0022](../adr/0022-terminal-failed-outbox-events.md)) keep everything they were
 inserted with (id, aggregate, event type and payload, byte for byte): they are never deleted, never

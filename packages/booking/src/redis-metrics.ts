@@ -17,10 +17,11 @@ export interface RedisMetricsDeleteClient {
 }
 
 /**
- * The counters the admin dashboard reads. `deadlock_retry` is written to the same hash but is an
- * operational signal, not a booking outcome, so the dashboard does not show it.
+ * The counters the admin dashboard reads (spec: Admin dashboard): every booking outcome,
+ * `deadlock_retry` as the contention signal, and the saga's `late_delivery_refund`, which makes
+ * the settlement grace's trade-off visible. `payment_attempt_failed` stays in the hash only.
  */
-type DashboardMetric = Exclude<BookingMetric, "deadlock_retry">;
+type DashboardMetric = BookingMetric | Exclude<SagaMetric, "payment_attempt_failed">;
 
 export type BookingMetricCounts = Readonly<Record<DashboardMetric, number>>;
 
@@ -40,7 +41,7 @@ function metricsKey(prefix: string, eventId: string): string {
 
 /**
  * Counters live in one hash per event: `${prefix}booking:metrics:${eventId}`, field = metric.
- * The saga's counters share the hash; the reader reads only the hold counters the dashboard shows.
+ * The saga's counters share the hash; the reader reads only the counters the dashboard shows.
  */
 export function createRedisBookingMetrics(
   client: RedisMetricsClient,
@@ -68,7 +69,9 @@ export function createRedisBookingMetricsReader(
         seat_unavailable: count("seat_unavailable"),
         race_lost: count("race_lost"),
         booking_busy: count("booking_busy"),
+        deadlock_retry: count("deadlock_retry"),
         limit_exceeded: count("limit_exceeded"),
+        late_delivery_refund: count("late_delivery_refund"),
       };
     },
   };

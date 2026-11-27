@@ -42,7 +42,15 @@ exactly one of them. It never waits for Redis: the relay, the consumers and the 
 run during a Redis outage (see [waiting room](../architecture/waiting-room.md#redis-outage)). It serves
 `GET /health`, which reports Redis separately (`"redis": "ok" | "unavailable"`) and the outbox's
 `FAILED` rows (`"outbox": { "alert": boolean, "services": { booking, payment, notification } }`, each
-`{ failed, oldestFailedAgeMs, failedTransitions }`, or `"unavailable"` when the database cannot be read).
+`{ failed, oldestFailedAgeMs, failedTransitions }`, or `"unavailable"` when the database cannot be read)
+and the broker's delivery figures for the admin dashboard (`"delivery": { "consumers": { <durable>:
+{ lag, pendingAcks, redeliveries } | null }, "dlq": { size, oldestAgeMs } }`, or `"unavailable"` when
+JetStream cannot answer). They come from `deliveryHealth(consumers, now)`, which the JetStream adapter
+implements next to `MessageBus` (`DeliveryHealthProbe`): per durable consumer of the main stream
+`num_pending` (lag: matching messages not yet delivered), `num_ack_pending` (delivered, not settled)
+and `num_redelivered` (of those, the ones delivered more than once: a current figure, not a running
+total), `null` for a consumer the broker does not know; for the DLQ stream its message count and the
+age of its first retained message (`null` while empty). The worker reports its own consumers.
 `status` stays `ok` and the response 200 whatever they report: a `FAILED` row is an operator alert, never a
 liveness failure.
 

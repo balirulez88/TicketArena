@@ -62,6 +62,9 @@ function caller(overrides: Partial<TRPCContext> = {}) {
     metrics: () => createRedisBookingMetrics(redisClient, metricsPrefix),
     metricsReader: () => createRedisBookingMetricsReader(redisClient, metricsPrefix),
     metricsReset: () => createRedisBookingMetricsReset(redisClient, metricsPrefix),
+    workerHealth: () => {
+      throw new Error("worker health is not read here");
+    },
     rateLimiter: () => createAdminRateLimiter(upstashClient, limiterPrefix),
     queueStore: async () => queueStore(),
     random: { next: () => 0 },

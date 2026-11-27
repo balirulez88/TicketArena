@@ -7,6 +7,7 @@ import {
   parseQueueEnv,
   parseServerEnv,
   parseSessionEnv,
+  parseWorkerHealthEnv,
 } from "./env";
 
 const validEnv = {
@@ -241,6 +242,28 @@ describe("parseDatabaseEnv in production (ADR 0013)", () => {
   test("a direct Neon endpoint is refused whichever driver is configured", () => {
     expect(() => parseDatabaseEnv({ DATABASE_URL: direct, DATABASE_DRIVER: "pg" })).toThrow(
       /DATABASE_URL/,
+    );
+  });
+});
+
+describe("parseWorkerHealthEnv", () => {
+  test("is optional for the server as a whole", () => {
+    expect(parseServerEnv(validEnv).WORKER_HEALTH_URL).toBeUndefined();
+  });
+
+  test("returns the worker health URL", () => {
+    expect(
+      parseWorkerHealthEnv({ WORKER_HEALTH_URL: "http://worker.internal:8080/health" }),
+    ).toEqual({ WORKER_HEALTH_URL: "http://worker.internal:8080/health" });
+  });
+
+  test("names WORKER_HEALTH_URL when it is missing or not an http(s) URL", () => {
+    expect(() => parseWorkerHealthEnv({})).toThrow(/WORKER_HEALTH_URL/);
+    expect(() => parseWorkerHealthEnv({ WORKER_HEALTH_URL: "nats://worker:4222" })).toThrow(
+      /WORKER_HEALTH_URL/,
+    );
+    expect(() => parseServerEnv({ ...validEnv, WORKER_HEALTH_URL: "not a url" })).toThrow(
+      /WORKER_HEALTH_URL/,
     );
   });
 });

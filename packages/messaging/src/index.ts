@@ -24,6 +24,11 @@ export {
   type HandlerOutcome,
   type MessageSchema,
 } from "./consumer-runner.js";
+export type {
+  ConsumerDeliveryHealth,
+  DeliveryHealth,
+  DeliveryHealthProbe,
+} from "./delivery-health.js";
 export {
   connectJetStreamConsumerAdmin,
   connectJetStreamMessageBus,

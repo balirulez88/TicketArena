@@ -62,6 +62,9 @@ function caller(principal: Principal, now: Date, random: Random = { next: () => 
     metricsReset: () => {
       throw new Error("metrics are not reset here");
     },
+    workerHealth: () => {
+      throw new Error("worker health is not read here");
+    },
     rateLimiter: () => {
       throw new Error("nothing is rate-limited here");
     },
@@ -357,6 +360,9 @@ describe("admission slots", () => {
         },
         metricsReset: () => {
           throw new Error("metrics are not reset here");
+        },
+        workerHealth: () => {
+          throw new Error("worker health is not read here");
         },
         rateLimiter: () => {
           throw new Error("nothing is rate-limited here");

@@ -114,6 +114,9 @@ describe("admin.snapshot", () => {
       metricsReset: () => {
         throw new Error("metrics are not reset here");
       },
+      workerHealth: () => {
+        throw new Error("worker health is not read here");
+      },
       rateLimiter: () => {
         throw new Error("nothing is rate-limited here");
       },
@@ -158,6 +161,8 @@ describe("admin.snapshot", () => {
     await counters.increment("hold_ok", event.id);
     await counters.increment("hold_ok", event.id);
     await counters.increment("race_lost", event.id);
+    await counters.increment("deadlock_retry", event.id);
+    await counters.increment("late_delivery_refund", event.id);
     // Three in the queue, one admitted: two queued, and with the holder two active shoppers.
     for (const member of ["q1", "q2", "q3"]) {
       await queueStore().join(event.id, member, { kind: "SEQUENCE" }, NOW);
@@ -188,7 +193,9 @@ describe("admin.snapshot", () => {
         seat_unavailable: 0,
         race_lost: 1,
         booking_busy: 0,
+        deadlock_retry: 1,
         limit_exceeded: 0,
+        late_delivery_refund: 1,
       },
     });
     const others = snapshot.events.filter((candidate) => candidate.eventId !== event.id);

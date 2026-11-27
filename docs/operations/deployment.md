@@ -190,9 +190,13 @@ From then on every push to `main` that passes CI deploys itself.
 
 ## Operating the demo
 
-- **Health.** `fly checks list --app ticketarena-worker` (`/health`, reports Redis too) and
-  `--app ticketarena-nats` (`/healthz?js-enabled-only=true`). The `/admin` dashboard shows queue,
-  seats, orders and pending payments live.
+- **Health.** `fly checks list --app ticketarena-worker` (`/health`, reports Redis, `FAILED` outbox
+  rows and the consumer and DLQ figures too) and `--app ticketarena-nats`
+  (`/healthz?js-enabled-only=true`). The `/admin` dashboard shows queue, seats, orders, pending
+  payments, message health, stuck refunds and the live feed. Its consumer and DLQ figures come from
+  the worker's `/health` at `WORKER_HEALTH_URL` (Vercel); the worker is not public, so in this
+  topology the variable stays unset and the dashboard reports those figures as unavailable, while
+  outbox lag, the feed and the refunds, read from Postgres, still work.
 - **Stopping.** Fly sends SIGTERM and kills after `kill_timeout = "30s"`. The worker stops its
   loops and connections within `DEFAULT_SHUTDOWN_DEADLINE_MS` (25 s, `apps/worker/src/lifecycle.ts`),
   then exits 0; a failed stop or the deadline exits 1 and logs the component (`worker did not stop

@@ -35,8 +35,22 @@ describe("createRedisBookingMetricsReader", () => {
       seat_unavailable: 0,
       race_lost: 1,
       booking_busy: 0,
+      deadlock_retry: 0,
       limit_exceeded: 0,
+      late_delivery_refund: 0,
     });
+  });
+
+  test("reads the dashboard's deadlock_retry and the saga's late_delivery_refund too", async () => {
+    const eventId = randomUUID();
+    const metrics = createRedisBookingMetrics(redisClient, redis.prefix);
+    await metrics.increment("deadlock_retry", eventId);
+    await metrics.increment("late_delivery_refund", eventId);
+    await metrics.increment("late_delivery_refund", eventId);
+
+    const read = await createRedisBookingMetricsReader(redisClient, redis.prefix).read(eventId);
+
+    expect(read).toMatchObject({ deadlock_retry: 1, late_delivery_refund: 2 });
   });
 
   test("an event with no counters reads as all zeros", async () => {
@@ -61,7 +75,7 @@ describe("createRedisBookingMetrics", () => {
     ).toBe("2");
     expect(
       Object.values(await createRedisBookingMetricsReader(redisClient, redis.prefix).read(eventId)),
-    ).toEqual([0, 0, 0, 0, 0]);
+    ).toEqual([0, 0, 0, 0, 0, 0, 0]);
   });
 });
 

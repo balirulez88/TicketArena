@@ -93,6 +93,9 @@ function caller(principal: Principal, now: Date = NOW) {
     metricsReset: () => {
       throw new Error("metrics are not reset here");
     },
+    workerHealth: () => {
+      throw new Error("worker health is not read here");
+    },
     rateLimiter: () => {
       throw new Error("nothing is rate-limited here");
     },

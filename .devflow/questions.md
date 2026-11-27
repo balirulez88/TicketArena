@@ -1010,3 +1010,27 @@ When is a processed_messages checkpoint reliable, and how is a dead-lettered mes
 Assumed: Reliable when the stream's first retained message is newer than the 14-day retention; an ack floor under another filter is ignored; --ignore-ack-floor replays a terminated (dead-lettered) message
 
 Answer: (open)
+
+## 2026-11-27 16:25 ticket 36
+
+What does admin.feed return without a cursor, and does it include payloads?
+
+Assumed: Newest limit entries (default 50, max 200) of all three outboxes by (createdAt, id); nextCursor echoes input when nothing new; never the payload (buyer PII); correlationId from the envelope, nullable; new (createdAt, id) index
+
+Answer: (open)
+
+## 2026-11-27 16:25 ticket 36
+
+How does the web dashboard get NATS delivery health from a private worker?
+
+Assumed: Optional WORKER_HEALTH_URL (zod, 800 ms timeout); unset in documented prod so NATS figures show unavailable; outbox lag read from Postgres; redeliveries = current num_redelivered
+
+Answer: (open)
+
+## 2026-11-27 16:25 ticket 36
+
+retryRefund error mapping and stuckRefunds scope?
+
+Assumed: NOT_FOUND without an obligation, PRECONDITION_FAILED (REFUND_NOT_IN_MANUAL_REVIEW) otherwise, both naming the payment; stuckRefunds lists all open obligations (default 100, max 500) aged from the first request; no rate limit on retry
+
+Answer: (open)

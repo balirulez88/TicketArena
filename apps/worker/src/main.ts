@@ -78,6 +78,11 @@ const started = await startWorkerProcess({
       health: {
         redis: redis.ping,
         outbox: () => measureOutboxFailures({ prisma, now: clock.now() }),
+        delivery: () =>
+          bus.deliveryHealth(
+            consumers.map((consumer) => consumer.consumer),
+            clock.now(),
+          ),
       },
       stopBudget,
     });

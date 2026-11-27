@@ -50,6 +50,8 @@ model OutboxEvent {
   // Supports the relay's hot query: "oldest PENDING events first".
   @@index([status, createdAt])
   @@index([aggregateType, aggregateId])
+  /// The admin live feed's cursor order (ADR 0009).
+  @@index([createdAt, id])
   @@map("outbox_events")
   @@schema("public")
 }
@@ -378,6 +380,8 @@ model PaymentOutboxEvent {
 
   @@index([status, createdAt])
   @@index([aggregateType, aggregateId])
+  /// The admin live feed's cursor order (ADR 0009).
+  @@index([createdAt, id])
   @@map("outbox_events")
   @@schema("payment")
 }
@@ -494,6 +498,8 @@ model NotificationOutboxEvent {
 
   @@index([status, createdAt])
   @@index([aggregateType, aggregateId])
+  /// The admin live feed's cursor order (ADR 0009).
+  @@index([createdAt, id])
   @@map("outbox_events")
   @@schema("notification")
 }

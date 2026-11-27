@@ -50,6 +50,9 @@ function contextFor(db: PrismaClient, principal: Principal): TRPCContext {
     metrics: () => ({ increment: async () => undefined }),
     metricsReader: unused("metricsReader"),
     metricsReset: unused("metricsReset"),
+    workerHealth: () => {
+      throw new Error("worker health is not read here");
+    },
     rateLimiter: unused("rateLimiter"),
     // Reached only after an order committed; these orders never do.
     queueStore: () => Promise.reject(new Error("queueStore is not used by a failed placeOrder")),

@@ -10,6 +10,8 @@ import {
   MixedCurrencyError,
   NotDemoEventError,
   NotOnSaleError,
+  RefundNotInManualReviewError,
+  RefundObligationNotFoundError,
   ResetBlockedError,
   SeatUnavailableError,
 } from "@ticketarena/booking";
@@ -34,6 +36,8 @@ const DOMAIN_ERRORS = [
   IdempotencyKeyReusedError,
   ResetBlockedError,
   NotDemoEventError,
+  RefundObligationNotFoundError,
+  RefundNotInManualReviewError,
 ] as const;
 
 type DomainError = InstanceType<(typeof DOMAIN_ERRORS)[number]>;

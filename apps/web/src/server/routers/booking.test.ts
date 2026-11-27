@@ -57,6 +57,9 @@ function contextFor(principal: Principal, now: Date = NOW): TRPCContext {
     metricsReset: () => {
       throw new Error("metrics are not reset here");
     },
+    workerHealth: () => {
+      throw new Error("worker health is not read here");
+    },
     rateLimiter: () => {
       throw new Error("nothing is rate-limited here");
     },
@@ -580,6 +583,9 @@ describe("booking.holdSeats saturation", () => {
           },
           metricsReset: () => {
             throw new Error("metrics are not reset here");
+          },
+          workerHealth: () => {
+            throw new Error("worker health is not read here");
           },
           rateLimiter: () => {
             throw new Error("nothing is rate-limited here");

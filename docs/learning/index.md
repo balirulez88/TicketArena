@@ -34,3 +34,4 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [57: Produkciós booking metrikák](57-production-booking-metrics.md): `optionalMetrics` a context-ből, nem várt `HINCRBY` Upstashba, best-effort, `unknown` kulcs, fake Upstash a rendszerhatáron
 - [70: Tartós refund obligation ismeretlen orderhez](70-durable-orphan-refund-obligation.md): `orphan_refund_obligations`, `paymentId` PK mint dedupe, emit csak ha írt sort, `FOR UPDATE` + `decide()`, outbox retentiontől független, backfill migráció
 - [23: Refund reconciler és manual review](23-refund-reconciler.md): stale obligation re-emit outboxon át, `SKIP LOCKED`, 3 re-emit után `MANUAL_REVIEW`, `retryRefund`, AT-24
+- [59: Terminális outbox hibák](59-terminal-outbox-failures.md): tartós vs átmeneti publish hiba, `FAILED` végállapot cap-pel, aggregátum elengedése, requeue az eredeti id-n, append-only history, health alert

@@ -2,6 +2,9 @@ import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, inject } from "vitest";
 import { loadTestEnv } from "./env";
 import { deleteStreams } from "./nats";
+
+export { declareStream, deleteConsumer } from "./nats";
+
 import { createDatabaseFromTemplate, createEmptyDatabase, dropDatabase } from "./postgres";
 import type {} from "./provided-context";
 import { deleteRedisKeys } from "./redis";
@@ -135,6 +138,41 @@ export function setupTestUpstash(): TestUpstash {
     ...endpoint,
     prefix,
     command: (args) => upstashCommand(endpoint, args),
+  };
+}
+
+export interface TestNatsStandIn {
+  /** The real NATS URL with its host and port replaced by the stand-in's. */
+  readonly url: string;
+  /** `closed` stops the broker as a client sees it (connections dropped and refused). */
+  setMode(mode: RedisStandInMode): Promise<void>;
+}
+
+/**
+ * The same switchable TCP stand-in as `setupRedisStandIn`, in front of the real test NATS: a
+ * broker outage a client sees as real (dropped connections, refused reconnects), without stopping
+ * the NATS server that every other test file shares.
+ */
+export function setupNatsStandIn(): TestNatsStandIn {
+  const env = loadTestEnv();
+  let standIn: RedisStandIn | undefined;
+  beforeAll(async () => {
+    standIn = await startRedisStandIn(env.natsUrl);
+  });
+  afterAll(async () => {
+    await standIn?.close();
+  });
+  const started = (): RedisStandIn => {
+    if (standIn === undefined) {
+      throw new Error("setupNatsStandIn: the stand-in is available only inside tests and hooks");
+    }
+    return standIn;
+  };
+  return {
+    get url() {
+      return started().url;
+    },
+    setMode: (mode) => started().setMode(mode),
   };
 }
 

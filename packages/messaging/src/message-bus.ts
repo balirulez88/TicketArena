@@ -12,6 +12,30 @@ export interface PublishInput {
   readonly msgId: string;
 }
 
+/**
+ * Why a publish can never succeed for this message, however often it is retried (ADR 0022):
+ * `no_stream` (no stream's subjects match it), `payload_too_large` (over the broker's maximum),
+ * `unserialisable` (the payload cannot be turned into the message's data).
+ */
+export type PermanentPublishReason = "no_stream" | "payload_too_large" | "unserialisable";
+
+/**
+ * A publish failure specific to the message, not to the broker. Adapters throw it only when they
+ * are sure; every other failure (connection lost, PubAck timeout, broker unavailable, stream
+ * full) is transient, so an outage of any length is never mistaken for a bad message.
+ */
+export class PermanentPublishError extends Error {
+  override readonly name = "PermanentPublishError";
+
+  constructor(
+    readonly reason: PermanentPublishReason,
+    message: string,
+    options?: { readonly cause?: unknown },
+  ) {
+    super(message, options);
+  }
+}
+
 export interface PublishAck {
   readonly streamSeq: number;
   /** True when the broker recognised `msgId` inside its duplicate window and stored nothing. */
@@ -55,7 +79,10 @@ export interface MessageSubscription {
 export interface MessageBus {
   /** Idempotently declares both streams; the worker calls it before the relay's first poll. */
   ensureTopology(): Promise<void>;
-  /** Resolves only after the broker's PubAck, so a returned ack means the message is stored. */
+  /**
+   * Resolves only after the broker's PubAck, so a returned ack means the message is stored.
+   * Rejects with `PermanentPublishError` when the message itself can never be published.
+   */
   publish(input: PublishInput): Promise<PublishAck>;
   subscribe(spec: ConsumerSpec): Promise<MessageSubscription>;
   close(): Promise<void>;

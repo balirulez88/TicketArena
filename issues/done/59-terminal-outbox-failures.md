@@ -8,7 +8,9 @@
 
 **Blocked by:** 45 (worker loop error reporting), 49 (Prisma schema drift)
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-27 on devflow/run-202611271130 (run 202611271130)
 
 **Status reason:** hardening, after the MVP (scope cut 2026-11-18)
 

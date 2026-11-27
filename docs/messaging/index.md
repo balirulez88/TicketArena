@@ -40,14 +40,37 @@ subject another stream owns, the broker unreachable) propagates with its origina
 update is attempted (TD-036). The two streams' subjects are disjoint, so every message lands in
 exactly one of them. It never waits for Redis: the relay, the consumers and the sweeper
 run during a Redis outage (see [waiting room](../architecture/waiting-room.md#redis-outage)). It serves
-`GET /health`, which reports Redis separately (`"redis": "ok" | "unavailable"`).
+`GET /health`, which reports Redis separately (`"redis": "ok" | "unavailable"`) and the outbox's
+`FAILED` rows (`"outbox": { "alert": boolean, "services": { booking, payment, notification } }`, each
+`{ failed, oldestFailedAgeMs, failedTransitions }`, or `"unavailable"` when the database cannot be read).
+`status` stays `ok` and the response 200 whatever they report: a `FAILED` row is an operator alert, never a
+liveness failure.
 
 - **Relay** (`packages/messaging/src/outbox-relay.ts`): every 250 ms interval it claims a batch of 100 `PENDING`
   rows with `FOR UPDATE SKIP LOCKED` in one transaction, publishes each to `ta.<eventType>` with
   `Nats-Msg-Id = outbox id`, awaits the PubAck and marks the row `PUBLISHED`. A failed publish increments
   `attempts`, stores `lastError` and leaves the row `PENDING`. Only the oldest `PENDING` row of an aggregate is
   claimable (`NOT EXISTS` an older `PENDING` row), so order per aggregate holds across concurrent relays: later
-  rows wait for a failed or in-flight earlier one, at one row per aggregate per tick. Rows of a rolled-back transaction never exist for the relay.
+  rows wait for an in-flight earlier one, or one whose publish failed transiently, at one row per aggregate per tick.
+  Rows of a rolled-back transaction never exist for the relay.
+  **Terminal failures** ([ADR 0022](../adr/0022-terminal-failed-outbox-events.md)): a publish failure is
+  _permanent_ when it is specific to the row: the adapter throws `PermanentPublishError` with `reason`
+  `no_stream` (no stream captures `ta.<eventType>`), `payload_too_large` (over the broker's `max_payload`) or
+  `unserialisable`; everything else (connection lost, PubAck timeout, JetStream unavailable, stream full) is
+  _transient_. A permanent failure also counts in `permanentFailures` and appends a `PUBLISH_FAILED` entry to
+  `outbox_event_history`; when `permanentFailures` reaches the relay's cap (`maxPermanentFailures`, default
+  `DEFAULT_MAX_PERMANENT_FAILURES` = 5) the row becomes `FAILED` (`failedAt` set, a `PENDING` → `FAILED`
+  history entry), all in the claim transaction. A `FAILED` row keeps its payload and id, is never published,
+  deleted or claimed again, and so **releases its aggregate**: later rows of that aggregate are published
+  after it (consumers tolerate the gap, see ADR 0022's table). Transient failures never count, so a broker
+  outage of any length never fails a row. After the transaction commits, the transition is logged once at
+  `error` (`outbox event FAILED: permanent publish failures reached the cap`, with `service`, `outboxId`,
+  `aggregateType`, `aggregateId`, `eventType`, `attempts`, `lastError`, never the payload); permanent
+  failures before the cap log at `warn`. Recovery is the operator's requeue
+  ([runbook](failed-outbox-event.md)): `requeueFailedOutboxEvent` (script `outbox:requeue`) moves one `FAILED`
+  row back to `PENDING` under its original id. `measureOutboxFailures({ prisma, now })` returns per service
+  the `FAILED` count, the oldest one's age and the transitions to `FAILED` in the history; `/health` reports
+  them with an `alert` flag.
   A tick that fails outside a row's publish (claim query, mark or commit; e.g. the database is unreachable)
   rolls back, leaves its rows `PENDING`, and the loop retries on the next tick. It is logged at `error` with the
   cause (`outbox relay tick failed`), rate-limited by `failure-reporter.ts` per cause: the first failure of each
@@ -79,7 +102,10 @@ run during a Redis outage (see [waiting room](../architecture/waiting-room.md#re
   relay) and the loop polls again after 1 s.
   The DLQ gate (ticket 25), which would end the endless redelivery of a poison message, and recovery from ADR 0011 are not built yet.
 - **Port:** `MessageBus` hides the broker; `jetstream-message-bus.ts` is the only module importing
-  `@nats-io/*` (a test enforces it). `message-bus.contract.ts` is the contract suite run against real NATS.
+  `@nats-io/*` (a test enforces it). The adapter reconnects to the broker without limit (`maxReconnectAttempts: -1`;
+  the client's default of 10 attempts would close the connection for good after about 20 s, stopping the
+  relay until a restart), and takes optional `requestTimeoutMs` (PubAck and JetStream API, client default 5 s)
+  and `reconnectTimeWaitMs` (client default 2 s) for tests. `message-bus.contract.ts` is the contract suite run against real NATS.
 
 ## Delivery guarantee and its bounds
 
@@ -91,6 +117,11 @@ recovery source. The bounds:
   exceeded`) instead of discarding stored messages. The relay records the failure (`attempts`,
   `lastError`) and the row stays `PENDING`; it is published on a later tick once space frees
   (messages age out or are purged). AT-35, `stream-backpressure.test.ts`.
+- **A permanently unpublishable event waits for an operator.** A row that fails permanently up to the
+  cap becomes `FAILED` and is not delivered until it is requeued; later events of its aggregate are
+  delivered before it (ADR 0022). It is never dropped: the row, its payload and its history stay in the
+  outbox, `/health` raises its alert, and the requeue publishes it under its original id
+  ([runbook](failed-outbox-event.md)). `outbox-failed.test.ts`, `outbox-outage.test.ts`.
 - **7-day `max_age`.** A consumer more than 7 days behind loses the messages that aged out of
   `TICKETARENA` (30 days for the DLQ). Outbox rows outlive it (no retention deletes them yet; the spec's
   14 days is longer than `max_age`), so recovery can reach beyond the stream.

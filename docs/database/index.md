@@ -28,6 +28,7 @@ enum carries `@@schema("public")`).
 | Table                       | Purpose                                                                                                                                                                                                                                                                                                                                                      |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `outbox_events`             | Transactional outbox: integration events written in the business TX                                                                                                                                                                                                                                                                                          |
+| `outbox_event_history`      | Append-only audit of outbox rows: permanent publish failures and status changes (see below)                                                                                                                                                                                                                                                                  |
 | `processed_messages`        | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007)                                                                                                                                                                                                                                                      |
 | `venues`                    | Seeded venues                                                                                                                                                                                                                                                                                                                                                |
 | `sections`                  | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                                                                                                                                                                                                                                                                 |
@@ -110,6 +111,7 @@ changed.
 | `order_payments_open_refund_idx`              | `order_payments(refundLastRequestedAt)`, partial (`REFUND_REQUESTED`, `MANUAL_REVIEW`) | Reconciler scan and `refund_pending_age_max`     |
 | `outbox_events_status_createdAt_idx`          | `outbox_events(status, createdAt)`                                                     | Relay polling                                    |
 | `outbox_events_aggregateType_aggregateId_idx` | `outbox_events(aggregateType, aggregateId)`                                            | Aggregate lookup                                 |
+| `outbox_event_history_outboxId_id_idx`        | `outbox_event_history(outboxId, id)`                                                   | History of one outbox row, in order              |
 
 Booking: `booking.holdSeats` (1–6 seats of one event, all or nothing), `booking.getHold` (owner only, else
 `NOT_FOUND`) and `booking.activeHold({ eventId })` delegate to `BookingService` (`packages/booking`). `holdSeats` first requires a valid
@@ -470,18 +472,49 @@ The mock Notification service owns its tables the same way (ADR 0009); no foreig
 
 ### `outbox_events`
 
-| Column                         | Notes                                                   |
-| ------------------------------ | ------------------------------------------------------- |
-| `id` (uuid)                    | Also the **idempotency key** consumers deduplicate on   |
-| `aggregateType`, `aggregateId` | Stream identity; relay preserves per-aggregate order    |
-| `eventType`                    | Broker subject/topic, e.g. `booking.confirmed`          |
-| `payload` (jsonb)              | Versioned event body                                    |
-| `status`                       | `PENDING` → `PUBLISHED`, or `FAILED` after max attempts |
-| `attempts`, `lastError`        | Retry bookkeeping for the relay                         |
-| `createdAt`, `publishedAt`     | Ordering and lag monitoring                             |
+The same shape in each service's schema (`public`, `payment`, `notification`).
+
+| Column                         | Notes                                                                                                               |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `id` (uuid)                    | Also the **idempotency key** consumers deduplicate on (`Nats-Msg-Id`); a requeue keeps it                           |
+| `aggregateType`, `aggregateId` | Stream identity; relay preserves per-aggregate order among `PENDING` rows                                           |
+| `eventType`                    | Broker subject/topic, e.g. `order.confirmed` (published on `ta.<eventType>`)                                        |
+| `payload` (jsonb)              | The full event envelope; never changed after insert, `FAILED` rows included                                         |
+| `status`                       | `PENDING` → `PUBLISHED`, or `PENDING` → `FAILED` at the permanent-failure cap; a requeue moves `FAILED` → `PENDING` |
+| `attempts`, `lastError`        | Every failed publish, transient or permanent, and the latest reason                                                 |
+| `permanentFailures`            | Permanent failures since insert or the last requeue; the relay's cap (default 5) applies to it                      |
+| `failedAt` (timestamptz)       | When the row became `FAILED`; set exactly while `status = 'FAILED'` (CHECK `outbox_events_failed_at_check`)         |
+| `createdAt`, `publishedAt`     | Ordering and lag monitoring; `publishedAt` stays null on a `FAILED` row                                             |
 
 Indexes: `(status, createdAt)` serves the relay's "oldest pending first" poll;
 `(aggregateType, aggregateId)` serves per-aggregate lookups.
+
+**`FAILED` rows** ([ADR 0022](../adr/0022-terminal-failed-outbox-events.md)) keep everything they were
+inserted with (id, aggregate, event type and payload, byte for byte): they are never deleted, never
+`PUBLISHED`, and any retention rule for outbox rows must exclude them (none deletes outbox rows yet).
+The relay never claims them, so they no longer hold back later rows of their aggregate. Only an
+operator's requeue (`requeueFailedOutboxEvent`, runbook
+[failed-outbox-event](../messaging/failed-outbox-event.md)) brings one back to `PENDING`.
+
+### `outbox_event_history`
+
+Append-only audit per outbox row, one table in each service's schema, `outboxId` → `outbox_events.id`
+(`ON DELETE CASCADE`, index `(outboxId, id)`). Rows are only inserted, never updated or deleted;
+`readOutboxHistory(db, service, outboxId)` returns them in `id` order.
+
+| Column                   | Notes                                                                                              |
+| ------------------------ | -------------------------------------------------------------------------------------------------- |
+| `id` (bigserial)         | Append order                                                                                       |
+| `kind`                   | `PUBLISH_FAILED` (one permanent publish failure) or `STATUS_CHANGED` (CHECK)                       |
+| `fromStatus`, `toStatus` | Only on `STATUS_CHANGED`: `PENDING` → `FAILED` (relay, at the cap), `FAILED` → `PENDING` (requeue) |
+| `attempt`                | The row's `attempts` when the entry was written                                                    |
+| `error`                  | The failure reason; required on `PUBLISH_FAILED`                                                   |
+| `operator`, `reason`     | Who requeued the row and why (requeue entries only)                                                |
+| `at` (timestamptz)       | When it happened                                                                                   |
+
+Transient failures (a broker outage, a full stream) are not recorded here; they only count in
+`attempts` and `lastError`, so an outage cannot flood the history. Migration
+`20261130000000_terminal_failed_outbox_events` added the two columns, the history tables and the CHECKs.
 
 ## Rules
 

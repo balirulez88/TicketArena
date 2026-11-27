@@ -938,3 +938,35 @@ What does retryRefund do with the attempt count, and with a row not in MANUAL_RE
 Assumed: Resets refundAttempts to 0 (a fresh 3 re-emits) and re-emits; REFUND_NOT_IN_MANUAL_REVIEW for any other status, NOT_FOUND without an obligation; service-level only, the admin endpoint is ticket 36
 
 Answer: Decided (2026-11-27, PR #19 review): Re-emit from MANUAL_REVIEW, reset attempts to zero, keep the first request time. NOT_FOUND for a missing or APPLIED payment with no refund obligation; REFUND_NOT_IN_MANUAL_REVIEW for an obligation in another state; APPLIED is covered by a test. Ticket 36 owns the admin endpoint.
+
+## 2026-11-27 12:29 ticket 59
+
+How are permanent failures counted and what is the cap?
+
+Assumed: New permanentFailures column (attempts still counts every failure), cap 5 (DEFAULT_MAX_PERMANENT_FAILURES, injectable); failedAt set exactly while FAILED (CHECK); requeue resets permanentFailures and clears failedAt; transient failures are not written to outbox_event_history
+
+Answer: (open)
+
+## 2026-11-27 12:29 ticket 59
+
+How does the relay survive a long broker outage?
+
+Assumed: JetStream adapter reconnects without limit (maxReconnectAttempts -1) instead of the client default (~20 s then give up); production behaviour change
+
+Answer: (open)
+
+## 2026-11-27 12:29 ticket 59
+
+How does /health expose outbox failures without breaking existing assertions?
+
+Assumed: Optional health.outbox probe (main.ts passes it) adds outbox: { alert, services } while status stays ok; reports unavailable if the metrics query fails; oldestFailedAgeMs from failedAt, null when none
+
+Answer: (open)
+
+## 2026-11-27 12:29 ticket 59
+
+History table shape?
+
+Assumed: Per-service outbox_event_history, insert-only, text columns with CHECK constraints, ON DELETE CASCADE from the outbox row (FAILED rows are never deleted)
+
+Answer: (open)

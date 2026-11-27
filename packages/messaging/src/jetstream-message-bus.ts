@@ -1,6 +1,7 @@
 import {
   type Consumer,
   DiscardPolicy,
+  JetStreamApiCodes,
   JetStreamApiError,
   type JetStreamClient,
   type JetStreamManager,
@@ -11,16 +12,22 @@ import {
   StorageType,
   type StreamConfig,
 } from "@nats-io/jetstream";
-import { connect, type NatsConnection } from "@nats-io/transport-node";
-import type {
-  ConsumerSpec,
-  FetchOptions,
-  MessageBus,
-  MessageSubscription,
-  PublishAck,
-  PublishInput,
-  ReceivedMessage,
-  StreamKind,
+import {
+  connect,
+  InvalidArgumentError,
+  type NatsConnection,
+  RequestError,
+} from "@nats-io/transport-node";
+import {
+  type ConsumerSpec,
+  type FetchOptions,
+  type MessageBus,
+  type MessageSubscription,
+  PermanentPublishError,
+  type PublishAck,
+  type PublishInput,
+  type ReceivedMessage,
+  type StreamKind,
 } from "./message-bus.js";
 
 const NANOS_PER_MS = 1_000_000;
@@ -29,6 +36,17 @@ const MIB = 1024 * 1024;
 const MSG_ID_HEADER = "Nats-Msg-Id";
 // JetStream API error code for "stream name already in use with a different configuration".
 const STREAM_NAME_EXISTS = 10058;
+// Publish-failure classification (ADR 0022), pinned by publish-failure-classification.test.ts
+// against real NATS (@nats-io 3.4.0):
+// - an oversized payload is refused by the client itself, before anything is sent, with an
+//   `InvalidArgumentError` whose message names `max_payload` (the server's limit from INFO);
+// - a subject no stream captures gets no PubAck responder: the client reports `JetStreamNotEnabled`
+//   with a no-responders `RequestError` as its cause. A JetStream that is down or still recovering
+//   answers the same way, so that alone is never permanent: only the JetStream API's own
+//   "no stream matches subject" (`JetStreamApiCodes.StreamNotFound`, 10059) to a stream lookup
+//   for the subject confirms it.
+// Everything else (timeouts, connection loss, a full stream) is transient.
+const MAX_PAYLOAD_EXCEEDED = "max_payload";
 
 export const DEFAULT_ACK_WAIT_MS = 30_000;
 
@@ -45,6 +63,10 @@ export interface JetStreamMessageBusOptions {
    * stream to exercise `discard: new` backpressure.
    */
   readonly streamMaxBytes?: Partial<Record<StreamKind, number>>;
+  /** Bound on a PubAck or JetStream API answer; the NATS client's 5 s default when omitted. */
+  readonly requestTimeoutMs?: number;
+  /** Wait between reconnect attempts; the NATS client's 2 s default when omitted. */
+  readonly reconnectTimeWaitMs?: number;
 }
 
 interface StreamDefinition {
@@ -77,16 +99,25 @@ const STREAMS: Readonly<Record<StreamKind, StreamDefinition>> = {
 export async function connectJetStreamMessageBus(
   options: JetStreamMessageBusOptions,
 ): Promise<MessageBus> {
+  const timeout =
+    options.requestTimeoutMs === undefined ? {} : { timeout: options.requestTimeoutMs };
   const connection = await connect({
     servers: options.servers,
     ...(options.token === undefined ? {} : { token: options.token }),
+    // Reconnect for as long as the broker is away: the client's default gives up after 10
+    // attempts and closes the connection for good, so an outage of ~20 s would stop the relay
+    // until a restart. A broker outage, however long, must end with every row published.
+    maxReconnectAttempts: -1,
+    ...(options.reconnectTimeWaitMs === undefined
+      ? {}
+      : { reconnectTimeWait: options.reconnectTimeWaitMs }),
   });
   try {
-    const manager = await jetstreamManager(connection);
+    const manager = await jetstreamManager(connection, timeout);
     return new JetStreamMessageBus(
       connection,
       manager,
-      jetstream(connection),
+      jetstream(connection, timeout),
       options.streamPrefix ?? "",
       options.subjectPrefix === undefined ? "" : `${options.subjectPrefix}.`,
       options.streamMaxBytes ?? {},
@@ -136,10 +167,38 @@ class JetStreamMessageBus implements MessageBus {
   }
 
   async publish(input: PublishInput): Promise<PublishAck> {
-    const ack = await this.client.publish(this.subjectPrefix + input.subject, input.data, {
-      msgID: input.msgId,
-    });
-    return { streamSeq: ack.seq, duplicate: ack.duplicate };
+    const subject = this.subjectPrefix + input.subject;
+    try {
+      const ack = await this.client.publish(subject, input.data, { msgID: input.msgId });
+      return { streamSeq: ack.seq, duplicate: ack.duplicate };
+    } catch (error) {
+      throw await this.classifyPublishFailure(subject, error);
+    }
+  }
+
+  /** The permanent failure `error` proves, or `error` itself (transient). See the constants. */
+  private async classifyPublishFailure(subject: string, error: unknown): Promise<unknown> {
+    if (error instanceof InvalidArgumentError && error.message.includes(MAX_PAYLOAD_EXCEEDED)) {
+      return new PermanentPublishError(
+        "payload_too_large",
+        `payload exceeds the broker's max_payload of ${this.connection.info?.max_payload ?? "?"} bytes`,
+        { cause: error },
+      );
+    }
+    if (!(error instanceof Error && isNoResponders(error.cause))) {
+      return error;
+    }
+    try {
+      await this.manager.streams.find(subject);
+    } catch (lookup) {
+      if (lookup instanceof JetStreamApiError && lookup.code === JetStreamApiCodes.StreamNotFound) {
+        return new PermanentPublishError("no_stream", `no stream matches subject ${subject}`, {
+          cause: error,
+        });
+      }
+    }
+    // A stream does capture the subject, or the lookup failed too: JetStream is unavailable.
+    return error;
   }
 
   async subscribe(spec: ConsumerSpec): Promise<MessageSubscription> {
@@ -183,6 +242,10 @@ class JetStreamSubscription implements MessageSubscription {
     }
     return received;
   }
+}
+
+function isNoResponders(error: unknown): boolean {
+  return error instanceof RequestError && error.isNoResponders();
 }
 
 function toReceived(message: JsMsg, subjectPrefix: string): ReceivedMessage {

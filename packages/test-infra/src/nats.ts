@@ -19,3 +19,27 @@ export async function deleteStreams(url: string, prefix: string): Promise<void> 
     await connection.close();
   }
 }
+
+/** Declares a stream capturing exactly `subjects`, e.g. one misconfigured without a subject. */
+export async function declareStream(
+  url: string,
+  name: string,
+  subjects: readonly string[],
+): Promise<void> {
+  const connection = await connect({ servers: url });
+  try {
+    await (await jetstreamManager(connection)).streams.add({ name, subjects: [...subjects] });
+  } finally {
+    await connection.close();
+  }
+}
+
+/** Deletes a durable consumer, so a new one of the same name replays the stream from the start. */
+export async function deleteConsumer(url: string, stream: string, consumer: string): Promise<void> {
+  const connection = await connect({ servers: url });
+  try {
+    await (await jetstreamManager(connection)).consumers.delete(stream, consumer);
+  } finally {
+    await connection.close();
+  }
+}

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { createBookingService, createRedisBookingMetrics } from "@ticketarena/booking";
 import { createPrismaClient } from "@ticketarena/db";
-import { connectJetStreamMessageBus } from "@ticketarena/messaging";
+import { connectJetStreamMessageBus, measureOutboxFailures } from "@ticketarena/messaging";
 import {
   createQueueService,
   createRedisQueueStore,
@@ -74,7 +74,10 @@ const started = await startWorkerProcess({
         queue,
         limits: { admitRate: env.ADMIT_RATE_PER_SECOND, maxActive: env.MAX_ACTIVE },
       },
-      health: { redis: redis.ping },
+      health: {
+        redis: redis.ping,
+        outbox: () => measureOutboxFailures({ prisma, now: clock.now() }),
+      },
       stopBudget,
     });
   },

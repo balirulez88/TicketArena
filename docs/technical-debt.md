@@ -62,14 +62,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 | Status        | CRITICAL | HIGH | MEDIUM | LOW | Total |
 | ------------- | -------- | ---- | ------ | --- | ----- |
 | OPEN          | 0        | 0    | 0      | 39  | 39    |
-| PLANNED       | 0        | 0    | 13     | 24  | 37    |
+| PLANNED       | 0        | 0    | 12     | 24  | 36    |
 | IN_PROGRESS   | 0        | 0    | 0      | 0   | 0     |
-| RESOLVED      | 0        | 3    | 9      | 7   | 19    |
+| RESOLVED      | 0        | 3    | 10     | 7   | 20    |
 | ACCEPTED_RISK | 0        | 0    | 0      | 0   | 0     |
 
 | Risk            | OPEN | PLANNED | IN_PROGRESS | RESOLVED | ACCEPTED_RISK | Total |
 | --------------- | ---- | ------- | ----------- | -------- | ------------- | ----- |
-| CORRECTNESS     | 1    | 4       | 0           | 7        | 0             | 12    |
+| CORRECTNESS     | 1    | 3       | 0           | 8        | 0             | 12    |
 | CONCURRENCY     | 0    | 2       | 0           | 2        | 0             | 4     |
 | SECURITY        | 1    | 2       | 0           | 2        | 0             | 5     |
 | VERIFICATION    | 8    | 16      | 0           | 6        | 0             | 30    |
@@ -1006,7 +1006,7 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 
 ### TD-038: A permanently unpublishable row blocks its whole aggregate
 
-- **Status:** PLANNED
+- **Status:** RESOLVED
 - **Severity:** MEDIUM
 - **Risk:** CORRECTNESS
 - **Triage:** 2026-11-14: maintainer, approving Claude's technical-debt audit of main at a3bb37f (chore/debt-audit-triage)
@@ -1021,13 +1021,14 @@ Generated from the entries below by `node scripts/ralph-debt.mjs format`.
 - **Target:** ticket 59 (`issues/59-terminal-outbox-failures.md`); must merge before tickets 25, 27 and 38, which are blocked by it
 - **Blocks:** 25, 27, 38
 - **Acceptance:** none
-- **Resolution:** none
-- **Verification:** none
+- **Resolution:** The JetStream adapter classifies a row-specific publish failure as permanent (`PermanentPublishError`: no stream matches the subject, payload over `max_payload`, unserialisable payload); everything else stays transient. A permanent failure counts in `permanentFailures` and is appended to the new `outbox_event_history`; at the injectable cap (default 5) the row becomes `FAILED` with its payload, id and history kept, is never claimed again and so releases its aggregate. The transition is logged once at `error`, `/health` reports `FAILED` metrics and an alert flag, and `requeueFailedOutboxEvent` (`outbox:requeue`) recovers a row under its original id (ADR 0022, migration `20261130000000_terminal_failed_outbox_events`).
+- **Verification:** `packages/messaging/src/outbox-failed.test.ts::aggregate progress after a FAILED row (TD-038) publishes the later rows of a failed row's aggregate in order, and other aggregates throughout`; `packages/messaging/src/outbox-failed.test.ts::the permanent-failure cap marks a booking outbox row FAILED once its permanent failures reach the cap, and never claims it again`; `packages/messaging/src/outbox-failed.test.ts::the permanent-failure cap marks a payment outbox row FAILED once its permanent failures reach the cap, and never claims it again`; `packages/messaging/src/outbox-failed.test.ts::alerting logs the transition to FAILED exactly once at error, with its identity and without the payload`; `packages/messaging/src/outbox-outage.test.ts::a broker outage never makes a row FAILED, however many ticks it lasts; once the broker is back every row is published in order per aggregate`; `packages/messaging/src/publish-failure-classification.test.ts::publish failure classification classifies a subject outside every stream as permanent (no_stream)`; `apps/worker/src/outbox-failure-health.test.ts::worker /health outbox failures raises the alert while a FAILED row exists, and stays live`
 - **Fingerprints:** `packages/messaging/src/outbox-relay.ts#a-permanently-unpublishable-row-blocks-its-whole-aggregate`
 - **History:**
   - 2026-11-03: recorded: LOW maintainability at `packages/messaging/src/outbox-relay.ts:50`, standards axis (ticket 06 review-3 standards, run 20261103-120228)
   - 2026-11-06: triaged: CORRECTNESS, no owner: deferred, blocks no ticket (initial triage, ticket 53)
   - 2026-11-14: severity revised LOW -> MEDIUM (approved risk reassessment, not an automatic escalation): CORRECTNESS, owned by ticket 59 (new: terminal outbox failures), blocks ticket(s) 25, 27, 38 until it is resolved (maintainer decision, 2026-11-14, approving Claude's technical-debt audit of main at a3bb37f)
+  - 2026-11-27: resolved in ticket 59: a permanently unpublishable row becomes FAILED at a cap, keeps its payload and history, releases its aggregate, alerts once and is recoverable by requeue
 
 ### TD-039: The same bus and prisma setup is repeated in three test files
 

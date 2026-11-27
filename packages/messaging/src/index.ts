@@ -13,16 +13,28 @@ export {
   DEFAULT_ACK_WAIT_MS,
   type JetStreamMessageBusOptions,
 } from "./jetstream-message-bus.js";
-export type {
-  ConsumerSpec,
-  FetchOptions,
-  MessageBus,
-  MessageSubscription,
-  PublishAck,
-  PublishInput,
-  ReceivedMessage,
-  StreamKind,
+export {
+  type ConsumerSpec,
+  type FetchOptions,
+  type MessageBus,
+  type MessageSubscription,
+  PermanentPublishError,
+  type PermanentPublishReason,
+  type PublishAck,
+  type PublishInput,
+  type ReceivedMessage,
+  type StreamKind,
 } from "./message-bus.js";
+export {
+  DEFAULT_MAX_PERMANENT_FAILURES,
+  measureOutboxFailures,
+  type OutboxFailureMetrics,
+  type OutboxHistoryEntry,
+  OutboxRequeueRefused,
+  type RequeueInput,
+  readOutboxHistory,
+  requeueFailedOutboxEvent,
+} from "./outbox-failures.js";
 export { measureOutboxLag, type OutboxLagOptions } from "./outbox-lag.js";
 export {
   createOutboxRelay,

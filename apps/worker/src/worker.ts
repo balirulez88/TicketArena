@@ -8,7 +8,9 @@ import {
   createConsumerRunner,
   createOutboxRelay,
   type MessageBus,
+  type OutboxFailureMetrics,
   type OutboxRelayOptions,
+  type ServiceName,
 } from "@ticketarena/messaging";
 import type { AdmissionLimits, QueueService } from "@ticketarena/waiting-room";
 import { createAdmissionLoops } from "./admission.js";
@@ -63,9 +65,11 @@ export interface WorkerOptions {
   /**
    * Dependencies `/health` reports on separately, each a bounded probe that rejects when the
    * dependency is unreachable. Redis is reported, never required: the worker runs without it.
+   * `outbox` reads the FAILED outbox metrics (`measureOutboxFailures`) for the alert flag.
    */
   readonly health?: {
-    readonly redis: () => Promise<unknown>;
+    readonly redis?: () => Promise<unknown>;
+    readonly outbox?: () => Promise<Record<ServiceName, OutboxFailureMetrics>>;
   };
   /**
    * The deadline for stopping what a failed start already started, after which the start error
@@ -75,16 +79,34 @@ export interface WorkerOptions {
   readonly stopBudget?: StopBudget;
 }
 
-/** `/health`: the worker itself is up; Redis, when probed, is `ok` or `unavailable`. */
+/**
+ * `/health`: the worker itself is up (`status` is always `ok`, so neither a dependency nor a FAILED
+ * outbox row ever fails liveness); Redis, when probed, is `ok` or `unavailable`; the outbox, when
+ * measured, carries the FAILED metrics per service and `alert`, set while any row is FAILED.
+ */
 async function healthReport(health: WorkerOptions["health"]): Promise<object> {
-  if (health === undefined) {
-    return { status: "ok" };
-  }
-  const redis = await health.redis().then(
-    () => "ok",
-    () => "unavailable",
-  );
-  return { status: "ok", redis };
+  const redis =
+    health?.redis === undefined
+      ? {}
+      : {
+          redis: await health.redis().then(
+            () => "ok",
+            () => "unavailable",
+          ),
+        };
+  const outbox =
+    health?.outbox === undefined
+      ? {}
+      : {
+          outbox: await health.outbox().then(
+            (services) => ({
+              alert: Object.values(services).some((metrics) => metrics.failed > 0),
+              services,
+            }),
+            () => "unavailable",
+          ),
+        };
+  return { status: "ok", ...redis, ...outbox };
 }
 
 export interface RunningWorker {

@@ -198,10 +198,13 @@ of an executed refund all carry new event ids, which Booking needs to recover a 
 yet the buyer hears about each refund step once per channel. Two such events delivered at once
 upsert the same row; whichever finishes first records it `SENT`, and a send that overlaps reuses
 the row's id, so the provider's key dedupe absorbs it (`notification-handler.test.ts`, the
-"concurrently" cases). A `PENDING` row a pre-migration worker wrote without a key is found by
-`(sourceEventId, channel)` when its own event is redelivered, and promoted to the key in one
-conditional `UPDATE`, keeping its id as the provider key; a later re-announcement then finds it by
-key and sends nothing new. If another delivery already holds the key, the unique index refuses the
+"concurrently" cases). A row this event got before the key existed (no key, written by a
+pre-migration worker, or `event:<sourceEventId>` from the migration's backfill) is found by
+`(sourceEventId, channel)` when its own event is redelivered, and promoted to the refund key in one
+`UPDATE` conditional on the key it was read with, keeping its id as the provider key. A promoted
+`PENDING` row is sent once under that id, a promoted `SENT` row is not sent again, and a later
+re-announcement finds it by key and sends nothing new (`notification-dedupe-migration.test.ts`
+runs this across the real migration). If another delivery already holds the key, the unique index refuses the
 promotion and that winner's row is used, so nothing is sent under the old id; the old row keeps no
 key and stays `PENDING` (only rows under the key are checkpointed `SENT`). Refund rows written
 before migration `20261129000000_notification_dedupe_key` and never redelivered stay keyed by

@@ -133,9 +133,10 @@ export function createNotificationHandler(
 
   /**
    * The one row this channel's message is sent under. A row already holding the key wins. Else a
-   * row this same event got from a worker that wrote no key (deploy or rollback window) is promoted
-   * to the key, keeping its id, because that id may already have reached the provider; without the
-   * key a later re-announcement of the refund would miss it and send again under a new id. The
+   * row this same event got before the key existed (no key, or the migration backfill's
+   * `event:<sourceEventId>`) is promoted to the key, keeping its id, because that id may already
+   * have reached the provider; without the key a later re-announcement of the refund would miss it
+   * and send again under a new id. A promoted row that is already SENT is not sent again. The
    * promotion is one conditional UPDATE, so of two racing deliveries only one moves the row; if
    * another delivery claimed the key first, the unique index refuses the promotion and that
    * winner's row is used instead. Otherwise a new row is created under the key.
@@ -154,8 +155,14 @@ export function createNotificationHandler(
     const legacy = await deps.prisma.notification.findUnique({
       where: { sourceEventId_channel: { sourceEventId, channel } },
     });
-    if (legacy?.dedupeKey === null) {
-      if (await promote(legacy.id, key)) {
+    // Promotable: no key (written by a pre-migration worker after the backfill ran, or during a
+    // rollback), or exactly the backfill's own fallback for this event. Any other key belongs to
+    // something else and is left alone.
+    if (
+      legacy !== null &&
+      (legacy.dedupeKey === null || legacy.dedupeKey === `event:${sourceEventId}`)
+    ) {
+      if (await promote(legacy.id, legacy.dedupeKey, key)) {
         return { ...legacy, dedupeKey: key };
       }
       // Either a concurrent copy of this event promoted the row, or another event took the key.
@@ -167,11 +174,15 @@ export function createNotificationHandler(
     return recordPending(key, sourceEventId, channel, recipient, template);
   }
 
-  /** `true` when this call gave the keyless row the key; `false` when another delivery got there. */
-  async function promote(id: string, key: string): Promise<boolean> {
+  /**
+   * `true` when this call moved the row from the key it was observed with to `key`; `false` when
+   * another delivery changed it first or already holds `key`. Conditional on the observed value, so
+   * of two racing deliveries only one moves the row.
+   */
+  async function promote(id: string, observed: string | null, key: string): Promise<boolean> {
     try {
       const promoted = await deps.prisma.notification.updateMany({
-        where: { id, dedupeKey: null },
+        where: { id, dedupeKey: observed },
         data: { dedupeKey: key },
       });
       return promoted.count === 1;

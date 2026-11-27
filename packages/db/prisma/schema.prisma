@@ -446,11 +446,15 @@ model NotificationProcessedMessage {
   @@schema("notification")
 }
 
-/// One message to send per (source event, channel). The unique key makes a redelivered
-/// `order.confirmed` insert nothing new; its `id` is the provider idempotency key.
+/// One message to send per (dedupe key, channel); its `id` is the provider idempotency key. An
+/// order event is keyed by its event id, so a redelivered `order.confirmed` inserts nothing new. A
+/// refund step is keyed by `paymentId` and template, so Payment re-announcing a refund under a new
+/// event id does not message the buyer again. `sourceEventId` is the event that created the row.
 model Notification {
   id            String              @id @db.Uuid
   sourceEventId String
+  /// NULL only on rows a worker from before the dedupe key wrote (deploy or rollback window).
+  dedupeKey     String?
   channel       NotificationChannel
   recipient     String
   template      String
@@ -459,6 +463,7 @@ model Notification {
   sentAt        DateTime?           @db.Timestamptz(3)
 
   @@unique([sourceEventId, channel])
+  @@unique([dedupeKey, channel])
   @@map("notifications")
   @@schema("notification")
 }

@@ -183,7 +183,8 @@ Interfaces (shape level):
 - `payment.refunds`: `paymentId` (primary key, so unique), `orderId`, amount, currency, `reason`,
   `refundedAt`.
 - `notification.notifications`: `sourceEventId`, `channel` `EMAIL | SMS`, recipient, template,
-  `status` `PENDING | SENT`; unique `(sourceEventId, channel)`.
+  `status` `PENDING | SENT`, `dedupeKey`; unique `(sourceEventId, channel)` and
+  `(dedupeKey, channel)`.
 - No cross-schema foreign keys or reads; services learn about each other only from events.
 
 ### Holding seats (`holdSeats`)
@@ -357,7 +358,9 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
 
 - Consumes `order.confirmed`, `order.cancelled`, `order.expired`, `payment.refund_requested`,
   `payment.refunded`.
-- Steps: insert the notification row `PENDING` (unique `(sourceEventId, channel)`), call the mock
+- Steps: insert the notification row `PENDING` (unique `(dedupeKey, channel)`: the event id for an
+  order event, `paymentId` + template for a refund step, so a refund re-announced under a new event
+  id messages the buyer once per channel), call the mock
   provider with `idempotencyKey = notification id`, mark `SENT`. Email always; SMS when a phone
   number exists. Nothing is really sent; the mock provider records and dedupes by key.
 - Templates: `order-confirmation`, `order-cancellation`, `order-expiry`, `refund-initiated`

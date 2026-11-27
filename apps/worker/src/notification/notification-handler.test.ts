@@ -622,6 +622,122 @@ describe("Notification handler", () => {
     ]);
   });
 
+  // Payment re-announces a refund under a new event id (the reconciler's re-emit, an operator
+  // retry, a repeated request), so Booking can recover a lost confirmation. The buyer must still
+  // hear about each refund step once per channel.
+  it.each([
+    ["payment.refund_requested", refundRequested, "refund-initiated"],
+    ["payment.refunded", refunded, "refund-completed"],
+  ])(
+    "sends a %s once per channel when the same refund arrives again under a new event id",
+    async (_type, build, template) => {
+      const first = build({ email: "buyer+again@example.com", phone: "+36301234567" });
+      const again = { ...first, id: randomUUID() };
+      const provider = createMockNotificationProvider();
+
+      await deliver(first, provider);
+      await deliver(again, provider);
+
+      expect(
+        provider.deliveries().map((delivery) => [delivery.channel, delivery.template]),
+      ).toEqual([
+        ["EMAIL", template],
+        ["SMS", template],
+      ]);
+      const rows = await prisma.notification.findMany({
+        where: { sourceEventId: { in: [first.id, again.id] } },
+      });
+      expect(rows.map((row) => `${row.sourceEventId} ${row.status}`)).toEqual([
+        `${first.id} SENT`,
+        `${first.id} SENT`,
+      ]);
+    },
+  );
+
+  it.each([
+    ["payment.refund_requested", refundRequested],
+    ["payment.refunded", refunded],
+  ])(
+    "sends a %s once per channel when two event ids of the same refund are delivered concurrently",
+    async (_type, build) => {
+      const first = build({ email: "buyer+race@example.com", phone: "+36301234567" });
+      const again = { ...first, id: randomUUID() };
+      const provider = createMockNotificationProvider();
+
+      await Promise.all([deliver(first, provider), deliver(again, provider)]);
+
+      expect(
+        provider
+          .deliveries()
+          .map((delivery) => delivery.channel)
+          .sort(),
+      ).toEqual(["EMAIL", "SMS"]);
+      const rows = await prisma.notification.findMany({
+        where: { sourceEventId: { in: [first.id, again.id] } },
+      });
+      expect(rows).toHaveLength(2);
+      expect(rows.every((row) => row.status === "SENT")).toBe(true);
+    },
+  );
+
+  it("tells the buyer once that the refund started and once that it completed, with every step re-announced concurrently", async () => {
+    const contact = { email: "buyer+both@example.com" };
+    const started = refundRequested(contact);
+    const startedAgain = { ...started, id: randomUUID() };
+    const base = refunded(contact);
+    const completed = {
+      ...base,
+      orderId: started.orderId,
+      payload: { ...base.payload, orderId: started.orderId, paymentId: started.payload.paymentId },
+    };
+    const completedAgain = { ...completed, id: randomUUID() };
+    const provider = createMockNotificationProvider();
+
+    await Promise.all([
+      deliver(started, provider),
+      deliver(startedAgain, provider),
+      deliver(completed, provider),
+      deliver(completedAgain, provider),
+    ]);
+
+    expect(
+      provider
+        .deliveries()
+        .map((delivery) => delivery.template)
+        .sort(),
+    ).toEqual(["refund-completed", "refund-initiated"]);
+  });
+
+  it("resumes a PENDING row an older worker wrote without a dedupe key, under its own key, instead of failing on a second row", async () => {
+    const envelope = refunded({ email: "buyer+cutover@example.com" });
+    const oldRowId = randomUUID();
+    await prisma.notification.create({
+      data: {
+        id: oldRowId,
+        sourceEventId: envelope.id,
+        channel: "EMAIL",
+        recipient: "buyer+cutover@example.com",
+        template: "refund-completed",
+        createdAt: NOW,
+      },
+    });
+
+    const provider = await deliver(envelope);
+
+    expect(provider.deliveries()).toMatchObject([{ idempotencyKey: oldRowId, channel: "EMAIL" }]);
+    const rows = await prisma.notification.findMany({ where: { sourceEventId: envelope.id } });
+    expect(rows.map((row) => [row.id, row.status])).toEqual([[oldRowId, "SENT"]]);
+  });
+
+  it("keeps order events keyed by their own event id: two confirmations of different orders both send", async () => {
+    const provider = createMockNotificationProvider();
+
+    await deliver(orderConfirmed({ email: "buyer+one@example.com" }), provider);
+    await deliver(orderConfirmed({ email: "buyer+two@example.com" }), provider);
+
+    expect(provider.deliveries()).toHaveLength(2);
+  });
+
   it.each([
     ["payment.refund_requested", refundRequested],
     ["payment.refunded", refunded],

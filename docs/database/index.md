@@ -25,20 +25,20 @@
 All tables live in the `public` schema (`multiSchema` with `schemas = ["public"]`; every model and
 enum carries `@@schema("public")`).
 
-| Table                       | Purpose                                                                                                                                                                                                                                                                       |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `outbox_events`             | Transactional outbox: integration events written in the business TX                                                                                                                                                                                                           |
-| `processed_messages`        | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007)                                                                                                                                                                       |
-| `venues`                    | Seeded venues                                                                                                                                                                                                                                                                 |
-| `sections`                  | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                                                                                                                                                                                  |
-| `rows`                      | Row label within a section                                                                                                                                                                                                                                                    |
-| `events`                    | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                                                                                                                                                                                       |
-| `seats`                     | **Per event** seat: `status` `AVAILABLE`, `HELD`, `IN_CHECKOUT` or `SOLD`, `holdId?`, `claimBuyerKey?`                                                                                                                                                                        |
-| `holds`                     | A buyer's hold: `buyerKey`, `status` `HELD`, `ORDERED`, `RELEASED` or `EXPIRED`, `holdExpiresAt`, `correlationId`                                                                                                                                                             |
-| `orders`                    | One per hold: contact, `totalMinor`, `status`, fixed `paymentDeadline`, unique `(sessionId, idempotencyKey)`                                                                                                                                                                  |
-| `order_lines`               | Seat prices copied at placement                                                                                                                                                                                                                                               |
-| `order_payments`            | Ledger of captured money: `paymentId` PK, `amount`, `capturedAt`, `disposition` (`APPLIED` for a confirmed order, `REFUND_REQUESTED` with `refundRequestedAt` for a refund obligation, `REFUNDED` once `payment.refunded` closes it)                                          |
-| `orphan_refund_obligations` | Refund obligation for a capture whose order booking does not have (`unknown_order`): `paymentId` PK, `orderId` (no FK), `amount`, `currency`, `capturedAt`, `status` (`REFUND_REQUESTED` → `REFUNDED`), `refundRequestedAt`. Outlives its outbox row, which retention deletes |
+| Table                       | Purpose                                                                                                                                                                                                                                                                                                                                                      |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `outbox_events`             | Transactional outbox: integration events written in the business TX                                                                                                                                                                                                                                                                                          |
+| `processed_messages`        | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007)                                                                                                                                                                                                                                                      |
+| `venues`                    | Seeded venues                                                                                                                                                                                                                                                                                                                                                |
+| `sections`                  | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                                                                                                                                                                                                                                                                 |
+| `rows`                      | Row label within a section                                                                                                                                                                                                                                                                                                                                   |
+| `events`                    | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                                                                                                                                                                                                                                                                      |
+| `seats`                     | **Per event** seat: `status` `AVAILABLE`, `HELD`, `IN_CHECKOUT` or `SOLD`, `holdId?`, `claimBuyerKey?`                                                                                                                                                                                                                                                       |
+| `holds`                     | A buyer's hold: `buyerKey`, `status` `HELD`, `ORDERED`, `RELEASED` or `EXPIRED`, `holdExpiresAt`, `correlationId`                                                                                                                                                                                                                                            |
+| `orders`                    | One per hold: contact, `totalMinor`, `status`, fixed `paymentDeadline`, unique `(sessionId, idempotencyKey)`                                                                                                                                                                                                                                                 |
+| `order_lines`               | Seat prices copied at placement                                                                                                                                                                                                                                                                                                                              |
+| `order_payments`            | Ledger of captured money: `paymentId` PK, `amount`, `capturedAt`, `disposition` (`APPLIED` for a confirmed order; `REFUND_REQUESTED` for a refund obligation, with `refundReason`, `refundRequestedAt`, `refundLastRequestedAt`, `refundAttempts`; `MANUAL_REVIEW` once the reconciler gives up; `REFUNDED` once `payment.refunded` closes it)               |
+| `orphan_refund_obligations` | Refund obligation for a capture whose order booking does not have (`unknown_order`): `paymentId` PK, `orderId` (no FK), `amount`, `currency`, `capturedAt`, `correlationId`, `status` (`REFUND_REQUESTED` → `REFUNDED` \| `MANUAL_REVIEW`), `refundRequestedAt`, `refundLastRequestedAt`, `refundAttempts`. Outlives its outbox row, which retention deletes |
 
 Catalog data is seeded, never edited through the API. `seedCatalog(prisma, now)`
 (`packages/db/src/seed.ts`) only inserts
@@ -85,23 +85,24 @@ migrations and checks the result.
 
 `packages/db/src/docs.test.ts` fails when a migration creates one that is not named here.
 
-| Name                                          | On                                          | Why                                              |
-| --------------------------------------------- | ------------------------------------------- | ------------------------------------------------ |
-| `venues_name_key`                             | `venues(name)` unique                       | Seed upserts; one row per venue                  |
-| `sections_venueId_name_key`                   | `sections(venueId, name)` unique            | Seed upserts                                     |
-| `rows_sectionId_label_key`                    | `rows(sectionId, label)` unique             | Seed upserts                                     |
-| `events_name_key`                             | `events(name)` unique                       | Seed upserts                                     |
-| `seats_eventId_rowId_number_key`              | `seats(eventId, rowId, number)` unique      | One seat per event position                      |
-| `seats_eventId_status_idx`                    | `seats(eventId, status)`                    | Seat map and availability                        |
-| `seats_holdId_idx`                            | `seats(holdId)`                             | `getHold` and hold lifecycle updates (FK lookup) |
-| `holds_eventId_buyerKey_idx`                  | `holds(eventId, buyerKey)`                  | Per-buyer lookups                                |
-| `orders_holdId_key`                           | `orders(holdId)` unique                     | A hold yields at most one order                  |
-| `orders_sessionId_idempotencyKey_key`         | `orders(sessionId, idempotencyKey)` unique  | Idempotent `placeOrder`                          |
-| `order_lines_orderId_seatId_key`              | `order_lines(orderId, seatId)` unique       | One line per seat                                |
-| `order_payments_orderId_idx`                  | `order_payments(orderId)`                   | Ledger lookup per order (FK)                     |
-| `order_payments_orderId_applied_key`          | `order_payments(orderId)` unique, partial   | At most one `APPLIED` payment per order          |
-| `outbox_events_status_createdAt_idx`          | `outbox_events(status, createdAt)`          | Relay polling                                    |
-| `outbox_events_aggregateType_aggregateId_idx` | `outbox_events(aggregateType, aggregateId)` | Aggregate lookup                                 |
+| Name                                          | On                                                                                     | Why                                              |
+| --------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `venues_name_key`                             | `venues(name)` unique                                                                  | Seed upserts; one row per venue                  |
+| `sections_venueId_name_key`                   | `sections(venueId, name)` unique                                                       | Seed upserts                                     |
+| `rows_sectionId_label_key`                    | `rows(sectionId, label)` unique                                                        | Seed upserts                                     |
+| `events_name_key`                             | `events(name)` unique                                                                  | Seed upserts                                     |
+| `seats_eventId_rowId_number_key`              | `seats(eventId, rowId, number)` unique                                                 | One seat per event position                      |
+| `seats_eventId_status_idx`                    | `seats(eventId, status)`                                                               | Seat map and availability                        |
+| `seats_holdId_idx`                            | `seats(holdId)`                                                                        | `getHold` and hold lifecycle updates (FK lookup) |
+| `holds_eventId_buyerKey_idx`                  | `holds(eventId, buyerKey)`                                                             | Per-buyer lookups                                |
+| `orders_holdId_key`                           | `orders(holdId)` unique                                                                | A hold yields at most one order                  |
+| `orders_sessionId_idempotencyKey_key`         | `orders(sessionId, idempotencyKey)` unique                                             | Idempotent `placeOrder`                          |
+| `order_lines_orderId_seatId_key`              | `order_lines(orderId, seatId)` unique                                                  | One line per seat                                |
+| `order_payments_orderId_idx`                  | `order_payments(orderId)`                                                              | Ledger lookup per order (FK)                     |
+| `order_payments_orderId_applied_key`          | `order_payments(orderId)` unique, partial                                              | At most one `APPLIED` payment per order          |
+| `order_payments_open_refund_idx`              | `order_payments(refundLastRequestedAt)`, partial (`REFUND_REQUESTED`, `MANUAL_REVIEW`) | Reconciler scan and `refund_pending_age_max`     |
+| `outbox_events_status_createdAt_idx`          | `outbox_events(status, createdAt)`                                                     | Relay polling                                    |
+| `outbox_events_aggregateType_aggregateId_idx` | `outbox_events(aggregateType, aggregateId)`                                            | Aggregate lookup                                 |
 
 Booking: `booking.holdSeats` (1–6 seats of one event, all or nothing), `booking.getHold` (owner only, else
 `NOT_FOUND`) and `booking.activeHold({ eventId })` delegate to `BookingService` (`packages/booking`). `holdSeats` first requires a valid
@@ -360,7 +361,66 @@ obligation per `paymentId` from the existing `unknown_order` outbox rows, taking
 request's `occurredAt` as `capturedAt` and `refundRequestedAt` (the request carries no capture
 time). A backfilled obligation whose refund had already completed stays `REFUND_REQUESTED`, since
 booking cannot see Payment's schema; re-emitting it refunds nothing twice (`payment.refunds` is
-unique per `paymentId`). `packages/db/src/orphan-refund-backfill-migration.test.ts` pins the backfill.
+unique per `paymentId`), and it ends in `MANUAL_REVIEW` (see [Refund reconciler](#refund-reconciler)). `packages/db/src/orphan-refund-backfill-migration.test.ts` pins the backfill.
+
+### Refund reconciler
+
+No refund obligation is forgotten (spec: Refund obligations and reconciliation). The worker calls
+`BookingService.reconcileRefunds()` every 5 minutes (`packages/booking/src/refund-reconciler.ts`);
+the limits are injectable (`RefundReconcilerLimits`, defaults `DEFAULT_REFUND_RECONCILER_LIMITS`:
+stale after 10 min, 3 re-emits, batches of 100). A pass covers the ledger (`order_payments`) and the
+orphan refund obligations the same way:
+
+- **Stale** means `REFUND_REQUESTED` with `refundLastRequestedAt <= T - 10 min`. The age is taken
+  from the **last** request (the saga's first request, a re-emit, or an operator's retry), so
+  re-emits come at least 10 minutes apart whatever the pass interval, and Payment always has 10
+  minutes to answer each one.
+- A stale obligation with fewer than 3 re-emits gets its `payment.refund_requested` re-emitted, and
+  `refundAttempts + 1`, `refundLastRequestedAt = T`, in **one transaction** with the outbox row
+  (ADR 0003). The request is rebuilt from the row alone: a new event id, the original
+  `paymentId`, `orderId`, `amount`, `currency` and `refundReason` (`unknown_order` for an orphan),
+  the order's contact and `holdId` (none for an orphan), the payment's correlation id (the order's,
+  or the orphan's `correlationId`), `causationId: null`, so it does not need the original outbox row
+  that retention deletes.
+- A stale obligation that already has 3 re-emits moves to `MANUAL_REVIEW` instead and emits
+  nothing (logged at `warn`). So the third re-emit, too, gets its 10 minutes before a human is asked.
+  The reconciler never touches `MANUAL_REVIEW` again; `payment.refunded` still closes it to `REFUNDED`.
+- **Concurrency:** each batch claims rows `ORDER BY paymentId … FOR UPDATE SKIP LOCKED` (only the
+  obligation row; the order is read unlocked, its columns never change), so two workers split the
+  rows and never re-emit one twice or wait on each other, and a row committed by one pass no longer
+  matches for the other. Only the saga's `payment.refunded` update also writes these rows, and it
+  accepts `REFUND_REQUESTED` and `MANUAL_REVIEW` alike, so whichever commits first, the obligation
+  ends `REFUNDED`. `refund-reconciler.test.ts` races two passes on real Postgres.
+
+`BookingService.retryRefund(paymentId)` (the operator's "retry refund"; ticket 36 exposes it as
+`admin.retryRefund`) locks the payment's obligation, ledger first and then orphan, and moves
+`MANUAL_REVIEW` → `REFUND_REQUESTED`, re-emits the request and resets `refundAttempts` to 0 with
+`refundLastRequestedAt = T`, in one transaction, so the reconciler gives it a full 3 re-emits
+again. It is `NOT_FOUND` (`RefundObligationNotFoundError`) for a payment with no refund obligation
+and `REFUND_NOT_IN_MANUAL_REVIEW` (`RefundNotInManualReviewError`, nothing changed) for any other
+state; it returns the obligation as it now is.
+
+`BookingService.refundPendingAgeMax()` is `refund_pending_age_max` for the dashboard: ms from the
+first request (`refundRequestedAt`, never moved by a re-emit) of the oldest open obligation
+(`REFUND_REQUESTED` or `MANUAL_REVIEW`, both tables) to `T`, 0 when none is open.
+
+**Known limitation: a request Payment does not answer ends in `MANUAL_REVIEW`.** Payment emits
+`payment.refunded` only when its insert wrote the `payment.refunds` row, so a re-emitted (duplicate)
+request for a refund it already executed emits nothing. An obligation whose `payment.refunded` was
+lost, or never written (for instance a backfilled orphan obligation whose refund had completed),
+is therefore re-emitted 3 times, refunds nothing twice, and then waits in `MANUAL_REVIEW`; an
+operator's retry repeats that once more. It is bounded, never a loop, but needs a human to close it
+until Payment re-answers duplicates. Each re-emit also has a new event id, so Notification sends the
+buyer another `refund-initiated` (see [messaging](../messaging/index.md#notification)).
+
+Migration `20261128000000_refund_reconciler` added `refundReason` and `refundLastRequestedAt` to
+`order_payments`, `correlationId`, `refundAttempts` and `refundLastRequestedAt` to
+`orphan_refund_obligations`, and `MANUAL_REVIEW` to the orphan status. It backfilled the reason and
+the correlation id from the payment's earliest `payment.refund_requested` outbox row (a ledger row
+without one takes the reason its order's status implies; an orphan without one takes its
+`paymentId` as correlation id) and `refundLastRequestedAt` from `refundRequestedAt`. The CHECK
+`order_payments_refund_obligation_complete` keeps every non-`APPLIED` ledger row re-emittable.
+`packages/db/src/refund-reconciler-migration.test.ts` pins the backfill.
 
 Catalog API (`apps/web`): `events.list`, `events.get`, `seats.map`. Inputs and outputs are zod
 validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.

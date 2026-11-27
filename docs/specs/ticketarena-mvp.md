@@ -288,7 +288,7 @@ then skips it, and a later one finds the row, so a redelivered or duplicate mess
 `paymentId` exactly once. The obligation outlives the outbox row (retention) and holds everything
 needed to re-emit the request. An unknown `orderId` on a `failed` event, and an unknown
 `paymentId` on a `refunded` event, stay `poison`. A `refunded` event for an unknown `orderId` moves
-that `paymentId`'s orphan obligation to `REFUNDED` (a repeat is a noop), and is `poison` when the
+that `paymentId`'s orphan obligation (`REFUND_REQUESTED` or `MANUAL_REVIEW`) to `REFUNDED` (a repeat is a noop), and is `poison` when the
 payment has neither a ledger row nor an orphan obligation. A `refunded` event moves the payment's ledger row from
 `REFUND_REQUESTED` or `MANUAL_REVIEW` to `REFUNDED` whatever the order's status: an amount
 mismatch is refunded while the order stays `PENDING_PAYMENT`. Every `noop` is logged with a reason code. `retry` (state not yet reached) does not
@@ -317,9 +317,9 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
   gets a durable refund obligation in the same transaction that decides it. The system retries it
   until it is `REFUNDED` or a human resolves `MANUAL_REVIEW`. Money is never kept silently; the
   refund can lag. A capture whose order no longer exists has no ledger row to hold the obligation:
-  booking keeps an orphan refund obligation per `paymentId` instead (`REFUND_REQUESTED →
-  REFUNDED`), which does not depend on the outbox row surviving retention and which the
-  reconciler must cover alongside the ledger.
+  booking keeps an orphan refund obligation per `paymentId` instead (the ledger's transitions,
+  `REFUND_REQUESTED → REFUNDED | MANUAL_REVIEW`), which does not depend on the outbox row surviving
+  retention and which the reconciler covers alongside the ledger.
 - Ledger disposition transitions: `REFUND_REQUESTED → REFUNDED | MANUAL_REVIEW`;
   `MANUAL_REVIEW → REFUND_REQUESTED | REFUNDED`. `APPLIED` is terminal in the MVP.
 - Execution: the Payment consumer refunds idempotently (unique `paymentId` in `payment.refunds`)
@@ -327,9 +327,10 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
   event id) refunds nothing and emits nothing; transient failures follow the retry schedule, then
   the DLQ. Every request is executed; an `unknown_order` request has no contact, and its
   `payment.refunded` carries none.
-- Reconciler (worker, every 5 min): each `REFUND_REQUESTED` row older than 10 min gets its event
-  re-emitted through the outbox and `refundAttempts` incremented. After 3 re-emits it moves to
-  `MANUAL_REVIEW`. This also covers a dead-lettered or lost message.
+- Reconciler (worker, every 5 min): each `REFUND_REQUESTED` row whose last request (first request,
+  re-emit or retry) is older than 10 min gets its event re-emitted through the outbox and
+  `refundAttempts` incremented. Once stale after 3 re-emits it moves to `MANUAL_REVIEW`. This also
+  covers a dead-lettered or lost message. A retry resets `refundAttempts`.
 - Escalation: the dashboard lists stuck refunds with age (`refund_pending_age_max`); "retry refund"
   moves a row from `MANUAL_REVIEW` back to `REFUND_REQUESTED` and re-emits.
 

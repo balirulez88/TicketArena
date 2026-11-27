@@ -242,23 +242,42 @@ enum OrderPaymentDisposition {
 /// `order_payments_orderId_applied_key` (migration SQL; Prisma cannot express it) allows at most
 /// one APPLIED payment per order.
 model OrderPayment {
-  paymentId         String                  @id @db.Uuid
-  orderId           String                  @db.Uuid
-  order             Order                   @relation(fields: [orderId], references: [id])
-  amount            Int
-  currency          String
-  capturedAt        DateTime                @db.Timestamptz(3)
-  disposition       OrderPaymentDisposition
-  refundRequestedAt DateTime?               @db.Timestamptz(3)
-  refundAttempts    Int                     @default(0)
+  paymentId             String                  @id @db.Uuid
+  orderId               String                  @db.Uuid
+  order                 Order                   @relation(fields: [orderId], references: [id])
+  amount                Int
+  currency              String
+  capturedAt            DateTime                @db.Timestamptz(3)
+  disposition           OrderPaymentDisposition
+  /// When the refund was first requested; the obligation's age (`refund_pending_age_max`).
+  refundRequestedAt     DateTime?               @db.Timestamptz(3)
+  /// Re-emits by the reconciler since the obligation was recorded or an operator last retried it.
+  refundAttempts        Int                     @default(0)
+  /// Why the payment is refunded, so the reconciler re-emits the request as it was first written.
+  refundReason          RefundReason?
+  /// When the request was last emitted (first request, re-emit or retry); the reconciler ages this.
+  refundLastRequestedAt DateTime?               @db.Timestamptz(3)
 
   @@index([orderId])
   @@map("order_payments")
   @@schema("public")
 }
 
+/// The `payment.refund_requested` reasons a ledger row can carry (`unknown_order` has no ledger row).
+enum RefundReason {
+  late_capture
+  late_delivery
+  order_expired
+  order_cancelled
+  order_confirmed
+  amount_mismatch
+
+  @@schema("public")
+}
+
 enum OrphanRefundStatus {
   REFUND_REQUESTED
+  MANUAL_REVIEW
   REFUNDED
 
   @@schema("public")
@@ -269,15 +288,22 @@ enum OrphanRefundStatus {
 /// deleted by retention while the refund may still be open, so this row is the durable record:
 /// one per `paymentId` (the primary key makes a duplicate or concurrent capture write nothing),
 /// no foreign key to `orders`, and enough to re-emit its `payment.refund_requested` (an
-/// `unknown_order` request has no contact). `payment.refunded` moves it to `REFUNDED`.
+/// `unknown_order` request has no contact). `payment.refunded` moves it to `REFUNDED`; the
+/// reconciler re-emits it and escalates it to `MANUAL_REVIEW` as it does a ledger row.
 model OrphanRefundObligation {
-  paymentId         String             @id @db.Uuid
-  orderId           String             @db.Uuid
-  amount            Int
-  currency          String
-  capturedAt        DateTime           @db.Timestamptz(3)
-  status            OrphanRefundStatus
-  refundRequestedAt DateTime           @db.Timestamptz(3)
+  paymentId             String             @id @db.Uuid
+  orderId               String             @db.Uuid
+  amount                Int
+  currency              String
+  capturedAt            DateTime           @db.Timestamptz(3)
+  status                OrphanRefundStatus
+  refundRequestedAt     DateTime           @db.Timestamptz(3)
+  /// The capture's correlation id, so a re-emitted request stays on the payment's trace.
+  correlationId         String             @db.Uuid
+  /// As on `order_payments`: re-emits since recorded or since an operator's last retry.
+  refundAttempts        Int                @default(0)
+  /// As on `order_payments`: when the request was last emitted; the reconciler ages this.
+  refundLastRequestedAt DateTime           @db.Timestamptz(3)
 
   @@map("orphan_refund_obligations")
   @@schema("public")

@@ -70,6 +70,7 @@ const worker = await startWorkerProcess({
       logger,
       consumers,
       sweeper: { booking },
+      reconciler: { booking },
       waitingRoom: {
         queue,
         limits: { admitRate: env.ADMIT_RATE_PER_SECOND, maxActive: env.MAX_ACTIVE },

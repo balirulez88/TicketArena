@@ -63,15 +63,22 @@ const paymentSucceededEnvelope = envelopeSchema(paymentSucceededPayloadSchema);
 const paymentFailedEnvelope = envelopeSchema(paymentFailedPayloadSchema);
 const paymentRefundedEnvelope = envelopeSchema(paymentRefundedPayloadSchema);
 
+interface ParsedPaymentEvent {
+  readonly orderId: string;
+  readonly correlationId: string;
+  readonly event: SagaEvent;
+}
+
 /** Validates the message as the payment event its `type` names and reduces it for `decide`. */
-function parsePaymentEvent(data: string): { orderId: string; event: SagaEvent } {
+function parsePaymentEvent(data: string): ParsedPaymentEvent {
   const raw: unknown = JSON.parse(data);
   const type = typeof raw === "object" && raw !== null && "type" in raw ? raw.type : undefined;
   switch (type) {
     case "payment.succeeded": {
-      const { payload } = paymentSucceededEnvelope.parse(raw);
+      const { payload, correlationId } = paymentSucceededEnvelope.parse(raw);
       return {
         orderId: payload.orderId,
+        correlationId,
         event: {
           type,
           paymentId: payload.paymentId,
@@ -82,15 +89,20 @@ function parsePaymentEvent(data: string): { orderId: string; event: SagaEvent } 
       };
     }
     case "payment.failed": {
-      const { payload } = paymentFailedEnvelope.parse(raw);
+      const { payload, correlationId } = paymentFailedEnvelope.parse(raw);
       return {
         orderId: payload.orderId,
+        correlationId,
         event: { type, paymentId: payload.paymentId, final: payload.final },
       };
     }
     case "payment.refunded": {
-      const { payload } = paymentRefundedEnvelope.parse(raw);
-      return { orderId: payload.orderId, event: { type, paymentId: payload.paymentId } };
+      const { payload, correlationId } = paymentRefundedEnvelope.parse(raw);
+      return {
+        orderId: payload.orderId,
+        correlationId,
+        event: { type, paymentId: payload.paymentId },
+      };
     }
     default:
       throw new Error(`booking saga cannot handle event type ${String(type)}`);
@@ -155,7 +167,7 @@ export function createPaymentSagaHandler(deps: PaymentSagaDeps) {
     message: SagaMessage,
     { emit }: SagaContext,
   ): Promise<SagaOutcome | undefined> {
-    const { orderId, event } = parsePaymentEvent(message.data);
+    const { orderId, correlationId, event } = parsePaymentEvent(message.data);
     const log = logger.child({ orderId, paymentId: event.paymentId });
 
     const { order, ledger, seatIds, context } = await lockSagaInputs(tx, orderId, event.paymentId);
@@ -186,7 +198,15 @@ export function createPaymentSagaHandler(deps: PaymentSagaDeps) {
         );
         return undefined;
       case "refund": {
-        const outcome = await applyRefund(tx, order, orderId, event, decision, emit, deps.newId);
+        const outcome = await applyRefund(
+          tx,
+          order,
+          { orderId, correlationId },
+          event,
+          decision,
+          emit,
+          deps.newId,
+        );
         if (outcome.lateDeliveryEventId !== undefined) {
           count("late_delivery_refund", outcome.lateDeliveryEventId);
         }
@@ -250,7 +270,7 @@ async function lockSagaInputs(
 async function applyRefund(
   tx: TransactionClient,
   order: LockedOrder | undefined,
-  orderId: string,
+  { orderId, correlationId }: { orderId: string; correlationId: string },
   event: SagaEvent,
   decision: Extract<SagaDecision, { kind: "refund" }>,
   emit: SagaContext["emit"],
@@ -260,13 +280,23 @@ async function applyRefund(
     throw notHandledYet(event, decision);
   }
   if (order === undefined) {
-    const requested = await requestUnknownOrderRefund(tx, orderId, event, decision.at, emit, newId);
+    const requested = await requestUnknownOrderRefund(
+      tx,
+      { orderId, correlationId },
+      event,
+      decision.at,
+      emit,
+      newId,
+    );
     return {
       line: requested ? "refund requested" : "refund already requested",
       lateDeliveryEventId: undefined,
     };
   }
-  await insertRefundObligation(tx, order, event, decision.at);
+  if (decision.reason === "unknown_order") {
+    throw notHandledYet(event, decision);
+  }
+  await insertRefundObligation(tx, order, event, decision.reason, decision.at);
   await emitRefundRequested(emit, newId, order, event, decision.reason, decision.at);
   return {
     line: "refund requested",
@@ -352,7 +382,7 @@ async function recordRefunded(
 async function recordOrphanRefunded(tx: TransactionClient, paymentId: string): Promise<void> {
   // Conditional on the state decide saw (the row is locked): zero rows means a stale decision.
   const refunded = await tx.orphanRefundObligation.updateMany({
-    where: { paymentId, status: "REFUND_REQUESTED" },
+    where: { paymentId, status: { in: ["REFUND_REQUESTED", "MANUAL_REVIEW"] } },
     data: { status: "REFUNDED" },
   });
   if (refunded.count !== 1) {
@@ -477,7 +507,7 @@ async function expireForLateCapture(
     throw new Error(`order ${order.id} is no longer PENDING_PAYMENT`);
   }
   await freeCheckoutSeats(tx, order, seatIds);
-  await insertRefundObligation(tx, order, payment, T);
+  await insertRefundObligation(tx, order, payment, "late_capture", T);
 
   await emit({
     id: newId(),
@@ -511,11 +541,15 @@ async function freeCheckoutSeats(
   }
 }
 
-/** The durable half of a refund obligation; the reconciler later re-emits from this row. */
+/**
+ * The durable half of a refund obligation. It keeps the request's reason, so the reconciler can
+ * re-emit the same request from this row alone, after retention has deleted the outbox row.
+ */
 async function insertRefundObligation(
   tx: TransactionClient,
   order: LockedOrder,
   payment: SucceededEvent,
+  reason: Exclude<RefundReason, "unknown_order"> | "late_capture",
   T: Date,
 ): Promise<void> {
   await tx.orderPayment.create({
@@ -526,7 +560,9 @@ async function insertRefundObligation(
       currency: payment.currency,
       capturedAt: payment.capturedAt,
       disposition: "REFUND_REQUESTED",
+      refundReason: reason,
       refundRequestedAt: T,
+      refundLastRequestedAt: T,
     },
   });
 }
@@ -570,7 +606,7 @@ async function emitRefundRequested(
  */
 async function requestUnknownOrderRefund(
   tx: TransactionClient,
-  orderId: string,
+  { orderId, correlationId }: { orderId: string; correlationId: string },
   payment: SucceededEvent,
   T: Date,
   emit: SagaContext["emit"],
@@ -585,6 +621,9 @@ async function requestUnknownOrderRefund(
       capturedAt: payment.capturedAt,
       status: "REFUND_REQUESTED",
       refundRequestedAt: T,
+      refundLastRequestedAt: T,
+      // The emitted request inherits the capture's correlation id; the reconciler re-emits with it.
+      correlationId,
     },
     skipDuplicates: true,
   });

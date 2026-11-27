@@ -116,6 +116,13 @@ describe("payment schema", () => {
           currency: "EUR",
           capturedAt: at,
           disposition,
+          ...(disposition === "APPLIED"
+            ? {}
+            : {
+                refundReason: "amount_mismatch" as const,
+                refundRequestedAt: at,
+                refundLastRequestedAt: at,
+              }),
         },
       });
     }

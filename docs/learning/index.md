@@ -33,3 +33,4 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [51: Log redaction policy](51-log-redaction-policy.md): `streamWrite` hook a serializált soron, kulcs és alak szerinti redaction, TD-048, tRPC hibák a loggeren át
 - [57: Produkciós booking metrikák](57-production-booking-metrics.md): `optionalMetrics` a context-ből, nem várt `HINCRBY` Upstashba, best-effort, `unknown` kulcs, fake Upstash a rendszerhatáron
 - [70: Tartós refund obligation ismeretlen orderhez](70-durable-orphan-refund-obligation.md): `orphan_refund_obligations`, `paymentId` PK mint dedupe, emit csak ha írt sort, `FOR UPDATE` + `decide()`, outbox retentiontől független, backfill migráció
+- [23: Refund reconciler és manual review](23-refund-reconciler.md): stale obligation re-emit outboxon át, `SKIP LOCKED`, 3 re-emit után `MANUAL_REVIEW`, `retryRefund`, AT-24

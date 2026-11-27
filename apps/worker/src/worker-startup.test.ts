@@ -105,10 +105,11 @@ describe("startWorker cleanup on a failed start (TD-034)", () => {
     await new Promise<void>((resolve) => blocker.close(() => resolve()));
   });
 
-  it("rejects naming a health port that is in use, and leaves no relay or consumer runner running", async () => {
+  it("rejects naming a health port that is in use, and leaves no relay, consumer runner or reconciler running", async () => {
     const port = (blocker.address() as AddressInfo).port;
     const probe = probingBus();
     const row = await pendingOutboxRow();
+    let reconciles = 0;
 
     await expect(
       startWorker({
@@ -117,12 +118,22 @@ describe("startWorker cleanup on a failed start (TD-034)", () => {
         port,
         relay: { intervalMs: 20 },
         consumers: [consumer("startup-port")],
+        reconciler: {
+          booking: {
+            reconcileRefunds: async () => {
+              reconciles += 1;
+              return { reEmitted: [], escalated: [] };
+            },
+          },
+          intervalMs: 20,
+        },
       }),
     ).rejects.toThrow(new RegExp(`port ${port}`));
 
     const { before, after } = await activityDuringQuiet(probe.counts);
     expect(after).toEqual(before);
     expect(await outboxStatus(row)).toBe("PENDING");
+    expect(reconciles).toBe(0);
   });
 
   it("stops the relay and the runners already started when a later step throws, before the error propagates", async () => {

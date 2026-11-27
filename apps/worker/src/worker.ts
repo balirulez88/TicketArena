@@ -13,10 +13,14 @@ import {
 import type { AdmissionLimits, QueueService } from "@ticketarena/waiting-room";
 import { createAdmissionLoops } from "./admission.js";
 import { type StopPhases, stopPhases, type WorkerComponent } from "./lifecycle.js";
+import { createPeriodicLoop } from "./periodic-loop.js";
 import { createSweeperLoop } from "./sweeper.js";
 
 /** How often expired holds and overdue orders are swept (spec: Expiry); lazy expiry covers held seats in between. */
 export const SWEEP_INTERVAL_MS = 15_000;
+
+/** How often the reconciler looks for stale refund obligations (spec: Refund obligations and reconciliation). */
+export const RECONCILE_INTERVAL_MS = 5 * 60_000;
 
 /** How often the admission ticker admits from each queue (spec: Waiting room). */
 export const ADMIT_INTERVAL_MS = 1000;
@@ -35,6 +39,11 @@ export interface WorkerOptions {
   /** The sweeper of holds and orders; the booking service carries the clock it decides expiry with. */
   readonly sweeper?: {
     readonly booking: Pick<BookingService, "sweepExpired">;
+    readonly intervalMs?: number;
+  };
+  /** The refund reconciler; the booking service carries its clock and its age and re-emit limits. */
+  readonly reconciler?: {
+    readonly booking: Pick<BookingService, "reconcileRefunds">;
     readonly intervalMs?: number;
   };
   /** The admission ticker and slot reaper; the queue service carries the clock they decide with. */
@@ -196,7 +205,28 @@ async function startLoops(options: WorkerOptions, started: StartedLoops): Promis
     throw refused.reason;
   }
   startSweeper(options, started.sweepers);
+  startReconciler(options, started.sweepers);
   startAdmission(options, started.admission);
+}
+
+/** Stopped in the sweepers' phase: both are periodic database jobs that publish nothing themselves. */
+function startReconciler(options: WorkerOptions, jobs: WorkerComponent[]): void {
+  const reconciler = options.reconciler;
+  if (reconciler === undefined) {
+    return;
+  }
+  const loop = createPeriodicLoop({
+    // A pass re-emits through the outbox only, so a failed pass loses nothing: the next one finds
+    // the same stale obligations.
+    task: async () => {
+      await reconciler.booking.reconcileRefunds();
+    },
+    intervalMs: reconciler.intervalMs ?? RECONCILE_INTERVAL_MS,
+    logger: options.logger ?? silentLogger,
+    failureMessage: "refund reconciliation failed; will retry",
+  });
+  loop.start();
+  jobs.push({ name: "refund reconciler", stop: () => loop.stop() });
 }
 
 function startSweeper(options: WorkerOptions, sweepers: WorkerComponent[]): void {

@@ -16,6 +16,13 @@ import {
   DEFAULT_BOOKING_TIMEOUTS,
   retryDelayMs,
 } from "./booking-transaction";
+import {
+  createRefundReconciler,
+  DEFAULT_REFUND_RECONCILER_LIMITS,
+  type ReconcileResult,
+  type RefundObligationView,
+  type RefundReconcilerLimits,
+} from "./refund-reconciler";
 import { classifyBookingError, sqlStateOf } from "./transaction-errors";
 
 export interface Clock {
@@ -44,6 +51,8 @@ export interface BookingServiceDeps {
   readonly random?: () => number;
   /** Waits before a retry; a timer if omitted. Injected so tests never wait on the clock. */
   readonly delay?: (ms: number) => Promise<void>;
+  /** The refund reconciler's age, re-emit and batch limits; the spec's values if omitted. */
+  readonly reconciler?: RefundReconcilerLimits;
 }
 
 export type BookingMetric =
@@ -150,6 +159,25 @@ export interface BookingService {
    * Outbox events stay: they are history the relay may still be publishing.
    */
   resetEvent(eventId: string): Promise<ResetResult>;
+  /**
+   * The reconciler's step, over the ledger and the orphan refund obligations alike. Every
+   * `REFUND_REQUESTED` obligation whose last request is 10 minutes old at `T` gets its
+   * `payment.refund_requested` re-emitted through the outbox and `refundAttempts` incremented, in
+   * one transaction; one that is stale after 3 re-emits moves to `MANUAL_REVIEW` instead, emitting
+   * nothing. Rows another pass has locked are skipped, so concurrent passes never re-emit twice.
+   */
+  reconcileRefunds(): Promise<ReconcileResult>;
+  /**
+   * An operator's "retry refund": a `MANUAL_REVIEW` obligation moves back to `REFUND_REQUESTED`,
+   * its request is re-emitted and `refundAttempts` restarts at 0. `NOT_FOUND` when the payment has
+   * no refund obligation, `REFUND_NOT_IN_MANUAL_REVIEW` (nothing changed) for any other state.
+   */
+  retryRefund(paymentId: string): Promise<RefundObligationView>;
+  /**
+   * `refund_pending_age_max` for the dashboard: ms since the first request of the oldest open
+   * (`REFUND_REQUESTED` or `MANUAL_REVIEW`) refund obligation at `T`; 0 when none is open.
+   */
+  refundPendingAgeMax(): Promise<number>;
 }
 
 export interface ResetResult {
@@ -595,7 +623,10 @@ export function createBookingService({
   timeouts = DEFAULT_BOOKING_TIMEOUTS,
   random = Math.random,
   delay = defaultDelay,
+  reconciler: reconcilerLimits = DEFAULT_REFUND_RECONCILER_LIMITS,
 }: BookingServiceDeps): BookingService {
+  const refunds = createRefundReconciler({ db, clock, newId, logger, limits: reconcilerLimits });
+
   // Called only once the outcome is decided; fire-and-forget so a metrics outage can never
   // turn a booking into an error or add latency to it.
   function count(metric: BookingMetric, eventId: string): void {
@@ -1036,6 +1067,10 @@ export function createBookingService({
   }
 
   return {
+    reconcileRefunds: () => refunds.reconcileRefunds(),
+    retryRefund: (paymentId) => refunds.retryRefund(paymentId),
+    refundPendingAgeMax: () => refunds.refundPendingAgeMax(),
+
     async holdSeats(buyer, eventId, seatIds) {
       try {
         return await holdOnce(buyer, eventId, seatIds);

@@ -231,7 +231,7 @@ describe("decide: unknown orderId", () => {
 });
 
 describe("decide: unknown orderId, known payment", () => {
-  test.each(["REFUND_REQUESTED", "REFUNDED"] as const)(
+  test.each(["REFUND_REQUESTED", "MANUAL_REVIEW", "REFUNDED"] as const)(
     "succeeded for an unknown orderId whose payment has a %s orphan obligation → noop (duplicate_payment)",
     (status) => {
       expect(decide(null, noLedger, onTime, T, { orphanObligation: status })).toEqual({
@@ -243,15 +243,18 @@ describe("decide: unknown orderId, known payment", () => {
 });
 
 describe("decide: unknown orderId, refunded", () => {
-  test("refunded for an unknown orderId with an open orphan obligation → transition (orphan_refund_completed)", () => {
-    expect(decide(null, noLedger, refunded, T, { orphanObligation: "REFUND_REQUESTED" })).toEqual({
-      kind: "transition",
-      reason: "orphan_refund_completed",
-      order: null,
-      ledger: null,
-      at: T,
-    });
-  });
+  test.each(["REFUND_REQUESTED", "MANUAL_REVIEW"] as const)(
+    "refunded for an unknown orderId with an open (%s) orphan obligation → transition (orphan_refund_completed)",
+    (status) => {
+      expect(decide(null, noLedger, refunded, T, { orphanObligation: status })).toEqual({
+        kind: "transition",
+        reason: "orphan_refund_completed",
+        order: null,
+        ledger: null,
+        at: T,
+      });
+    },
+  );
 
   test("refunded for an unknown orderId whose orphan obligation is already REFUNDED → noop (already_refunded)", () => {
     expect(decide(null, noLedger, refunded, T, { orphanObligation: "REFUNDED" })).toEqual({

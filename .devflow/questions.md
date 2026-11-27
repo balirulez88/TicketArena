@@ -922,3 +922,19 @@ Shape of the orphan refund obligation, and are existing unknown_order outbox row
 Assumed: Table public.orphan_refund_obligations keyed by paymentId (orderId without FK, amount, currency, capturedAt, status REFUND_REQUESTED|REFUNDED, refundRequestedAt); the PK insert replaces the advisory lock; existing unknown_order outbox rows are backfilled as open obligations from the earliest request, capturedAt = occurredAt; MANUAL_REVIEW and attempts are left to ticket 23
 
 Answer: (open)
+
+## 2026-11-27 07:30 ticket 23
+
+Which timestamp makes a refund obligation 'older than 10 min', and when does it reach MANUAL_REVIEW?
+
+Assumed: A new refundLastRequestedAt (first request, each re-emit, each retry) ages it, so re-emits are >= 10 min apart; refundRequestedAt keeps the first request and drives refund_pending_age_max; with refundAttempts >= 3 the next stale pass moves it to MANUAL_REVIEW, emitting nothing
+
+Answer: (open)
+
+## 2026-11-27 07:30 ticket 23
+
+What does retryRefund do with the attempt count, and with a row not in MANUAL_REVIEW?
+
+Assumed: Resets refundAttempts to 0 (a fresh 3 re-emits) and re-emits; REFUND_NOT_IN_MANUAL_REVIEW for any other status, NOT_FOUND without an obligation; service-level only, the admin endpoint is ticket 36
+
+Answer: (open)

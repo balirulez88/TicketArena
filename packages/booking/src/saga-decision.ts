@@ -9,7 +9,7 @@
 export type SagaOrderStatus = "PENDING_PAYMENT" | "CONFIRMED" | "CANCELLED" | "EXPIRED";
 export type LedgerDisposition = "APPLIED" | "REFUND_REQUESTED" | "MANUAL_REVIEW" | "REFUNDED";
 /** The state of an orphan refund obligation: the refund obligation of an `unknown_order` capture. */
-export type OrphanObligationStatus = "REFUND_REQUESTED" | "REFUNDED";
+export type OrphanObligationStatus = "REFUND_REQUESTED" | "MANUAL_REVIEW" | "REFUNDED";
 
 /** The locked order as the decision sees it; `null` when no order has the event's `orderId`. */
 export interface SagaOrderState {
@@ -144,7 +144,8 @@ function decideOrphan(status: OrphanObligationStatus, event: SagaEvent, T: Date)
     case "payment.failed":
       return { kind: "poison", reason: "unknown_order" };
     case "payment.refunded":
-      return status === "REFUND_REQUESTED"
+      // Open whether the reconciler escalated it or not: the refund closes it either way.
+      return status !== "REFUNDED"
         ? {
             kind: "transition",
             reason: "orphan_refund_completed",

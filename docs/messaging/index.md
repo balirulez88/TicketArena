@@ -120,7 +120,7 @@ optional `holdId`/`orderId`, `payload`); the full envelope is stored as the outb
 | `order.confirmed`          | booking saga handler (same TX)                                          | `notification`                                    | 1               |
 | `order.cancelled`          | booking saga handler (same TX)                                          | `notification-cancelled`                          | 1               |
 | `order.expired`            | `BookingService.sweepExpired`; booking saga on a late capture (same TX) | `notification-expired`                            | 1               |
-| `payment.refund_requested` | booking saga handler (same TX)                                          | `payment-refund`, `notification-refund-requested` | 1               |
+| `payment.refund_requested` | booking saga handler; reconciler re-emit and `retryRefund` (same TX)    | `payment-refund`, `notification-refund-requested` | 1               |
 | `payment.refunded`         | mock Payment refund handler (same TX, `payment` outbox)                 | `booking-saga-refunded`, `notification-refunded`  | 1               |
 
 `seat.held` payload: `holdId`, `eventId`, `seatIds`, `holdExpiresAt`. Its `correlationId` is
@@ -145,7 +145,10 @@ expires the order (caused by the `payment.succeeded`).
 `amount_mismatch`, `unknown_order`) and `contact`, which is absent only for `unknown_order`. Its
 aggregate is `order_payment` / `paymentId`; it carries the order's `holdId` when the order exists.
 The mock Payment service executes it (`payment-refund`, see Payment saga) and Notification tells the
-buyer the refund was initiated (`notification-refund-requested`). The reconciler is a later ticket.
+buyer the refund was initiated (`notification-refund-requested`). The reconciler re-emits a stale
+request, and `retryRefund` one in `MANUAL_REVIEW`, under a new event id with the original payload,
+the payment's correlation id and `causationId: null`
+([database](../database/index.md#refund-reconciler)).
 
 `payment.refunded` payload: `paymentId`, `orderId`, `amount`, `currency`, `refundedAt` (provider
 time) and the request's `contact`, absent only when the request had none (`unknown_order`). Its
@@ -187,8 +190,9 @@ redelivers the message; the redelivery resends every `PENDING` channel under the
 provider's dedupe keeps it to one delivery each) and then records them `SENT`. So when the SMS send
 fails after the EMAIL was sent, both stay `PENDING` and the redelivery offers the EMAIL again.
 Unique `(sourceEventId, channel)` plus the consumer's `processed_messages` keep a redelivered or `+dup@` event at one record per
-channel (AT-43, for all five kinds). Dedupe is by event id: a refund request re-emitted under a new
-event id (the planned reconciler) would be a new source event and send a second `refund-initiated`.
+channel (AT-43, for all five kinds). Dedupe is by event id: a refund request the reconciler
+re-emits (or an operator retries) has a new event id, so it is a new source event and the buyer gets
+another `refund-initiated`, at most 3 per obligation before manual review.
 The mock provider records deliveries and dedupes by key.
 **External delivery is at-least-once**: a crash between the call and the `SENT` commit repeats it on redelivery, and only
 the provider's key dedupe absorbs that.
@@ -236,15 +240,15 @@ zero-row update throws, never counts as success); `transition` `final_failure` (
 `IN_CHECKOUT` seats `AVAILABLE` with `holdId`/`claimBuyerKey` cleared, `order.cancelled`, no ledger
 row); `transition` `late_capture` (a capture after `paymentDeadline` on a `PENDING_PAYMENT` order: order
 `EXPIRED` by a conditional update, its `IN_CHECKOUT` seats `AVAILABLE`, a `REFUND_REQUESTED` ledger
-row with `refundRequestedAt = T`, `order.expired` and `payment.refund_requested` with reason
+row with `refundRequestedAt = refundLastRequestedAt = T`, `order.expired` and `payment.refund_requested` with reason
 `late_capture`; the seats are never reclaimed for that payment, even while still free, AT-20);
 `refund` (a capture the order cannot keep: on an `EXPIRED`, `CANCELLED` or `CONFIRMED` order, or
-with a mismatched amount: order unchanged, `REFUND_REQUESTED` ledger row, `payment.refund_requested`
+with a mismatched amount: order unchanged, `REFUND_REQUESTED` ledger row (its `refundReason` kept for the reconciler), `payment.refund_requested`
 with the contact; an on-time capture on an `EXPIRED` order, reason `late_delivery`, is also counted
 as `late_delivery_refund`, best-effort); `refund` `unknown_order` (a capture whose order no longer
 exists; a demo reset keeps orders, so it is not a cause: no ledger row is possible, so the handler
 inserts an orphan refund obligation (`orphan_refund_obligations`, primary key `paymentId`,
-`INSERT … ON CONFLICT DO NOTHING`) and emits `payment.refund_requested` without contact only if
+`INSERT … ON CONFLICT DO NOTHING`, keeping the capture's correlation id) and emits `payment.refund_requested` without contact only if
 that insert wrote the row; a concurrent duplicate's insert waits on the uncommitted row and skips
 it, so a redelivery or a duplicate under a new event id refunds it once); `noop` (ack; a non-final
 failure, reason `attempt_failed`, is also counted as `payment_attempt_failed` in the event's Redis
@@ -268,8 +272,8 @@ order `PENDING_PAYMENT`); the order is unchanged and nothing is emitted. A repea
 `already_refunded`. A `paymentId` missing from a known order's ledger is `poison`
 (`unknown_payment`, or `refund_for_pending_order` on a `PENDING_PAYMENT` order). For an unknown
 `orderId` the handler locks the payment's orphan refund obligation (an `unknown_order` refund has
-no ledger row): `transition` `orphan_refund_completed` moves it from `REFUND_REQUESTED` to
-`REFUNDED` by a conditional update (zero rows throws), emitting nothing; a repeat is `noop`
+no ledger row): `transition` `orphan_refund_completed` moves it from `REFUND_REQUESTED` or
+`MANUAL_REVIEW` to `REFUNDED` by a conditional update (zero rows throws), emitting nothing; a repeat is `noop`
 `already_refunded`; a payment with no orphan obligation is `poison` (`unknown_order`). The outbox
 is never consulted, so the outcome does not depend on the request's outbox row still existing.
 

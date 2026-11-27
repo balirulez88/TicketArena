@@ -218,7 +218,9 @@ describe("payment saga: payment.succeeded", () => {
         currency: order.currency,
         capturedAt: LATE,
         disposition: "REFUND_REQUESTED",
+        refundReason: "late_capture",
         refundRequestedAt: ON_TIME,
+        refundLastRequestedAt: ON_TIME,
       },
     ]);
     expect(emitted).toMatchObject([
@@ -325,6 +327,9 @@ describe("payment saga: payment.succeeded", () => {
       capturedAt: ON_TIME,
       status: "REFUND_REQUESTED",
       refundRequestedAt: ON_TIME,
+      refundLastRequestedAt: ON_TIME,
+      refundAttempts: 0,
+      correlationId: JSON.parse(message.data).correlationId,
     });
   });
 
@@ -714,7 +719,14 @@ describe("payment saga: payment.succeeded on a settled order", () => {
         holdId: null,
       });
       expect(await db().orderPayment.findMany({ where: { orderId: order.id } })).toMatchObject([
-        { paymentId, disposition: "REFUND_REQUESTED", refundRequestedAt: ON_TIME, capturedAt },
+        {
+          paymentId,
+          disposition: "REFUND_REQUESTED",
+          refundReason: reason,
+          refundRequestedAt: ON_TIME,
+          refundLastRequestedAt: ON_TIME,
+          capturedAt,
+        },
       ]);
       expect(emitted).toMatchObject([
         {
@@ -748,7 +760,12 @@ describe("payment saga: payment.succeeded on a settled order", () => {
     );
     expect((await db().seat.findUniqueOrThrow({ where: { id: seatId } })).status).toBe("AVAILABLE");
     expect(await db().orderPayment.findMany({ where: { orderId: order.id } })).toMatchObject([
-      { paymentId, disposition: "REFUND_REQUESTED", refundRequestedAt: ON_TIME },
+      {
+        paymentId,
+        disposition: "REFUND_REQUESTED",
+        refundReason: "order_cancelled",
+        refundRequestedAt: ON_TIME,
+      },
     ]);
     expect(emitted).toMatchObject([
       { type: "payment.refund_requested", payload: { paymentId, reason: "order_cancelled" } },

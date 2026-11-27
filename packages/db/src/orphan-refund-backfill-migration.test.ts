@@ -102,8 +102,9 @@ describe("the orphan refund obligation migration on a database with unknown_orde
     await expect(
       client.query(
         `INSERT INTO orphan_refund_obligations
-           ("paymentId", "orderId", amount, currency, "capturedAt", status, "refundRequestedAt")
-         VALUES ($1, $2, 1, 'EUR', now(), 'REFUND_REQUESTED', now())`,
+           ("paymentId", "orderId", amount, currency, "capturedAt", status, "refundRequestedAt",
+            "refundLastRequestedAt", "correlationId")
+         VALUES ($1, $2, 1, 'EUR', now(), 'REFUND_REQUESTED', now(), now(), $2)`,
         [ORPHAN_PAYMENT, ORPHAN_ORDER],
       ),
     ).rejects.toThrow(/orphan_refund_obligations_pkey/);

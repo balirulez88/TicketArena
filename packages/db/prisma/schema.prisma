@@ -221,7 +221,7 @@ model ProcessedMessage {
   /// The `Nats-Msg-Id` header (the outbox row id for relayed events).
   messageId   String
   streamSeq   BigInt
-  processedAt DateTime @default(now())
+  processedAt DateTime @default(now()) @db.Timestamptz(3)
 
   @@id([consumer, messageId])
   @@map("processed_messages")

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { DEFAULT_BOOKING_TIMEOUTS } from "@ticketarena/booking";
 import { freeSeats, NOW, testClients, withClient } from "@ticketarena/booking/testing";
 import type { Logger } from "@ticketarena/contracts";
-import { seedCatalog } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db/seed";
 import {
   type RedisStandInMode,
   setupRedisStandIn,
@@ -84,7 +84,7 @@ function caller(principal: Principal, now: Date = NOW) {
     principal,
     isAdmin: false,
     bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
-    db: db(),
+    db,
     logger,
     metrics: () => ({ increment: async () => undefined }),
     metricsReader: () => {

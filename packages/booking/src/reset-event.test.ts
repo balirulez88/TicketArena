@@ -257,6 +257,9 @@ describe("BookingService.resetEvent", () => {
           currency: "EUR",
           capturedAt: NOW,
           disposition,
+          refundReason: "order_expired",
+          refundRequestedAt: NOW,
+          refundLastRequestedAt: NOW,
         },
       });
 

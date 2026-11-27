@@ -8,9 +8,11 @@ import { z } from "zod";
  */
 export const DEFAULT_REDIS_TIMEOUTS = { connectTimeoutMs: 2000, commandTimeoutMs: 1000 } as const;
 
+const databaseUrl = z.url({ protocol: /^postgres(ql)?$/ });
+
 const workerEnvSchema = z
   .object({
-    DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
+    DATABASE_URL: databaseUrl,
     NATS_URL: z.url({ protocol: /^(nats|tls)$/ }),
     /** NATS client token; production NATS refuses clients without it (infra/fly/nats/nats.conf). */
     NATS_TOKEN: z.string().min(32).optional(),
@@ -47,6 +49,23 @@ export function parseWorkerEnv(source: Readonly<Record<string, string | undefine
   const result = workerEnvSchema.safeParse(source);
   if (!result.success) {
     throw new Error(`Invalid worker environment:\n${z.prettifyError(result.error)}`);
+  }
+  return result.data;
+}
+
+const seedEnvSchema = z.object({ DATABASE_URL: databaseUrl });
+
+export type SeedEnv = z.infer<typeof seedEnvSchema>;
+
+/**
+ * Validates the `db:seed` command's configuration: only the database it seeds, so seeding never
+ * needs the worker's NATS or Redis settings.
+ */
+export function parseSeedEnv(source: Readonly<Record<string, string | undefined>>): SeedEnv {
+  const result = seedEnvSchema.safeParse(source);
+  if (!result.success) {
+    throw new Error(`Invalid seed environment:
+${z.prettifyError(result.error)}`);
   }
   return result.data;
 }

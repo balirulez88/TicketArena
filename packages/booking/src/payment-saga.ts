@@ -10,8 +10,10 @@ import {
 import type { TransactionClient } from "@ticketarena/db";
 import type { Clock } from "./booking-service";
 import {
+  type DecideContext,
   decide,
   type LedgerEntry,
+  type OrphanObligationStatus,
   type RefundReason,
   type SagaDecision,
   type SagaEvent,
@@ -61,15 +63,22 @@ const paymentSucceededEnvelope = envelopeSchema(paymentSucceededPayloadSchema);
 const paymentFailedEnvelope = envelopeSchema(paymentFailedPayloadSchema);
 const paymentRefundedEnvelope = envelopeSchema(paymentRefundedPayloadSchema);
 
+interface ParsedPaymentEvent {
+  readonly orderId: string;
+  readonly correlationId: string;
+  readonly event: SagaEvent;
+}
+
 /** Validates the message as the payment event its `type` names and reduces it for `decide`. */
-function parsePaymentEvent(data: string): { orderId: string; event: SagaEvent } {
+function parsePaymentEvent(data: string): ParsedPaymentEvent {
   const raw: unknown = JSON.parse(data);
   const type = typeof raw === "object" && raw !== null && "type" in raw ? raw.type : undefined;
   switch (type) {
     case "payment.succeeded": {
-      const { payload } = paymentSucceededEnvelope.parse(raw);
+      const { payload, correlationId } = paymentSucceededEnvelope.parse(raw);
       return {
         orderId: payload.orderId,
+        correlationId,
         event: {
           type,
           paymentId: payload.paymentId,
@@ -80,15 +89,20 @@ function parsePaymentEvent(data: string): { orderId: string; event: SagaEvent } 
       };
     }
     case "payment.failed": {
-      const { payload } = paymentFailedEnvelope.parse(raw);
+      const { payload, correlationId } = paymentFailedEnvelope.parse(raw);
       return {
         orderId: payload.orderId,
+        correlationId,
         event: { type, paymentId: payload.paymentId, final: payload.final },
       };
     }
     case "payment.refunded": {
-      const { payload } = paymentRefundedEnvelope.parse(raw);
-      return { orderId: payload.orderId, event: { type, paymentId: payload.paymentId } };
+      const { payload, correlationId } = paymentRefundedEnvelope.parse(raw);
+      return {
+        orderId: payload.orderId,
+        correlationId,
+        event: { type, paymentId: payload.paymentId },
+      };
     }
     default:
       throw new Error(`booking saga cannot handle event type ${String(type)}`);
@@ -125,8 +139,8 @@ async function lockOrderSeats(tx: TransactionClient, orderId: string): Promise<s
  *
  * Every event goes through the pure `decide`; this handler only gathers its inputs under the
  * order lock and applies the result. Captured money the order cannot keep becomes a refund
- * obligation (a `REFUND_REQUESTED` ledger row plus `payment.refund_requested`) in the same
- * transaction, so it is never dropped silently. A transition no case below builds yet throws, so
+ * obligation (a `REFUND_REQUESTED` ledger row, or an orphan obligation when the order is gone,
+ * plus `payment.refund_requested`) in the same transaction, so it is never dropped silently. A transition no case below builds yet throws, so
  * the message is retried rather than acked.
  */
 export function createPaymentSagaHandler(deps: PaymentSagaDeps) {
@@ -153,16 +167,14 @@ export function createPaymentSagaHandler(deps: PaymentSagaDeps) {
     message: SagaMessage,
     { emit }: SagaContext,
   ): Promise<SagaOutcome | undefined> {
-    const { orderId, event } = parsePaymentEvent(message.data);
+    const { orderId, correlationId, event } = parsePaymentEvent(message.data);
     const log = logger.child({ orderId, paymentId: event.paymentId });
 
-    const { order, ledger, seatIds } = await lockSagaInputs(tx, orderId, event.paymentId);
+    const { order, ledger, seatIds, context } = await lockSagaInputs(tx, orderId, event.paymentId);
     // One T per transaction, read after every lock is held (ADR 0005): every timestamp this
     // message writes uses it.
     const T = deps.clock.now();
-    const decision = decide(order ?? null, ledger, event, T, {
-      refundRequested: await refundRequestedForVanishedOrder(tx, order, event),
-    });
+    const decision = decide(order ?? null, ledger, event, T, context);
 
     switch (decision.kind) {
       case "noop":
@@ -178,16 +190,23 @@ export function createPaymentSagaHandler(deps: PaymentSagaDeps) {
         log.warn({ reason: decision.reason }, `${event.type} is ${decision.kind}`);
         return { outcome: decision.kind, reason: decision.reason };
       case "transition":
-        if (order === undefined) {
-          throw notHandledYet(event, decision);
-        }
         log.info(
           { seatIds },
-          await applyTransition(tx, order, seatIds, event, decision, emit, deps.newId),
+          order === undefined
+            ? await applyOrphanTransition(tx, event, decision)
+            : await applyTransition(tx, order, seatIds, event, decision, emit, deps.newId),
         );
         return undefined;
       case "refund": {
-        const outcome = await applyRefund(tx, order, orderId, event, decision, emit, deps.newId);
+        const outcome = await applyRefund(
+          tx,
+          order,
+          { orderId, correlationId },
+          event,
+          decision,
+          emit,
+          deps.newId,
+        );
         if (outcome.lateDeliveryEventId !== undefined) {
           count("late_delivery_refund", outcome.lateDeliveryEventId);
         }
@@ -198,43 +217,60 @@ export function createPaymentSagaHandler(deps: PaymentSagaDeps) {
   };
 }
 
+interface SagaInputs {
+  readonly order: LockedOrder | undefined;
+  readonly ledger: LedgerEntry[];
+  readonly seatIds: string[];
+  /** Holds the payment's orphan obligation, read only when the order is gone. */
+  readonly context: DecideContext;
+}
+
 /**
  * Locks the order first, so concurrent events for one order serialize and the ledger read and
  * the decision always see the effect of the previous one. Seats change only for a
- * PENDING_PAYMENT order, so only then are they locked too. Without an order there is no row to
- * lock, so duplicates of the payment serialize on an advisory lock keyed by its id instead.
+ * PENDING_PAYMENT order, so only then are they locked too. Without an order the payment's orphan
+ * obligation is locked instead, if it exists: two `payment.refunded` then serialize on it. A
+ * capture racing the one that is writing it finds no row to lock yet; the primary key catches
+ * that one (`requestUnknownOrderRefund`).
  */
 async function lockSagaInputs(
   tx: TransactionClient,
   orderId: string,
   paymentId: string,
-): Promise<{ order: LockedOrder | undefined; ledger: LedgerEntry[]; seatIds: string[] }> {
+): Promise<SagaInputs> {
   const [order] = await tx.$queryRaw<LockedOrder[]>`
     SELECT o."id", o."holdId", h."eventId", o."status", o."totalMinor", o."currency",
            o."contactEmail", o."contactPhone", o."paymentDeadline"
     FROM "orders" o JOIN "holds" h ON h."id" = o."holdId"
     WHERE o."id" = ${orderId}::uuid FOR UPDATE OF o`;
   if (order === undefined) {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`refund:${paymentId}`}, 0))`;
-    return { order, ledger: [], seatIds: [] };
+    const [orphan] = await tx.$queryRaw<{ status: OrphanObligationStatus }[]>`
+      SELECT "status"::text AS "status" FROM "orphan_refund_obligations"
+      WHERE "paymentId" = ${paymentId}::uuid FOR UPDATE`;
+    return {
+      order,
+      ledger: [],
+      seatIds: [],
+      context: orphan === undefined ? {} : { orphanObligation: orphan.status },
+    };
   }
   const ledger = await tx.orderPayment.findMany({
     where: { orderId: order.id },
     select: { paymentId: true, disposition: true },
   });
   const seatIds = order.status === "PENDING_PAYMENT" ? await lockOrderSeats(tx, order.id) : [];
-  return { order, ledger, seatIds };
+  return { order, ledger, seatIds, context: {} };
 }
 
 /**
  * Applies a `refund` decision: a refund obligation for a capture the order cannot keep, or, for an
- * order that no longer exists, the refund event alone. Returns the log line and, for a
+ * order that no longer exists, an orphan obligation. Returns the log line and, for a
  * `late_delivery` refund, the event id whose counter it bumps.
  */
 async function applyRefund(
   tx: TransactionClient,
   order: LockedOrder | undefined,
-  orderId: string,
+  { orderId, correlationId }: { orderId: string; correlationId: string },
   event: SagaEvent,
   decision: Extract<SagaDecision, { kind: "refund" }>,
   emit: SagaContext["emit"],
@@ -244,13 +280,23 @@ async function applyRefund(
     throw notHandledYet(event, decision);
   }
   if (order === undefined) {
-    const requested = await requestUnknownOrderRefund(tx, orderId, event, decision.at, emit, newId);
+    const requested = await requestUnknownOrderRefund(
+      tx,
+      { orderId, correlationId },
+      event,
+      decision.at,
+      emit,
+      newId,
+    );
     return {
       line: requested ? "refund requested" : "refund already requested",
       lateDeliveryEventId: undefined,
     };
   }
-  await insertRefundObligation(tx, order, event, decision.at);
+  if (decision.reason === "unknown_order") {
+    throw notHandledYet(event, decision);
+  }
+  await insertRefundObligation(tx, order, event, decision.reason, decision.at);
   await emitRefundRequested(emit, newId, order, event, decision.reason, decision.at);
   return {
     line: "refund requested",
@@ -287,6 +333,19 @@ async function applyTransition(
   throw notHandledYet(event, decision);
 }
 
+/** Applies a transition for a payment whose order is gone: only its orphan obligation changes. */
+async function applyOrphanTransition(
+  tx: TransactionClient,
+  event: SagaEvent,
+  decision: Extract<SagaDecision, { kind: "transition" }>,
+): Promise<string> {
+  if (decision.reason !== "orphan_refund_completed") {
+    throw notHandledYet(event, decision);
+  }
+  await recordOrphanRefunded(tx, event.paymentId);
+  return "orphan refund recorded";
+}
+
 function notHandledYet(event: SagaEvent, decision: SagaDecision): Error {
   return new Error(
     `${event.type} decision ${decision.kind} (${decision.reason}) is not handled yet`,
@@ -313,6 +372,21 @@ async function recordRefunded(
   });
   if (refunded.count !== 1) {
     throw new Error(`payment ${event.paymentId} has no open refund obligation`);
+  }
+}
+
+/**
+ * Applies `orphan_refund_completed`: the payment's orphan obligation moves to REFUNDED. Nothing is
+ * emitted: there is no order or buyer, and Notification hears `payment.refunded` itself.
+ */
+async function recordOrphanRefunded(tx: TransactionClient, paymentId: string): Promise<void> {
+  // Conditional on the state decide saw (the row is locked): zero rows means a stale decision.
+  const refunded = await tx.orphanRefundObligation.updateMany({
+    where: { paymentId, status: { in: ["REFUND_REQUESTED", "MANUAL_REVIEW"] } },
+    data: { status: "REFUNDED" },
+  });
+  if (refunded.count !== 1) {
+    throw new Error(`payment ${paymentId} has no open orphan refund obligation`);
   }
 }
 
@@ -433,7 +507,7 @@ async function expireForLateCapture(
     throw new Error(`order ${order.id} is no longer PENDING_PAYMENT`);
   }
   await freeCheckoutSeats(tx, order, seatIds);
-  await insertRefundObligation(tx, order, payment, T);
+  await insertRefundObligation(tx, order, payment, "late_capture", T);
 
   await emit({
     id: newId(),
@@ -467,11 +541,15 @@ async function freeCheckoutSeats(
   }
 }
 
-/** The durable half of a refund obligation; the reconciler later re-emits from this row. */
+/**
+ * The durable half of a refund obligation. It keeps the request's reason, so the reconciler can
+ * re-emit the same request from this row alone, after retention has deleted the outbox row.
+ */
 async function insertRefundObligation(
   tx: TransactionClient,
   order: LockedOrder,
   payment: SucceededEvent,
+  reason: Exclude<RefundReason, "unknown_order"> | "late_capture",
   T: Date,
 ): Promise<void> {
   await tx.orderPayment.create({
@@ -482,7 +560,9 @@ async function insertRefundObligation(
       currency: payment.currency,
       capturedAt: payment.capturedAt,
       disposition: "REFUND_REQUESTED",
+      refundReason: reason,
       refundRequestedAt: T,
+      refundLastRequestedAt: T,
     },
   });
 }
@@ -515,51 +595,39 @@ async function emitRefundRequested(
   });
 }
 
-/** Only a `payment.refunded` for an order that no longer exists needs this outbox read. */
-async function refundRequestedForVanishedOrder(
-  tx: TransactionClient,
-  order: LockedOrder | undefined,
-  event: SagaEvent,
-): Promise<boolean> {
-  return order === undefined && event.type === "payment.refunded"
-    ? refundRequestExists(tx, event.paymentId)
-    : false;
-}
-
 /**
- * Whether booking ever requested a refund of this payment. For an order that no longer exists the
- * outbox row is the only record of that request (no ledger row can reference the order).
- */
-async function refundRequestExists(tx: TransactionClient, paymentId: string): Promise<boolean> {
-  const existing = await tx.outboxEvent.findFirst({
-    where: {
-      aggregateType: REFUND_AGGREGATE,
-      aggregateId: paymentId,
-      eventType: REFUND_REQUESTED_EVENT,
-    },
-    select: { id: true },
-  });
-  return existing !== null;
-}
-
-/**
- * Refunds a capture whose order does not exist (a demo reset keeps orders, so it is not a cause). There is
- * no order to attach a ledger row to, so the outbox row is the obligation, and it is what makes
- * the refund happen once per payment: a duplicate payment event carries a new message id, so the
- * consumer's `processed_messages` cannot catch it. The caller holds the payment's advisory lock,
- * so a concurrent duplicate waits here and then sees the committed request. Outbox rows outlive
- * the stream (spec: Retention), so no redelivery can outlast that record.
+ * Refunds a capture whose order does not exist (a demo reset keeps orders, so it is not a cause).
+ * There is no order to attach a ledger row to, so the orphan obligation is the durable record,
+ * and its primary key is what makes the refund happen once per payment: a duplicate payment event
+ * carries a new message id, so the consumer's `processed_messages` cannot catch it. A concurrent
+ * duplicate's insert waits on the uncommitted row and then skips it, so only the transaction that
+ * wrote the obligation emits the request, in that same transaction (ADR 0003).
  * Returns whether a request was written.
  */
 async function requestUnknownOrderRefund(
   tx: TransactionClient,
-  orderId: string,
+  { orderId, correlationId }: { orderId: string; correlationId: string },
   payment: SucceededEvent,
   T: Date,
   emit: SagaContext["emit"],
   newId: () => string,
 ): Promise<boolean> {
-  if (await refundRequestExists(tx, payment.paymentId)) {
+  const written = await tx.orphanRefundObligation.createMany({
+    data: {
+      paymentId: payment.paymentId,
+      orderId,
+      amount: payment.amount,
+      currency: payment.currency,
+      capturedAt: payment.capturedAt,
+      status: "REFUND_REQUESTED",
+      refundRequestedAt: T,
+      refundLastRequestedAt: T,
+      // The emitted request inherits the capture's correlation id; the reconciler re-emits with it.
+      correlationId,
+    },
+    skipDuplicates: true,
+  });
+  if (written.count === 0) {
     return false;
   }
   await emit({

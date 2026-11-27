@@ -4,15 +4,15 @@
 
 ## Module boundaries
 
-| Workspace               | Responsibility                                                                                                                                                                                                                                                                                                                                                                                             | Depends on                                   |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| `apps/web`              | Next.js App Router UI and the tRPC API (the only public entry)                                                                                                                                                                                                                                                                                                                                             | `db`, `booking`, `contracts`, `waiting-room` |
-| `packages/db`           | Prisma schema, migrations, client factory over the Neon adapter                                                                                                                                                                                                                                                                                                                                            | (none)                                       |
-| `packages/contracts`    | Zod schemas for the event envelope and payloads (`seat.held`, `hold.released`, `hold.expired`, `order.placed`, `payment.succeeded`, `payment.failed`, `order.confirmed`, `order.cancelled`, `order.expired`); `Logger` port, id helpers                                                                                                                                                                    | (none)                                       |
-| `packages/booking`      | `BookingService`: `holdSeats` (1–6 seats, buyer limit), `getHold`, `activeHold` (the session's live hold for an event, seats priced), `releaseHold`, `placeOrder`, `getOrder`, `sweepExpired` (sweeper step: holds, then overdue orders); payment saga handler over the pure `decide` matrix (confirms, or cancels on a final failure); `BookingMetrics` and `SagaMetrics` ports, Redis adapter and reader | `contracts`, `db`                            |
-| `packages/waiting-room` | `QueueService` (`join`, `status`, `leave`), `QueueStore` port with a node-redis adapter (atomic Lua scripts, prefixed keys), `AdmissionPolicy` (schedule). See [waiting-room](waiting-room.md)                                                                                                                                                                                                             | (none)                                       |
-| `packages/messaging`    | `MessageBus` port, JetStream adapter (the only `@nats-io/*` importer), outbox relay, consumer runner                                                                                                                                                                                                                                                                                                       | `db`                                         |
-| `apps/worker`           | Long-running worker: validates env, ensures the topology, runs the relay, the sweeper and consumer runners, serves `/health`; hosts the mock Payment and Notification modules                                                                                                                                                                                                                              | `db`, `booking`, `messaging`                 |
+| Workspace               | Responsibility                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Depends on                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------- |
+| `apps/web`              | Next.js App Router UI and the tRPC API (the only public entry)                                                                                                                                                                                                                                                                                                                                                                                                                                                     | `db`, `booking`, `contracts`, `waiting-room` |
+| `packages/db`           | Prisma schema, migrations, client factory over the Neon adapter                                                                                                                                                                                                                                                                                                                                                                                                                                                    | (none)                                       |
+| `packages/contracts`    | Zod schemas for the event envelope and payloads (`seat.held`, `hold.released`, `hold.expired`, `order.placed`, `payment.succeeded`, `payment.failed`, `order.confirmed`, `order.cancelled`, `order.expired`); `Logger` port, id helpers                                                                                                                                                                                                                                                                            | (none)                                       |
+| `packages/booking`      | `BookingService`: `holdSeats` (1–6 seats, buyer limit), `getHold`, `activeHold` (the session's live hold for an event, seats priced), `releaseHold`, `placeOrder`, `getOrder`, `sweepExpired` (sweeper step: holds, then overdue orders), `reconcileRefunds` / `retryRefund` / `refundPendingAgeMax` (refund reconciler, `refund-reconciler.ts`); payment saga handler over the pure `decide` matrix (confirms, or cancels on a final failure); `BookingMetrics` and `SagaMetrics` ports, Redis adapter and reader | `contracts`, `db`                            |
+| `packages/waiting-room` | `QueueService` (`join`, `status`, `leave`), `QueueStore` port with a node-redis adapter (atomic Lua scripts, prefixed keys), `AdmissionPolicy` (schedule). See [waiting-room](waiting-room.md)                                                                                                                                                                                                                                                                                                                     | (none)                                       |
+| `packages/messaging`    | `MessageBus` port, JetStream adapter (the only `@nats-io/*` importer), outbox relay, consumer runner                                                                                                                                                                                                                                                                                                                                                                                                               | `db`                                         |
+| `apps/worker`           | Long-running worker: validates env, ensures the topology, runs the relay, the sweeper, the refund reconciler and consumer runners, serves `/health`; hosts the mock Payment and Notification modules                                                                                                                                                                                                                                                                                                               | `db`, `booking`, `messaging`                 |
 
 New modules are added when a slice needs them, not speculatively.
 
@@ -24,9 +24,11 @@ New modules are added when a slice needs them, not speculatively.
   procedures through `TRPCContext`. Procedures never import a client directly, which keeps them
   testable through `createCaller` with fakes at system boundaries only. Booking procedures get
   their service from `bookingServiceFor(ctx)`; `composeBooking` and `connectBooking` turn one
-  `BookingTimeouts` value into a `BookingRuntime` (client plus those timeouts), and
-  `createTRPCContextFactory(runtime)` sets both `ctx.db` and the required `ctx.bookingTimeouts`
-  from it (see
+  `BookingTimeouts` value into a `BookingRuntime` (client plus those timeouts). `lazyBooking`
+  wraps that in a `LazyBookingRuntime` that builds the client on the first `db()` call, and
+  `createTRPCContextFactory(runtime)` sets both `ctx.db()` and the required `ctx.bookingTimeouts`
+  from it, so `DATABASE_URL` is read only by procedures that use the database: `health.check`
+  and `session.whoami` work without it, and a database procedure fails naming it (see
   [database](../database/index.md#transaction-timeouts-retries-and-booking_busy)).
 - **Deep modules, narrow interfaces:** each module exposes a small surface (e.g.
   `join/status/leave` for the waiting room) and hides its storage layout.
@@ -83,6 +85,13 @@ Decision: [ADR 0012](../adr/0012-identity-service-seam.md). Code: `apps/web/src/
   naming the variable; the failure is logged once through the app logger and later calls rethrow it
   without re-parsing. Health and session requests are unaffected. Same per-concern parsing as
   `parseSessionEnv` and `parseDatabaseEnv`.
+  `booking.holdSeats` and `booking.placeOrder` resolve `ctx.metrics()` (through `optionalMetrics`)
+  and hand it to the booking service; they are the only booking procedures that do, and with the
+  metrics unconfigured they book uncounted instead of failing
+  ([database](../database/index.md)). The lazy dependencies (`metrics`, `metricsReader`,
+  `metricsReset`, `rateLimiter`, `queueStore`) and the logger are one `ContextServices` per process
+  (`createContextServices` over `process.env`); `createTRPCContextFactory(booking, services)` lets
+  a test build the real context over its own environment.
 - **Admin access** (`identity/admin-session.ts`, `identity/admin-login.ts`): separate from the
   Principal. `POST /api/admin/login` (form field `password`) compares the password with
   `ADMIN_PASSWORD` in constant time (both as HMACs through `subtle.verify`) and answers with a 303:
@@ -154,8 +163,8 @@ taken first, so a refused call has no effect. The same limiter guards the admin 
 ## Catalog API
 
 Routers in `apps/web/src/server/routers/`: `events` (`list`, `get`) and `seats` (`map`), sharing
-zod schemas in `catalog-schemas.ts`. They read through `ctx.db`, a process-wide Prisma client
-created lazily from `DATABASE_URL` and `DATABASE_DRIVER` (`neon`, the default, or `pg` for a local
+zod schemas in `catalog-schemas.ts`. They read through `ctx.db()`, a process-wide Prisma client
+created on first call from `DATABASE_URL` and `DATABASE_DRIVER` (`neon`, the default, or `pg` for a local
 Postgres; `parseDatabaseEnv` validates only these two and refuses a direct `*.neon.tech` host:
 the web app must use the `-pooler` endpoint). A missing
 event is a `NOT_FOUND` tRPC error. Integration tests run against real Postgres. See
@@ -273,11 +282,30 @@ Code: `apps/web/src/app/` (routes) and `apps/web/src/components/` (client compon
 ## Worker
 
 Code: `apps/worker/src/`; decision: [ADR 0013](../adr/0013-deployment-topology.md). `startWorker` ensures
-the JetStream topology first, then starts the outbox **relay** (polls every 250 ms, batch of 100) and one
+the JetStream topology first, binds the `/health` port (a port in use rejects naming the port, before anything has started), then starts the outbox **relay** (polls every 250 ms, batch of 100) and one
 **consumer runner** per registered consumer, and the **sweeper** (`sweeper.ts`: calls
 `BookingService.sweepExpired()`, which expires holds and then overdue orders, at start and then 15 s after each sweep ends, `SWEEP_INTERVAL_MS`; a
-failed sweep is logged and retried next time; `stop()` cancels the wait at once), the waiting-room **admission ticker** (every 1 s, `ADMIT_INTERVAL_MS`) and **slot reaper** (every 15 s, `REAP_INTERVAL_MS`) in `admission.ts` on the generic `periodic-loop.ts` (same run-then-wait, log-and-retry, prompt-stop behaviour), each a pass over every event (see [waiting room](waiting-room.md#admission-and-slots)), and serves `GET /health` (`{ status: "ok", redis: "ok" | "unavailable" }`, Redis probed with a bounded `PING`). Redis is never awaited at start: its client (`redis.ts`, `createWorkerRedis`) connects on first use with bounded connects and commands, so an outage pauses only the ticker and reaper ([waiting room](waiting-room.md#redis-outage)). Configuration is validated once in
+failed sweep is logged and retried next time; `stop()` cancels the wait at once), the **refund reconciler** (`BookingService.reconcileRefunds()` at start and then 5 min after each pass ends, `RECONCILE_INTERVAL_MS`, on `periodic-loop.ts`; see [database](../database/index.md#refund-reconciler)), the waiting-room **admission ticker** (every 1 s, `ADMIT_INTERVAL_MS`) and **slot reaper** (every 15 s, `REAP_INTERVAL_MS`) in `admission.ts` on the generic `periodic-loop.ts` (same run-then-wait, log-and-retry, prompt-stop behaviour), each a pass over every event (see [waiting room](waiting-room.md#admission-and-slots)), and serves `GET /health` (`{ status: "ok", redis: "ok" | "unavailable" }`, Redis probed with a bounded `PING`). Redis is never awaited at start: its client (`redis.ts`, `createWorkerRedis`) connects on first use with bounded connects and commands, so an outage pauses only the ticker and reaper ([waiting room](waiting-room.md#redis-outage)). Configuration is validated once in
 `parseWorkerEnv` (`DATABASE_URL`, `NATS_URL`, `REDIS_URL`, `REDIS_CONNECT_TIMEOUT_MS` default 2000, `REDIS_COMMAND_TIMEOUT_MS` default 1000, `PORT`, `ADMIT_RATE_PER_SECOND` default 10, `MAX_ACTIVE` default 100) and injected. Details: [messaging](../messaging/index.md).
+
+**Start and stop** (`lifecycle.ts`, TD-034, TD-035). If any start step fails after a loop has
+started (a consumer's subscribe rejects, say), `startWorker` stops everything already running and
+closes the server before the error propagates; that cleanup draws on a `StopBudget`
+(`createStopBudget`, default `DEFAULT_SHUTDOWN_DEADLINE_MS`), so a stop that never settles is logged by name
+(`worker did not stop within ...`, `pending`) and the start error still propagates. `RunningWorker.components` lists the started parts
+by name in stop order (health server, sweeper and refund reconciler, admission ticker and slot reaper, `relay:<service>`,
+`consumer:<durable>`); each phase stops together, phases one after another. `main.ts` starts and
+stops only through `startWorkerProcess` and `shutdownWorkerProcess`, with `process.exit` injected.
+Prisma, Redis and the NATS connection are opened inside `startWorkerProcess`'s `start`, each
+registered the moment it exists, so a failed start (the NATS connect included) is logged
+(`worker failed to start`), what was opened is closed newest first, and the process exits 1. A
+failed start has one budget whose clock starts at the first stop: `startWorker`'s cleanup and the
+resource closes both spend from it, so the whole failed-start cleanup ends within 25 s; on SIGTERM or SIGINT every component and then the bus, Redis and Prisma are
+stopped, a failing stop is logged with its component and the rest still close (exit 1), and the
+whole shutdown is bounded by `DEFAULT_SHUTDOWN_DEADLINE_MS` (25 s, under Fly's 30 s
+`kill_timeout`): at the deadline the components still stopping are logged and the process exits 1.
+A relay tick cut off this way holds an uncommitted claim; Postgres rolls it back when the process
+exits, so its rows stay `PENDING` for the next start.
 
 ## Logging and ids
 
@@ -293,6 +321,27 @@ failed sweep is logged and retried next time; `stop()` cancels the wait at once)
   `correlationId` is unchanged and `causationId` is the handled message's `id`; the outbox row
   commits in the handler's transaction and a non-envelope message cannot emit. Events from
   `holdSeats`/`releaseHold`/`placeOrder` start the chain with `causationId: null`.
+- **Redaction:** buyer contact details (email and phone) never reach a log line. Both app loggers
+  (`createWebLogger`, `createWorkerLogger`) pass every serialized line through `redactLogLine`
+  (`packages/contracts`, no pino dependency) in pino's `streamWrite` hook, so the rule covers
+  child bindings, fields and a serialized error (message, stack, own properties, `cause`) before
+  anything is written. Two rules apply at any depth: the value of a key matching `email`,
+  `phone` or `recipient` (case-insensitive: `contactEmail`, `contact.phone`, a notification's
+  `recipient`) becomes `[Redacted]`, and inside any string an email address or a run of 7 or more
+  digits (optional leading `+` and `(`, separated by spaces, dots, dashes or parentheses) not
+  touching a word character becomes `[Redacted]`. The value rule covers every format the checkout
+  accepts: `booking.placeOrder` validates its contact with `buyerContactSchema`
+  (`packages/contracts/src/buyer-contact.ts`: `z.email()`, and a phone of 7 to 15 digits in that
+  shape), and a table test runs each accepted format through both. A phone that starts like an
+  IPv4 address (four dot-separated groups of 1 to 3 digits) is refused at checkout, because the
+  redactor keeps IPv4 addresses readable. Why both: errors are logged whole (`err`) because their name and stack are needed
+  to debug, and a Prisma or validation error can embed the buyer's contact in its message (TD-048),
+  which no key rule sees. The value rule over-redacts on purpose (a bare 7+ digit number or
+  `YYYY-MM-DD` date in a message is lost); UUIDs, ISO timestamps, IP addresses and numeric fields
+  survive, so correlation ids stay traceable (a decimal number of 7+ digits is lost too). tRPC
+  procedure errors go to the same logger through `onProcedureError` (the API route's `onError`),
+  never `console`. Code that logs a new contact
+  field under another key name must extend `CONTACT_KEY` in `log-redaction.ts`.
 
 ## Children
 

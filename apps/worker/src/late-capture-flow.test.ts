@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createBookingService, createPaymentSagaHandler } from "@ticketarena/booking";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
+import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db/seed";
 import {
   connectJetStreamMessageBus,
   createConsumerRunner,

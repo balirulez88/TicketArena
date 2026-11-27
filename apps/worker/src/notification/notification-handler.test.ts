@@ -6,7 +6,7 @@ import {
   type MessageBus,
 } from "@ticketarena/messaging";
 import { setupTestDatabase, setupTestNats } from "@ticketarena/test-infra";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createMockNotificationProvider, type MockNotificationProvider } from "./mock-provider.js";
 import { createNotificationHandler } from "./notification-handler.js";
 
@@ -620,6 +620,225 @@ describe("Notification handler", () => {
     expect(provider.deliveries()).toMatchObject([
       { idempotencyKey: rows[0]?.id, channel: "EMAIL", template: "refund-completed" },
     ]);
+  });
+
+  // Payment re-announces a refund under a new event id (the reconciler's re-emit, an operator
+  // retry, a repeated request), so Booking can recover a lost confirmation. The buyer must still
+  // hear about each refund step once per channel.
+  it.each([
+    ["payment.refund_requested", refundRequested, "refund-initiated"],
+    ["payment.refunded", refunded, "refund-completed"],
+  ])(
+    "sends a %s once per channel when the same refund arrives again under a new event id",
+    async (_type, build, template) => {
+      const first = build({ email: "buyer+again@example.com", phone: "+36301234567" });
+      const again = { ...first, id: randomUUID() };
+      const provider = createMockNotificationProvider();
+
+      await deliver(first, provider);
+      await deliver(again, provider);
+
+      expect(
+        provider.deliveries().map((delivery) => [delivery.channel, delivery.template]),
+      ).toEqual([
+        ["EMAIL", template],
+        ["SMS", template],
+      ]);
+      const rows = await prisma.notification.findMany({
+        where: { sourceEventId: { in: [first.id, again.id] } },
+      });
+      expect(rows.map((row) => `${row.sourceEventId} ${row.status}`)).toEqual([
+        `${first.id} SENT`,
+        `${first.id} SENT`,
+      ]);
+    },
+  );
+
+  it.each([
+    ["payment.refund_requested", refundRequested],
+    ["payment.refunded", refunded],
+  ])(
+    "sends a %s once per channel when two event ids of the same refund are delivered concurrently",
+    async (_type, build) => {
+      const first = build({ email: "buyer+race@example.com", phone: "+36301234567" });
+      const again = { ...first, id: randomUUID() };
+      const provider = createMockNotificationProvider();
+
+      await Promise.all([deliver(first, provider), deliver(again, provider)]);
+
+      expect(
+        provider
+          .deliveries()
+          .map((delivery) => delivery.channel)
+          .sort(),
+      ).toEqual(["EMAIL", "SMS"]);
+      const rows = await prisma.notification.findMany({
+        where: { sourceEventId: { in: [first.id, again.id] } },
+      });
+      expect(rows).toHaveLength(2);
+      expect(rows.every((row) => row.status === "SENT")).toBe(true);
+    },
+  );
+
+  it("tells the buyer once that the refund started and once that it completed, with every step re-announced concurrently", async () => {
+    const contact = { email: "buyer+both@example.com" };
+    const started = refundRequested(contact);
+    const startedAgain = { ...started, id: randomUUID() };
+    const base = refunded(contact);
+    const completed = {
+      ...base,
+      orderId: started.orderId,
+      payload: { ...base.payload, orderId: started.orderId, paymentId: started.payload.paymentId },
+    };
+    const completedAgain = { ...completed, id: randomUUID() };
+    const provider = createMockNotificationProvider();
+
+    await Promise.all([
+      deliver(started, provider),
+      deliver(startedAgain, provider),
+      deliver(completed, provider),
+      deliver(completedAgain, provider),
+    ]);
+
+    expect(
+      provider
+        .deliveries()
+        .map((delivery) => delivery.template)
+        .sort(),
+    ).toEqual(["refund-completed", "refund-initiated"]);
+  });
+
+  it("resumes a PENDING row an older worker wrote without a dedupe key, under its own key, instead of failing on a second row", async () => {
+    const envelope = refunded({ email: "buyer+cutover@example.com" });
+    const oldRowId = randomUUID();
+    await prisma.notification.create({
+      data: {
+        id: oldRowId,
+        sourceEventId: envelope.id,
+        channel: "EMAIL",
+        recipient: "buyer+cutover@example.com",
+        template: "refund-completed",
+        createdAt: NOW,
+      },
+    });
+
+    const provider = await deliver(envelope);
+
+    expect(provider.deliveries()).toMatchObject([{ idempotencyKey: oldRowId, channel: "EMAIL" }]);
+    const rows = await prisma.notification.findMany({ where: { sourceEventId: envelope.id } });
+    expect(rows.map((row) => [row.id, row.status])).toEqual([[oldRowId, "SENT"]]);
+  });
+
+  /** A PENDING refund-completed EMAIL row as a pre-migration worker left it: no dedupe key. */
+  async function legacyPendingRow(envelope: ReturnType<typeof refunded>, recipient: string) {
+    const id = randomUUID();
+    await prisma.notification.create({
+      data: {
+        id,
+        sourceEventId: envelope.id,
+        channel: "EMAIL",
+        recipient,
+        template: "refund-completed",
+        createdAt: NOW,
+      },
+    });
+    return id;
+  }
+
+  async function rowsTo(recipient: string) {
+    return prisma.notification.findMany({ where: { recipient } });
+  }
+
+  it("cutover: resuming an older worker's row gives it the refund key, so a later re-announcement under a new event id sends nothing new", async () => {
+    const recipient = "buyer+cutover-again@example.com";
+    const original = refunded({ email: recipient });
+    const reannounced = { ...original, id: randomUUID() };
+    const oldRowId = await legacyPendingRow(original, recipient);
+    const provider = createMockNotificationProvider();
+
+    await deliver(original, provider);
+    await deliver(reannounced, provider);
+
+    expect(provider.deliveries()).toEqual([
+      {
+        idempotencyKey: oldRowId,
+        channel: "EMAIL",
+        recipient,
+        template: "refund-completed",
+      },
+    ]);
+    expect((await rowsTo(recipient)).map((row) => [row.id, row.dedupeKey, row.status])).toEqual([
+      [oldRowId, `refund:${original.payload.paymentId}:refund-completed`, "SENT"],
+    ]);
+  });
+
+  it("cutover: a re-announcement arriving while the original is still sending reuses the promoted row and its original provider key", async () => {
+    const recipient = "buyer+cutover-race@example.com";
+    const original = refunded({ email: recipient });
+    const reannounced = { ...original, id: randomUUID() };
+    const oldRowId = await legacyPendingRow(original, recipient);
+    const recorded = createMockNotificationProvider();
+    let firstSendStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      firstSendStarted = resolve;
+    });
+    let releaseFirstSend: () => void = () => undefined;
+    const released = new Promise<void>((resolve) => {
+      releaseFirstSend = resolve;
+    });
+    let sends = 0;
+    const provider: MockNotificationProvider = {
+      deliveries: () => recorded.deliveries(),
+      async send(message) {
+        sends += 1;
+        if (sends === 1) {
+          firstSendStarted();
+          await released;
+        }
+        await recorded.send(message);
+      },
+    };
+
+    const originalDelivery = deliver(original, provider);
+    await started;
+    const reannouncedDelivery = deliver(reannounced, provider);
+    await vi.waitFor(() => expect(sends).toBe(2), { timeout: 15_000 });
+    releaseFirstSend();
+    await Promise.all([originalDelivery, reannouncedDelivery]);
+
+    expect(provider.deliveries().map((delivery) => delivery.idempotencyKey)).toEqual([oldRowId]);
+    expect((await rowsTo(recipient)).map((row) => [row.id, row.status])).toEqual([
+      [oldRowId, "SENT"],
+    ]);
+  });
+
+  it("cutover: when another delivery already holds the refund key, the original event uses that winner and sends nothing under the old row", async () => {
+    const recipient = "buyer+cutover-winner@example.com";
+    const original = refunded({ email: recipient });
+    const reannounced = { ...original, id: randomUUID() };
+    const oldRowId = await legacyPendingRow(original, recipient);
+    const provider = createMockNotificationProvider();
+
+    await deliver(reannounced, provider);
+    await deliver(original, provider);
+
+    const rows = await rowsTo(recipient);
+    const winner = rows.find((row) => row.sourceEventId === reannounced.id);
+    expect(provider.deliveries().map((delivery) => delivery.idempotencyKey)).toEqual([winner?.id]);
+    // The old row lost the key: it was never handed to the provider here, so it stays unchecked.
+    expect(rows.find((row) => row.id === oldRowId)).toMatchObject({
+      dedupeKey: null,
+      status: "PENDING",
+    });
+  });
+
+  it("keeps order events keyed by their own event id: two confirmations of different orders both send", async () => {
+    const provider = createMockNotificationProvider();
+
+    await deliver(orderConfirmed({ email: "buyer+one@example.com" }), provider);
+    await deliver(orderConfirmed({ email: "buyer+two@example.com" }), provider);
+
+    expect(provider.deliveries()).toHaveLength(2);
   });
 
   it.each([

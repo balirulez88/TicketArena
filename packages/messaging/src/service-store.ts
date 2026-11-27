@@ -28,6 +28,8 @@ export interface ServiceStore {
   markPublished(tx: TransactionClient, id: string): Promise<void>;
   recordPublishFailure(tx: TransactionClient, id: string, error: string): Promise<void>;
   insertProcessed(tx: TransactionClient, row: ProcessedMessageInput): Promise<void>;
+  /** `createdAt` of the oldest PENDING outbox row, or null when none is PENDING. */
+  oldestPendingCreatedAt(db: TransactionClient): Promise<Date | null>;
 }
 
 const bookingStore: ServiceStore = {
@@ -49,6 +51,14 @@ const bookingStore: ServiceStore = {
   },
   async insertProcessed(tx, data) {
     await tx.processedMessage.create({ data });
+  },
+  async oldestPendingCreatedAt(db) {
+    const oldest = await db.outboxEvent.findFirst({
+      where: { status: "PENDING" },
+      orderBy: { createdAt: "asc" },
+      select: { createdAt: true },
+    });
+    return oldest?.createdAt ?? null;
   },
 };
 
@@ -72,6 +82,14 @@ const paymentStore: ServiceStore = {
   async insertProcessed(tx, data) {
     await tx.paymentProcessedMessage.create({ data });
   },
+  async oldestPendingCreatedAt(db) {
+    const oldest = await db.paymentOutboxEvent.findFirst({
+      where: { status: "PENDING" },
+      orderBy: { createdAt: "asc" },
+      select: { createdAt: true },
+    });
+    return oldest?.createdAt ?? null;
+  },
 };
 
 const notificationStore: ServiceStore = {
@@ -93,6 +111,14 @@ const notificationStore: ServiceStore = {
   },
   async insertProcessed(tx, data) {
     await tx.notificationProcessedMessage.create({ data });
+  },
+  async oldestPendingCreatedAt(db) {
+    const oldest = await db.notificationOutboxEvent.findFirst({
+      where: { status: "PENDING" },
+      orderBy: { createdAt: "asc" },
+      select: { createdAt: true },
+    });
+    return oldest?.createdAt ?? null;
   },
 };
 

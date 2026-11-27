@@ -24,6 +24,26 @@ describe("logging docs", () => {
       expect(doc).toContain(term);
     }
   });
+
+  it("docs/architecture states the log redaction policy: what is redacted, where and why (TD-048)", () => {
+    const doc = readFileSync(join(docsDir, "architecture", "index.md"), "utf8");
+    const section = doc.slice(doc.indexOf("## Logging and ids"), doc.indexOf("## Children"));
+    for (const term of [
+      "**Redaction:**",
+      "redactLogLine",
+      "streamWrite",
+      "email",
+      "phone",
+      "serialized error",
+      "[Redacted]",
+      "onProcedureError",
+      "buyerContactSchema",
+      "dots",
+      "IPv4",
+    ]) {
+      expect(section).toContain(term);
+    }
+  });
 });
 
 describe("provider latency docs", () => {
@@ -33,5 +53,17 @@ describe("provider latency docs", () => {
     expect(doc).toContain("outside the transaction");
     expect(doc).toContain("before dedupe-and-capture");
     expect(doc).toContain("interactive-transaction timeout");
+  });
+});
+
+describe("delivery guarantee docs", () => {
+  it("docs/messaging states the delivery guarantee and its bounds: 7-day max_age, single-node disk loss, a full stream", () => {
+    const doc = readFileSync(join(docsDir, "messaging", "index.md"), "utf8");
+    expect(doc).toContain("## Delivery guarantee and its bounds");
+    expect(doc).toContain("at-least-once");
+    expect(doc).toContain("7-day `max_age`");
+    expect(doc).toContain("Single-node disk loss");
+    expect(doc).toContain("`discard: new`");
+    expect(doc).toContain("Outbox lag");
   });
 });

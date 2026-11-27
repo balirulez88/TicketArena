@@ -34,6 +34,25 @@ describe("notification schema", () => {
     expect(unique.some((row) => /\("sourceEventId", channel\)/.test(row.indexdef))).toBe(true);
   });
 
+  it("makes (dedupeKey, channel) unique, and still accepts an older worker's insert without a key", async () => {
+    const rows = await client().$queryRaw<{ indexdef: string }[]>`
+      SELECT indexdef FROM pg_indexes
+      WHERE schemaname = 'notification' AND tablename = 'notifications'`;
+    expect(
+      rows.some(
+        (row) => /UNIQUE/i.test(row.indexdef) && /\("dedupeKey", channel\)/.test(row.indexdef),
+      ),
+    ).toBe(true);
+
+    // The pre-migration worker's insert, column for column: no dedupeKey.
+    const insertWithoutKey = (sourceEventId: string) => client().$executeRaw`
+      INSERT INTO "notification"."notifications"
+        ("id", "sourceEventId", "channel", "recipient", "template", "createdAt")
+      VALUES (gen_random_uuid(), ${sourceEventId}, 'EMAIL', 'buyer@example.com', 'refund-completed', now())`;
+    await insertWithoutKey(`old-worker-${Date.now()}-a`);
+    await insertWithoutKey(`old-worker-${Date.now()}-b`);
+  });
+
   it("stores channel, recipient, template and a PENDING | SENT status", async () => {
     const rows = await client().$queryRaw<{ column_name: string }[]>`
       SELECT column_name FROM information_schema.columns

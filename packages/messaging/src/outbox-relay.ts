@@ -1,6 +1,7 @@
 import { type Logger, logBindingsFor, silentLogger } from "@ticketarena/contracts";
 import type { PrismaClient, TransactionClient } from "@ticketarena/db";
 import { createBackgroundLoop, sleep } from "./background-loop.js";
+import { createFailureReporter } from "./failure-reporter.js";
 import type { MessageBus } from "./message-bus.js";
 import { type ServiceName, type ServiceStore, serviceStore } from "./service-store.js";
 
@@ -17,6 +18,8 @@ export interface OutboxRelayOptions {
   readonly logger?: Logger;
   readonly intervalMs?: number;
   readonly batchSize?: number;
+  /** Clock for rate-limiting the outage log; defaults to `Date.now`. */
+  readonly now?: () => number;
 }
 
 export interface OutboxRelay {
@@ -105,11 +108,21 @@ export function createOutboxRelay(options: OutboxRelayOptions): OutboxRelay {
     );
   }
 
+  const reporter = createFailureReporter({
+    logger,
+    now: options.now ?? Date.now,
+    failureMessage: "outbox relay tick failed",
+    recoveryMessage: "outbox relay recovered",
+  });
+
   const loop = createBackgroundLoop(async () => {
     try {
       await tick();
-    } catch {
-      // Database or broker outage: rows stay PENDING and the next tick retries.
+      reporter.succeeded();
+    } catch (error) {
+      // Claim, mark or commit failed (database down, broken query): the transaction rolled back,
+      // rows stay PENDING and the next tick retries.
+      reporter.failed(error);
     }
     await sleep(intervalMs);
   });

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { seedCatalog } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db/seed";
 import { beforeAll } from "vitest";
 import { type BookingServiceDeps, createBookingService } from "../booking-service";
 import { type TestClients, type TestDatabaseUrl, testClients, withClient } from "./clients";

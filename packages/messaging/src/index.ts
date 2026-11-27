@@ -23,6 +23,7 @@ export type {
   ReceivedMessage,
   StreamKind,
 } from "./message-bus.js";
+export { measureOutboxLag, type OutboxLagOptions } from "./outbox-lag.js";
 export {
   createOutboxRelay,
   DEFAULT_RELAY_BATCH_SIZE,

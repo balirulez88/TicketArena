@@ -25,3 +25,12 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [67: Típusos domain hibakódok](67-typed-domain-error-codes.md): `cause`-ból `data.domainCode` és `seatIds` az error formatterben, explicit lista, stack soha a `data`-ban, a UI nem parsol üzenetet
 - [68: Az oldalújratöltés visszaállítja az aktív holdot](68-reload-restores-the-active-hold.md): `activeHold` query, szerver dönti el a lejáratot, `sessionId` + `buyerKey`, egyszeri olvasás és cache törlés
 - [69: Korlátos reaping az aktív slotokon](69-bounded-reaping.md): kötegelt atomic Lua `reap` indexekből `LIMIT`-tel, `holders` hash, pass budget, AT-39 egy lépésben
+- [26: Stream backpressure és topology hardening](26-stream-backpressure-and-topology.md): `discard: new` backpressure, outbox `PENDING` marad, szűk catch az `ensureTopology()`-ban, outbox lag
+- [43: Konfiguráció injektálása és venue migráció](43-config-injection-and-venue-migration-hardening.md): seed parancs a worker appban `parseSeedEnv`-vel, `@ticketarena/db/seed` entry point, lusta `ctx.db()`, duplikált venue-k összevonása a unique index előtt
+- [45: Worker loop hibák naplózása](45-worker-loop-error-reporting.md): `FailureReporter`, ok szerinti rate limit (60 s), recovery sor, handler hiba `deliveryCount`-tal a `nak` előtt
+- [24: Késleltetett retry ütemezés](24-delayed-retry-schedule.md): `nak(delay)` 1 s / 5 s / 30 s / 2 m, `deliveryCount` az egyetlen számláló, nincs `BackOff`, `working()`
+- [46: Worker indítás és leállítás takarítása](46-worker-startup-cleanup.md): port kötése először, elindított ciklusok leállítása hibánál, fázisos hibatűrő `stopPhases`, injektált 25 s deadline, `exit` injektálva
+- [51: Log redaction policy](51-log-redaction-policy.md): `streamWrite` hook a serializált soron, kulcs és alak szerinti redaction, TD-048, tRPC hibák a loggeren át
+- [57: Produkciós booking metrikák](57-production-booking-metrics.md): `optionalMetrics` a context-ből, nem várt `HINCRBY` Upstashba, best-effort, `unknown` kulcs, fake Upstash a rendszerhatáron
+- [70: Tartós refund obligation ismeretlen orderhez](70-durable-orphan-refund-obligation.md): `orphan_refund_obligations`, `paymentId` PK mint dedupe, emit csak ha írt sort, `FOR UPDATE` + `decide()`, outbox retentiontől független, backfill migráció
+- [23: Refund reconciler és manual review](23-refund-reconciler.md): stale obligation re-emit outboxon át, `SKIP LOCKED`, 3 re-emit után `MANUAL_REVIEW`, `retryRefund`, AT-24

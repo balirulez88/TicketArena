@@ -1,6 +1,7 @@
 import {
   type Consumer,
   DiscardPolicy,
+  JetStreamApiError,
   type JetStreamClient,
   type JetStreamManager,
   type JsMsg,
@@ -26,6 +27,8 @@ const NANOS_PER_MS = 1_000_000;
 const DAY_MS = 86_400_000;
 const MIB = 1024 * 1024;
 const MSG_ID_HEADER = "Nats-Msg-Id";
+// JetStream API error code for "stream name already in use with a different configuration".
+const STREAM_NAME_EXISTS = 10058;
 
 export const DEFAULT_ACK_WAIT_MS = 30_000;
 
@@ -37,6 +40,11 @@ export interface JetStreamMessageBusOptions {
   readonly streamPrefix?: string;
   /** Root token prepended to every subject, for the same isolation. */
   readonly subjectPrefix?: string;
+  /**
+   * Overrides a stream's `max_bytes`; production keeps the ADR 0004 sizes. Lets a test fill a
+   * stream to exercise `discard: new` backpressure.
+   */
+  readonly streamMaxBytes?: Partial<Record<StreamKind, number>>;
 }
 
 interface StreamDefinition {
@@ -81,6 +89,7 @@ export async function connectJetStreamMessageBus(
       jetstream(connection),
       options.streamPrefix ?? "",
       options.subjectPrefix === undefined ? "" : `${options.subjectPrefix}.`,
+      options.streamMaxBytes ?? {},
     );
   } catch (error) {
     await connection.close();
@@ -95,6 +104,7 @@ class JetStreamMessageBus implements MessageBus {
     private readonly client: JetStreamClient,
     private readonly streamPrefix: string,
     private readonly subjectPrefix: string,
+    private readonly streamMaxBytes: Partial<Record<StreamKind, number>>,
   ) {}
 
   async ensureTopology(): Promise<void> {
@@ -107,14 +117,19 @@ class JetStreamMessageBus implements MessageBus {
         storage: StorageType.File,
         discard: DiscardPolicy.New,
         max_age: definition.maxAgeMs * NANOS_PER_MS,
-        max_bytes: definition.maxBytes,
+        max_bytes: this.streamMaxBytes[kind] ?? definition.maxBytes,
         duplicate_window: definition.duplicateWindowMs * NANOS_PER_MS,
       };
-      // `add` is idempotent for an identical config and fails on a differing one; `update`
-      // then converges a stream created by an older version of the topology.
+      // `add` is idempotent for an identical config and fails on a differing one; only then does
+      // `update` converge, in place, a stream created by an older version of the topology. Any
+      // other failure (invalid config, broker unreachable) is rethrown as is: an update would
+      // only fail again and replace the cause with its own error (TD-036).
       try {
         await this.manager.streams.add(config);
-      } catch {
+      } catch (error) {
+        if (!(error instanceof JetStreamApiError && error.code === STREAM_NAME_EXISTS)) {
+          throw error;
+        }
         await this.manager.streams.update(config.name, config);
       }
     }

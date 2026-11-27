@@ -4,53 +4,56 @@
 
 Use these terms exactly in code, tests, tickets and specs. Add a term when a slice introduces it.
 
-| Term                   | Meaning                                                                                                                    |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| **Event**              | A performance (concert, match) with a venue, date and seat inventory. Not a domain event.                                  |
-| **On-sale**            | The moment an Event's tickets become purchasable; the traffic spike begins.                                                |
-| **Waiting room**       | The queue buyers enter before an on-sale or under load, before they may reach checkout.                                    |
-| **Admission**          | Moving a buyer from the waiting room to checkout by granting a time-limited token.                                         |
-| **Admission token**    | Proof a buyer was admitted to one event; required only to hold seats; expires 30 min after admission.                      |
-| **Hold**               | A temporary, exclusive reservation of seat(s) for one buyer during checkout; expires.                                      |
-| **Booking**            | A confirmed purchase of held seats. The point at which a seat is sold.                                                     |
-| **Pre-queue**          | Buyers who joined before `onSaleAt`; they get random positions ahead of later joiners.                                     |
-| **Active shopper**     | An admitted session holding one of the event's `maxActive` slots.                                                          |
-| **Principal**          | Who is calling: a guest session now, a user later. Resolved by `IdentityService`.                                          |
-| **BuyerKey**           | a user's `userId`, else the guest `sessionId`; the key for ticket limits and ownership.                                    |
-| **Order**              | A checkout of one hold: `PENDING_PAYMENT` → `CONFIRMED`, `CANCELLED` or `EXPIRED`.                                         |
-| **Checkout attempt**   | One hold plus the contact submitted for it; owns one `idempotencyKey`, reused on retries.                                  |
-| **Lead driver**        | The opt-in execution driver (`RALPH_DRIVER=lead`): one Lead session per ticket; Ralph stays default.                       |
-| **Recovery hold**      | Harness, not a seat Hold: `refs/ralph/recovery/<slug>`; no Ralph run until a human releases it.                            |
-| **Payment deadline**   | Fixed `placeOrder` time + 5 min; a payment is on time iff `capturedAt` ≤ it.                                               |
-| **Settlement grace**   | 60s after the payment deadline before the sweeper expires an order. Best-effort.                                           |
-| **Payment attempt**    | One try to charge an order, owned by the payment service; may fail non-finally.                                            |
-| **Order payment**      | A captured payment in the booking ledger, with a disposition (`APPLIED`, `REFUND_REQUESTED`, ...).                         |
-| **Refund obligation**  | A `REFUND_REQUESTED` ledger row, retried by the reconciler; only its refund event if the order is gone                     |
-| **Sweeper**            | Worker job that expires holds and overdue orders and frees their seats.                                                    |
-| **Admission ticker**   | Worker job (1 s) admitting buyers from the queue head within `admitRate` and `maxActive`.                                  |
-| **Reaper**             | Worker job (15 s) freeing active slots idle over 90 s or with an expired admission, in bounded batches; revokes the `jti`. |
-| **Reconciler**         | Worker job that re-emits stale refund obligations and escalates them to manual review.                                     |
-| **Correlation id**     | Minted once at `holdSeats`; unchanged across hold, order, payment, refund, notification.                                   |
-| **Causation id**       | The `id` of the message being handled when the event was written; `null` for a chain's first event.                        |
-| **DLQ**                | Dead-letter stream `TICKETARENA_DLQ` for messages past their retry budget or poison.                                       |
-| **Ack floor**          | The stream sequence up to which a consumer has acked everything; the safe resume point.                                    |
-| **Buyer limit**        | At most 6 seats per BuyerKey and event, counting held (unexpired), in-checkout and sold seats.                             |
-| **Race lost**          | A hold refused because another buyer locked the seat first: a prevented double booking.                                    |
-| **Snapshot fast path** | Lock-free read in `holdSeats` that refuses visibly taken seats before any lock; advisory only.                             |
-| **Demo event**         | The one Event flagged `demo`; the only target of the admin race and reset.                                                 |
-| **Race (demo)**        | `admin.runRace`: 100 synthetic sessions hold one demo seat at once; exactly one may win.                                   |
-| **Demo reset**         | `admin.resetDemo`: frees the demo seats and deletes unordered holds; keeps orders and ledger rows.                         |
-| **Oversell**           | Selling the same seat twice. Must be impossible, not merely unlikely.                                                      |
-| **Integration event**  | A fact published to other services via the outbox (e.g. `order.confirmed`).                                                |
-| **Outbox**             | The `outbox_events` table; integration events committed atomically with business data.                                     |
-| **Relay**              | The process that publishes PENDING outbox rows to the broker.                                                              |
-| **Consumer runner**    | Worker component running a durable pull consumer; dedupes via `processed_messages` in the handler TX.                      |
-| **Admin cookie**       | `ta_admin`: proof an operator logged in with `ADMIN_PASSWORD`; signed, expires after 8 h.                                  |
-| **Admin snapshot**     | `admin.snapshot`: live seat, order, payment, queue and counter figures; `/admin` polls it each 1s.                         |
-| **Domain code**        | A booking refusal's code (e.g. `SEAT_UNAVAILABLE`) in a tRPC error's `data.domainCode`; UI reads it.                       |
-| **Seat map**           | The event page's grid of seat buttons by section; shows each seat's price and status.                                      |
-| **Seat selection**     | Up to 6 available seats a visitor picked on the seat map before a hold; client-only state.                                 |
-| **Queue room**         | The event page's view while queued: position and ETA, polling `queue.status` until admitted.                               |
-| **Slice**              | One tracer-bullet ticket: a thin, complete path through every layer, green on its own.                                     |
-| **Seam**               | A public interface where tests observe behaviour without reaching inside.                                                  |
-| **Debt gate**          | The host check that holds a ticket on unresolved or untriaged technical debt it relies on (ADR 0016).                      |
+| Term                         | Meaning                                                                                                                                                                                                |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Event**                    | A performance (concert, match) with a venue, date and seat inventory. Not a domain event.                                                                                                              |
+| **On-sale**                  | The moment an Event's tickets become purchasable; the traffic spike begins.                                                                                                                            |
+| **Waiting room**             | The queue buyers enter before an on-sale or under load, before they may reach checkout.                                                                                                                |
+| **Admission**                | Moving a buyer from the waiting room to checkout by granting a time-limited token.                                                                                                                     |
+| **Admission token**          | Proof a buyer was admitted to one event; required only to hold seats; expires 30 min after admission.                                                                                                  |
+| **Hold**                     | A temporary, exclusive reservation of seat(s) for one buyer during checkout; expires.                                                                                                                  |
+| **Booking**                  | A confirmed purchase of held seats. The point at which a seat is sold.                                                                                                                                 |
+| **Pre-queue**                | Buyers who joined before `onSaleAt`; they get random positions ahead of later joiners.                                                                                                                 |
+| **Active shopper**           | An admitted session holding one of the event's `maxActive` slots.                                                                                                                                      |
+| **Principal**                | Who is calling: a guest session now, a user later. Resolved by `IdentityService`.                                                                                                                      |
+| **BuyerKey**                 | a user's `userId`, else the guest `sessionId`; the key for ticket limits and ownership.                                                                                                                |
+| **Order**                    | A checkout of one hold: `PENDING_PAYMENT` → `CONFIRMED`, `CANCELLED` or `EXPIRED`.                                                                                                                     |
+| **Checkout attempt**         | One hold plus the contact submitted for it; owns one `idempotencyKey`, reused on retries.                                                                                                              |
+| **Lead driver**              | The opt-in execution driver (`RALPH_DRIVER=lead`): one Lead session per ticket; Ralph stays default.                                                                                                   |
+| **Recovery hold**            | Harness, not a seat Hold: `refs/ralph/recovery/<slug>`; no Ralph run until a human releases it.                                                                                                        |
+| **Payment deadline**         | Fixed `placeOrder` time + 5 min; a payment is on time iff `capturedAt` ≤ it.                                                                                                                           |
+| **Settlement grace**         | 60s after the payment deadline before the sweeper expires an order. Best-effort.                                                                                                                       |
+| **Payment attempt**          | One try to charge an order, owned by the payment service; may fail non-finally.                                                                                                                        |
+| **Order payment**            | A captured payment in the booking ledger, with a disposition (`APPLIED`, `REFUND_REQUESTED`, ...).                                                                                                     |
+| **Refund obligation**        | A `REFUND_REQUESTED` ledger row, retried by the reconciler; an orphan refund obligation if the order is gone                                                                                           |
+| **Orphan refund obligation** | Booking's refund obligation for a capture whose order it does not have (`unknown_order`): one `orphan_refund_obligations` row per `paymentId`, no order FK, closed to `REFUNDED` by `payment.refunded` |
+| **Sweeper**                  | Worker job that expires holds and overdue orders and frees their seats.                                                                                                                                |
+| **Admission ticker**         | Worker job (1 s) admitting buyers from the queue head within `admitRate` and `maxActive`.                                                                                                              |
+| **Reaper**                   | Worker job (15 s) freeing active slots idle over 90 s or with an expired admission, in bounded batches; revokes the `jti`.                                                                             |
+| **Reconciler**               | Worker job (5 min) that re-emits refund obligations whose last request is 10 min old and moves one to `MANUAL_REVIEW` after 3 unanswered re-emits.                                                     |
+| **Manual review**            | `MANUAL_REVIEW`: a refund obligation the reconciler gave up on; still owed, closed by `payment.refunded`, or retried by an operator (`retryRefund`).                                                   |
+| **Correlation id**           | Minted once at `holdSeats`; unchanged across hold, order, payment, refund, notification.                                                                                                               |
+| **Causation id**             | The `id` of the message being handled when the event was written; `null` for a chain's first event.                                                                                                    |
+| **DLQ**                      | Dead-letter stream `TICKETARENA_DLQ` for messages past their retry budget or poison.                                                                                                                   |
+| **Ack floor**                | The stream sequence up to which a consumer has acked everything; the safe resume point.                                                                                                                |
+| **Buyer limit**              | At most 6 seats per BuyerKey and event, counting held (unexpired), in-checkout and sold seats.                                                                                                         |
+| **Race lost**                | A hold refused because another buyer locked the seat first: a prevented double booking.                                                                                                                |
+| **Snapshot fast path**       | Lock-free read in `holdSeats` that refuses visibly taken seats before any lock; advisory only.                                                                                                         |
+| **Demo event**               | The one Event flagged `demo`; the only target of the admin race and reset.                                                                                                                             |
+| **Race (demo)**              | `admin.runRace`: 100 synthetic sessions hold one demo seat at once; exactly one may win.                                                                                                               |
+| **Demo reset**               | `admin.resetDemo`: frees the demo seats and deletes unordered holds; keeps orders and ledger rows.                                                                                                     |
+| **Oversell**                 | Selling the same seat twice. Must be impossible, not merely unlikely.                                                                                                                                  |
+| **Integration event**        | A fact published to other services via the outbox (e.g. `order.confirmed`).                                                                                                                            |
+| **Outbox**                   | The `outbox_events` table; integration events committed atomically with business data.                                                                                                                 |
+| **Outbox lag**               | Age of the oldest `PENDING` outbox row; grows while the relay cannot publish (broker down, stream full).                                                                                               |
+| **Relay**                    | The process that publishes PENDING outbox rows to the broker.                                                                                                                                          |
+| **Consumer runner**          | Worker component running a durable pull consumer; dedupes via `processed_messages` in the handler TX.                                                                                                  |
+| **Admin cookie**             | `ta_admin`: proof an operator logged in with `ADMIN_PASSWORD`; signed, expires after 8 h.                                                                                                              |
+| **Admin snapshot**           | `admin.snapshot`: live seat, order, payment, queue and counter figures; `/admin` polls it each 1s.                                                                                                     |
+| **Domain code**              | A booking refusal's code (e.g. `SEAT_UNAVAILABLE`) in a tRPC error's `data.domainCode`; UI reads it.                                                                                                   |
+| **Seat map**                 | The event page's grid of seat buttons by section; shows each seat's price and status.                                                                                                                  |
+| **Seat selection**           | Up to 6 available seats a visitor picked on the seat map before a hold; client-only state.                                                                                                             |
+| **Queue room**               | The event page's view while queued: position and ETA, polling `queue.status` until admitted.                                                                                                           |
+| **Slice**                    | One tracer-bullet ticket: a thin, complete path through every layer, green on its own.                                                                                                                 |
+| **Seam**                     | A public interface where tests observe behaviour without reaching inside.                                                                                                                              |
+| **Debt gate**                | The host check that holds a ticket on unresolved or untriaged technical debt it relies on (ADR 0016).                                                                                                  |

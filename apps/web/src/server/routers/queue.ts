@@ -80,7 +80,7 @@ export const queueRouter = createTRPCRouter({
     .input(queueInput)
     .output(joinOutput)
     .mutation(async ({ ctx, input }) => {
-      const event = await ctx.db.event.findUnique({
+      const event = await ctx.db().event.findUnique({
         where: { id: input.eventId },
         select: { id: true, onSaleAt: true, queueOpensAt: true, queueClosesAt: true },
       });

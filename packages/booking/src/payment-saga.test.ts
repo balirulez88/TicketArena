@@ -96,6 +96,10 @@ function refundRequestsFor(paymentId: string) {
   });
 }
 
+function orphanObligationOf(paymentId: string) {
+  return db().orphanRefundObligation.findUnique({ where: { paymentId } });
+}
+
 /** An order the sweeper expired at its deadline plus grace; its seat is free again. */
 async function expiredOrder(buyer: Buyer) {
   const pending = await pendingOrder(buyer);
@@ -214,7 +218,9 @@ describe("payment saga: payment.succeeded", () => {
         currency: order.currency,
         capturedAt: LATE,
         disposition: "REFUND_REQUESTED",
+        refundReason: "late_capture",
         refundRequestedAt: ON_TIME,
+        refundLastRequestedAt: ON_TIME,
       },
     ]);
     expect(emitted).toMatchObject([
@@ -307,6 +313,72 @@ describe("payment saga: payment.succeeded", () => {
     expect(paymentRefundRequestedPayloadSchema.parse(payload).contact).toBeUndefined();
   });
 
+  test("records an orphan refund obligation for a capture whose orderId no longer exists", async () => {
+    const order = { id: randomUUID(), totalMinor: 4_200, currency: "EUR" };
+    const { paymentId, message } = paymentSucceeded(order);
+
+    await db().$transaction((tx) => saga(tx, message, { emit: outboxEmit(tx) }));
+
+    expect(await orphanObligationOf(paymentId)).toEqual({
+      paymentId,
+      orderId: order.id,
+      amount: 4_200,
+      currency: "EUR",
+      capturedAt: ON_TIME,
+      status: "REFUND_REQUESTED",
+      refundRequestedAt: ON_TIME,
+      refundLastRequestedAt: ON_TIME,
+      refundAttempts: 0,
+      correlationId: JSON.parse(message.data).correlationId,
+    });
+  });
+
+  test("writes neither the orphan obligation nor its refund request when the outbox write fails", async () => {
+    const order = { id: randomUUID(), totalMinor: 4_200, currency: "EUR" };
+    const { paymentId, message } = paymentSucceeded(order);
+
+    await expect(
+      db().$transaction((tx) =>
+        saga(tx, message, {
+          emit: async () => {
+            throw new Error("outbox unavailable");
+          },
+        }),
+      ),
+    ).rejects.toThrow("outbox unavailable");
+
+    expect(await orphanObligationOf(paymentId)).toBeNull();
+    expect(await refundRequestsFor(paymentId)).toHaveLength(0);
+  });
+
+  test("keeps the open orphan obligation, with all its refund request needs, when its outbox row is deleted", async () => {
+    const order = { id: randomUUID(), totalMinor: 4_200, currency: "EUR" };
+    const { paymentId, message } = paymentSucceeded(order);
+    await db().$transaction((tx) => saga(tx, message, { emit: outboxEmit(tx) }));
+
+    await db().outboxEvent.deleteMany({ where: { aggregateId: paymentId } });
+
+    expect(await refundRequestsFor(paymentId)).toHaveLength(0);
+    const obligation = await orphanObligationOf(paymentId);
+    expect(obligation?.status).toBe("REFUND_REQUESTED");
+    // The request can be rebuilt from the row alone: every unknown_order request has this shape.
+    expect(
+      paymentRefundRequestedPayloadSchema.parse({
+        paymentId: obligation?.paymentId,
+        orderId: obligation?.orderId,
+        amount: obligation?.amount,
+        currency: obligation?.currency,
+        reason: "unknown_order",
+      }),
+    ).toEqual({
+      paymentId,
+      orderId: order.id,
+      amount: 4_200,
+      currency: "EUR",
+      reason: "unknown_order",
+    });
+  });
+
   test("requests one refund for an unknown order however often its payment is delivered", async () => {
     const order = { id: randomUUID(), totalMinor: 4_200, currency: "EUR" };
     const first = paymentSucceeded(order);
@@ -319,6 +391,9 @@ describe("payment saga: payment.succeeded", () => {
     }
 
     expect(await refundRequestsFor(first.paymentId)).toHaveLength(1);
+    expect(await db().orphanRefundObligation.count({ where: { paymentId: first.paymentId } })).toBe(
+      1,
+    );
   });
 
   test("requests one refund for an unknown order when two duplicates race", async () => {
@@ -366,6 +441,9 @@ describe("payment saga: payment.succeeded", () => {
     await Promise.all([winner, racer]);
 
     expect(await refundRequestsFor(first.paymentId)).toHaveLength(1);
+    expect(await db().orphanRefundObligation.count({ where: { paymentId: first.paymentId } })).toBe(
+      1,
+    );
   });
 
   test("requests a refund for a payment whose amount differs from the order total rather than confirming it", async () => {
@@ -641,7 +719,14 @@ describe("payment saga: payment.succeeded on a settled order", () => {
         holdId: null,
       });
       expect(await db().orderPayment.findMany({ where: { orderId: order.id } })).toMatchObject([
-        { paymentId, disposition: "REFUND_REQUESTED", refundRequestedAt: ON_TIME, capturedAt },
+        {
+          paymentId,
+          disposition: "REFUND_REQUESTED",
+          refundReason: reason,
+          refundRequestedAt: ON_TIME,
+          refundLastRequestedAt: ON_TIME,
+          capturedAt,
+        },
       ]);
       expect(emitted).toMatchObject([
         {
@@ -675,7 +760,12 @@ describe("payment saga: payment.succeeded on a settled order", () => {
     );
     expect((await db().seat.findUniqueOrThrow({ where: { id: seatId } })).status).toBe("AVAILABLE");
     expect(await db().orderPayment.findMany({ where: { orderId: order.id } })).toMatchObject([
-      { paymentId, disposition: "REFUND_REQUESTED", refundRequestedAt: ON_TIME },
+      {
+        paymentId,
+        disposition: "REFUND_REQUESTED",
+        refundReason: "order_cancelled",
+        refundRequestedAt: ON_TIME,
+      },
     ]);
     expect(emitted).toMatchObject([
       { type: "payment.refund_requested", payload: { paymentId, reason: "order_cancelled" } },
@@ -832,16 +922,63 @@ describe("payment saga: payment.refunded", () => {
     expect(outcome).toEqual({ outcome: "poison", reason: "unknown_order" });
   });
 
-  test("acks the payment.refunded of an unknown_order refund booking requested, as a noop", async () => {
+  test("closes the orphan obligation of an unknown_order refund as REFUNDED and emits nothing", async () => {
     const vanished = { id: randomUUID(), totalMinor: 4_200, currency: "EUR" };
     const capture = paymentSucceeded(vanished);
     await db().$transaction((tx) => saga(tx, capture.message, { emit: outboxEmit(tx) }));
+    const { emit, emitted } = recordingEmit();
+
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(vanished.id, capture.paymentId), { emit }),
+    );
+
+    expect(outcome).toBeUndefined();
+    expect((await orphanObligationOf(capture.paymentId))?.status).toBe("REFUNDED");
+    expect(await db().orderPayment.count({ where: { paymentId: capture.paymentId } })).toBe(0);
+    expect(emitted).toEqual([]);
+  });
+
+  test("closes the orphan obligation even after its outbox row is gone", async () => {
+    const vanished = { id: randomUUID(), totalMinor: 4_200, currency: "EUR" };
+    const capture = paymentSucceeded(vanished);
+    await db().$transaction((tx) => saga(tx, capture.message, { emit: outboxEmit(tx) }));
+    await db().outboxEvent.deleteMany({ where: { aggregateId: capture.paymentId } });
 
     const outcome = await db().$transaction((tx) =>
       saga(tx, paymentRefunded(vanished.id, capture.paymentId), recordingEmit()),
     );
 
     expect(outcome).toBeUndefined();
-    expect(await db().orderPayment.count({ where: { paymentId: capture.paymentId } })).toBe(0);
+    expect((await orphanObligationOf(capture.paymentId))?.status).toBe("REFUNDED");
+  });
+
+  test("acks a repeated payment.refunded of an unknown_order refund without changing the obligation", async () => {
+    const vanished = { id: randomUUID(), totalMinor: 4_200, currency: "EUR" };
+    const capture = paymentSucceeded(vanished);
+    await db().$transaction((tx) => saga(tx, capture.message, { emit: outboxEmit(tx) }));
+    await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(vanished.id, capture.paymentId), recordingEmit()),
+    );
+    const closed = await orphanObligationOf(capture.paymentId);
+
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(vanished.id, capture.paymentId), recordingEmit()),
+    );
+
+    expect(outcome).toBeUndefined();
+    expect(await orphanObligationOf(capture.paymentId)).toEqual(closed);
+  });
+
+  test("returns poison for a payment.refunded of an unknown order whose refund request exists only in the outbox", async () => {
+    const vanished = { id: randomUUID(), totalMinor: 4_200, currency: "EUR" };
+    const capture = paymentSucceeded(vanished);
+    await db().$transaction((tx) => saga(tx, capture.message, { emit: outboxEmit(tx) }));
+    await db().orphanRefundObligation.delete({ where: { paymentId: capture.paymentId } });
+
+    const outcome = await db().$transaction((tx) =>
+      saga(tx, paymentRefunded(vanished.id, capture.paymentId), recordingEmit()),
+    );
+
+    expect(outcome).toEqual({ outcome: "poison", reason: "unknown_order" });
   });
 });

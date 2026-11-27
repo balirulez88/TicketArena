@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/main.ts",
+    "db:seed": "tsx src/seed-main.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

@@ -8,7 +8,7 @@
 
 **Blocked by:** 45 (worker loop error reporting), 49 (Prisma schema drift)
 
-**Status:** deferred
+**Status:** ready-for-agent
 
 **Status reason:** hardening, after the MVP (scope cut 2026-11-18)
 

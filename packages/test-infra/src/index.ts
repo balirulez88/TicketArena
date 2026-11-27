@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, inject } from "vitest";
 import { loadTestEnv } from "./env";
 import { deleteStreams } from "./nats";
-import { createDatabaseFromTemplate, dropDatabase } from "./postgres";
+import { createDatabaseFromTemplate, createEmptyDatabase, dropDatabase } from "./postgres";
 import type {} from "./provided-context";
 import { deleteRedisKeys } from "./redis";
 import { type RedisStandIn, type RedisStandInMode, startRedisStandIn } from "./redis-stand-in";
@@ -34,6 +34,31 @@ export function setupTestDatabase(): TestDatabase {
     get url(): string {
       if (url === undefined) {
         throw new Error("setupTestDatabase: the URL is available only inside tests and hooks");
+      }
+      return url;
+    },
+  };
+}
+
+/**
+ * A fresh database with no migration applied, for tests that apply migrations themselves (for
+ * example to stop just before one and seed the data it must cope with); dropped after the file.
+ */
+export function setupEmptyTestDatabase(): TestDatabase {
+  const env = loadTestEnv();
+  let url: string | undefined;
+  beforeAll(async () => {
+    url = await createEmptyDatabase(env.databaseUrl);
+  });
+  afterAll(async () => {
+    if (url !== undefined) {
+      await dropDatabase(env.databaseUrl, url);
+    }
+  });
+  return {
+    get url(): string {
+      if (url === undefined) {
+        throw new Error("setupEmptyTestDatabase: the URL is available only inside tests and hooks");
       }
       return url;
     },

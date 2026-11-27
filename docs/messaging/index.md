@@ -30,8 +30,15 @@ publishing the same row twice in one pass.
 ## Worker, relay and consumer runner
 
 `apps/worker` is the long-running process ([ADR 0013](../adr/0013-deployment-topology.md)). On boot it calls
-`ensureTopology()` (idempotent; creates `TICKETARENA` and `TICKETARENA_DLQ` as in
-[ADR 0004](../adr/0004-nats-jetstream-message-bus.md)) and only then starts the relay. It never waits for Redis: the relay, the consumers and the sweeper
+`ensureTopology()` (creates `TICKETARENA` and `TICKETARENA_DLQ` as in
+[ADR 0004](../adr/0004-nats-jetstream-message-bus.md)), binds its health port, and only then starts the relay. A failed start
+leaves no relay or consumer runner running, and shutdown is bounded (see [Worker](../architecture/index.md#worker)). Re-applying the
+topology is safe at any time: an unchanged stream is left alone, and a stream declared by an older
+topology is updated in place, keeping its messages. Only the broker's "stream name already in use"
+answer to the `add` leads to that `update`; any other failure (invalid configuration such as a
+subject another stream owns, the broker unreachable) propagates with its original cause and no
+update is attempted (TD-036). The two streams' subjects are disjoint, so every message lands in
+exactly one of them. It never waits for Redis: the relay, the consumers and the sweeper
 run during a Redis outage (see [waiting room](../architecture/waiting-room.md#redis-outage)). It serves
 `GET /health`, which reports Redis separately (`"redis": "ok" | "unavailable"`).
 
@@ -41,6 +48,13 @@ run during a Redis outage (see [waiting room](../architecture/waiting-room.md#re
   `attempts`, stores `lastError` and leaves the row `PENDING`. Only the oldest `PENDING` row of an aggregate is
   claimable (`NOT EXISTS` an older `PENDING` row), so order per aggregate holds across concurrent relays: later
   rows wait for a failed or in-flight earlier one, at one row per aggregate per tick. Rows of a rolled-back transaction never exist for the relay.
+  A tick that fails outside a row's publish (claim query, mark or commit; e.g. the database is unreachable)
+  rolls back, leaves its rows `PENDING`, and the loop retries on the next tick. It is logged at `error` with the
+  cause (`outbox relay tick failed`), rate-limited by `failure-reporter.ts` per cause: the first failure of each
+  cause, and then at most one line per 60 s window (`FAILURE_LOG_WINDOW_MS`) per cause while it persists, even
+  when causes alternate, carrying `failures` and `suppressed` counts. At most 32 causes
+  (`MAX_TRACKED_FAILURE_CAUSES`) keep a window; past that the least recently logged one is forgotten. The first successful tick after them logs `outbox relay recovered`
+  at `info` with `failures` and `outageMs`. The relay takes an optional `now` clock for this.
 - **Consumer runner** (`consumer-runner.ts`): durable pull consumer per consumer name (`AckWait` 30 s,
   no `BackOff`, `MaxDeliver` -1). Each message runs in one transaction that first inserts
   `processed_messages(consumer, messageId, streamSeq)` and then calls the handler. A unique violation of
@@ -53,9 +67,42 @@ run during a Redis outage (see [waiting room](../architecture/waiting-room.md#re
   (`{ outcome: "retry" | "poison", reason }`): the transaction rolls back (no `processed_messages` row, no
   outbox writes) and the message is `nak`ed with the same delay; `poison` is logged as an error. Until the DLQ
   exists, poison is redelivered rather than `term`ed, because ADR 0011 forbids `term` without a DLQ copy.
-  The DLQ gate and recovery from ADR 0011 are not built yet.
+  A handler (or `beforeTransaction`) failure is logged at `error` with the error, `deliveryCount` and the chosen
+  `delayMs` before the `nak`.
+  **Retry schedule:** every failed delivery ends in a delayed `nak` (a bare `nak` would redeliver immediately), with the
+  delay picked by JetStream's `deliveryCount`, the only attempt counter (it also counts crashes and `AckWait`
+  expiries and survives restarts): 1 s, 5 s, 30 s, 2 min, and 2 min for every later delivery until the DLQ gate
+  ends retries. The policy lives in code, not in a consumer `BackOff`. A handler (or `beforeTransaction` step) that
+  can outlast `AckWait` calls `message.working()` to keep the delivery from expiring and being redelivered to
+  another worker. AT-27, `consumer-runner-retry.test.ts`. A failed poll (the broker is unreachable for `fetch`, or anything else escapes a batch) is logged at
+  `error` with the cause (`consumer poll failed`, same rate limit and `consumer poll recovered` line as the
+  relay) and the loop polls again after 1 s.
+  The DLQ gate (ticket 25), which would end the endless redelivery of a poison message, and recovery from ADR 0011 are not built yet.
 - **Port:** `MessageBus` hides the broker; `jetstream-message-bus.ts` is the only module importing
   `@nats-io/*` (a test enforces it). `message-bus.contract.ts` is the contract suite run against real NATS.
+
+## Delivery guarantee and its bounds
+
+Delivery is **at-least-once** end to end; Postgres is the source of truth and the outbox is the
+recovery source. The bounds:
+
+- **A full stream holds events back, never drops them.** Both streams use `discard: new` with a
+  sized `max_bytes`, so once a stream is full the broker rejects the publish (`maximum bytes
+  exceeded`) instead of discarding stored messages. The relay records the failure (`attempts`,
+  `lastError`) and the row stays `PENDING`; it is published on a later tick once space frees
+  (messages age out or are purged). AT-35, `stream-backpressure.test.ts`.
+- **7-day `max_age`.** A consumer more than 7 days behind loses the messages that aged out of
+  `TICKETARENA` (30 days for the DLQ). Outbox rows outlive it (no retention deletes them yet; the spec's
+  14 days is longer than `max_age`), so recovery can reach beyond the stream.
+- **Single-node disk loss.** JetStream runs on one node and one volume (`sync_interval: always`
+  protects against an OS crash, not against losing the disk). Losing the disk loses in-flight
+  messages; they are recovered from the outbox
+  ([ADR 0011](../adr/0011-delivery-retry-dlq-recovery.md)).
+
+**Outbox lag** is the age of the oldest `PENDING` row: `measureOutboxLag({ prisma, service, now })`
+(`outbox-lag.ts`) returns it in ms for one service's outbox, 0 when nothing is `PENDING`. It grows
+while the relay cannot publish (broker down, stream full), which makes it the dashboard's signal
+that events are waiting in the outbox. The admin dashboard does not show it yet.
 
 ## Event catalogue
 
@@ -74,7 +121,7 @@ optional `holdId`/`orderId`, `payload`); the full envelope is stored as the outb
 | `order.confirmed`          | booking saga handler (same TX)                                          | `notification`                                    | 1               |
 | `order.cancelled`          | booking saga handler (same TX)                                          | `notification-cancelled`                          | 1               |
 | `order.expired`            | `BookingService.sweepExpired`; booking saga on a late capture (same TX) | `notification-expired`                            | 1               |
-| `payment.refund_requested` | booking saga handler (same TX)                                          | `payment-refund`, `notification-refund-requested` | 1               |
+| `payment.refund_requested` | booking saga handler; reconciler re-emit and `retryRefund` (same TX)    | `payment-refund`, `notification-refund-requested` | 1               |
 | `payment.refunded`         | mock Payment refund handler (same TX, `payment` outbox)                 | `booking-saga-refunded`, `notification-refunded`  | 1               |
 
 `seat.held` payload: `holdId`, `eventId`, `seatIds`, `holdExpiresAt`. Its `correlationId` is
@@ -99,7 +146,10 @@ expires the order (caused by the `payment.succeeded`).
 `amount_mismatch`, `unknown_order`) and `contact`, which is absent only for `unknown_order`. Its
 aggregate is `order_payment` / `paymentId`; it carries the order's `holdId` when the order exists.
 The mock Payment service executes it (`payment-refund`, see Payment saga) and Notification tells the
-buyer the refund was initiated (`notification-refund-requested`). The reconciler is a later ticket.
+buyer the refund was initiated (`notification-refund-requested`). The reconciler re-emits a stale
+request, and `retryRefund` one in `MANUAL_REVIEW`, under a new event id with the original payload,
+the payment's correlation id and `causationId: null`
+([database](../database/index.md#refund-reconciler)).
 
 `payment.refunded` payload: `paymentId`, `orderId`, `amount`, `currency`, `refundedAt` (provider
 time) and the request's `contact`, absent only when the request had none (`unknown_order`). Its
@@ -141,8 +191,24 @@ redelivers the message; the redelivery resends every `PENDING` channel under the
 provider's dedupe keeps it to one delivery each) and then records them `SENT`. So when the SMS send
 fails after the EMAIL was sent, both stay `PENDING` and the redelivery offers the EMAIL again.
 Unique `(sourceEventId, channel)` plus the consumer's `processed_messages` keep a redelivered or `+dup@` event at one record per
-channel (AT-43, for all five kinds). Dedupe is by event id: a refund request re-emitted under a new
-event id (the planned reconciler) would be a new source event and send a second `refund-initiated`.
+channel (AT-43, for all five kinds). A record is unique on `(dedupeKey, channel)`: an order event
+is keyed by its event id, a refund step by `paymentId` and template (`refund:<paymentId>:refund-initiated`
+or `:refund-completed`). The reconciler's re-emits, operator retries and Payment's re-announcement
+of an executed refund all carry new event ids, which Booking needs to recover a lost confirmation,
+yet the buyer hears about each refund step once per channel. Two such events delivered at once
+upsert the same row; whichever finishes first records it `SENT`, and a send that overlaps reuses
+the row's id, so the provider's key dedupe absorbs it (`notification-handler.test.ts`, the
+"concurrently" cases). A row this event got before the key existed (no key, written by a
+pre-migration worker, or `event:<sourceEventId>` from the migration's backfill) is found by
+`(sourceEventId, channel)` when its own event is redelivered, and promoted to the refund key in one
+`UPDATE` conditional on the key it was read with, keeping its id as the provider key. A promoted
+`PENDING` row is sent once under that id, a promoted `SENT` row is not sent again, and a later
+re-announcement finds it by key and sends nothing new (`notification-dedupe-migration.test.ts`
+runs this across the real migration). If another delivery already holds the key, the unique index refuses the
+promotion and that winner's row is used, so nothing is sent under the old id; the old row keeps no
+key and stays `PENDING` (only rows under the key are checkpointed `SENT`). Refund rows written
+before migration `20261129000000_notification_dedupe_key` and never redelivered stay keyed by
+their event, so a later re-announcement of such a refund can message the buyer once more.
 The mock provider records deliveries and dedupes by key.
 **External delivery is at-least-once**: a crash between the call and the `SENT` commit repeats it on redelivery, and only
 the provider's key dedupe absorbs that.
@@ -190,16 +256,17 @@ zero-row update throws, never counts as success); `transition` `final_failure` (
 `IN_CHECKOUT` seats `AVAILABLE` with `holdId`/`claimBuyerKey` cleared, `order.cancelled`, no ledger
 row); `transition` `late_capture` (a capture after `paymentDeadline` on a `PENDING_PAYMENT` order: order
 `EXPIRED` by a conditional update, its `IN_CHECKOUT` seats `AVAILABLE`, a `REFUND_REQUESTED` ledger
-row with `refundRequestedAt = T`, `order.expired` and `payment.refund_requested` with reason
+row with `refundRequestedAt = refundLastRequestedAt = T`, `order.expired` and `payment.refund_requested` with reason
 `late_capture`; the seats are never reclaimed for that payment, even while still free, AT-20);
 `refund` (a capture the order cannot keep: on an `EXPIRED`, `CANCELLED` or `CONFIRMED` order, or
-with a mismatched amount: order unchanged, `REFUND_REQUESTED` ledger row, `payment.refund_requested`
+with a mismatched amount: order unchanged, `REFUND_REQUESTED` ledger row (its `refundReason` kept for the reconciler), `payment.refund_requested`
 with the contact; an on-time capture on an `EXPIRED` order, reason `late_delivery`, is also counted
 as `late_delivery_refund`, best-effort); `refund` `unknown_order` (a capture whose order no longer
-exists; a demo reset keeps orders, so it is not a cause: no ledger row is possible, so the `payment.refund_requested`
-outbox row, without contact, is the obligation; without an order row to lock, the handler takes an
-advisory lock on `refund:<paymentId>` and writes the request only if none exists for that payment,
-so a redelivery or a duplicate under a new event id refunds it once); `noop` (ack; a non-final
+exists; a demo reset keeps orders, so it is not a cause: no ledger row is possible, so the handler
+inserts an orphan refund obligation (`orphan_refund_obligations`, primary key `paymentId`,
+`INSERT … ON CONFLICT DO NOTHING`, keeping the capture's correlation id) and emits `payment.refund_requested` without contact only if
+that insert wrote the row; a concurrent duplicate's insert waits on the uncommitted row and skips
+it, so a redelivery or a duplicate under a new event id refunds it once); `noop` (ack; a non-final
 failure, reason `attempt_failed`, is also counted as `payment_attempt_failed` in the event's Redis
 counter hash, best-effort, and leaves the order open until its deadline); `retry` and `poison`
 (unknown `orderId` on a failure) are returned to the runner as a `HandlerOutcome`. Any decision
@@ -208,21 +275,24 @@ is never dropped silently.
 
 **Refund execution.** `payment-refund` (`service: "payment"`, `apps/worker/src/payment/refund-handler.ts`)
 consumes `payment.refund_requested`: in the runner's transaction it inserts one `payment.refunds`
-row (primary key `paymentId`, `INSERT … ON CONFLICT DO NOTHING`) and, only if that insert wrote the
-row, emits `payment.refunded` through the payment outbox. `processed_messages` absorbs a
+row (primary key `paymentId`, `INSERT … ON CONFLICT DO NOTHING`), reads the row back and emits
+`payment.refunded` from it through the payment outbox. `processed_messages` absorbs a
 redelivery; the primary key absorbs a duplicate request under a new event id, including a
 concurrent one, whose insert waits on the uncommitted row and then skips it. So a payment is
-refunded once and `payment.refunded` is emitted once (AT-23); a skipped duplicate is logged and
-acked. Every request is executed, with or without a contact. `booking-saga-refunded` runs
+refunded once (AT-23); a duplicate request re-announces that refund (`payment.refunded` with the
+executed refund's `refundedAt`, amount and currency, a new event id), so booking recovers a lost
+confirmation from the reconciler's re-emit and applies a repeat as `noop` `already_refunded`. Every request is executed, with or without a contact. `booking-saga-refunded` runs
 `createPaymentSagaHandler` on `payment.refunded`: `transition` `refund_completed` moves the
 payment's ledger row from `REFUND_REQUESTED` or `MANUAL_REVIEW` to `REFUNDED` by a conditional
 update (zero rows throws), whatever the order's status (an `amount_mismatch` refund leaves the
 order `PENDING_PAYMENT`); the order is unchanged and nothing is emitted. A repeat is `noop`
 `already_refunded`. A `paymentId` missing from a known order's ledger is `poison`
 (`unknown_payment`, or `refund_for_pending_order` on a `PENDING_PAYMENT` order). For an unknown
-`orderId` the handler asks booking's outbox whether it requested a refund of that payment (an
-`unknown_order` refund has no ledger row): if so the event is `noop` `unknown_order_refunded`,
-else `poison` (`unknown_order`).
+`orderId` the handler locks the payment's orphan refund obligation (an `unknown_order` refund has
+no ledger row): `transition` `orphan_refund_completed` moves it from `REFUND_REQUESTED` or
+`MANUAL_REVIEW` to `REFUNDED` by a conditional update (zero rows throws), emitting nothing; a repeat is `noop`
+`already_refunded`; a payment with no orphan obligation is `poison` (`unknown_order`). The outbox
+is never consulted, so the outcome does not depend on the request's outbox row still existing.
 
 Relay and runner take a `service` (`booking` default, `payment` or `notification`) that selects the outbox and
 `processed_messages` of that schema (ADR 0009); the worker runs one relay per outbox.

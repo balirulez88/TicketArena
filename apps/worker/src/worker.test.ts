@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { createBookingService, type SweepResult } from "@ticketarena/booking";
-import { createPrismaClient, type PrismaClient, seedCatalog } from "@ticketarena/db";
+import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db/seed";
 import { connectJetStreamMessageBus, type MessageBus } from "@ticketarena/messaging";
 import { setupTestDatabase, setupTestNats } from "@ticketarena/test-infra";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parseWorkerEnv } from "./env.js";
-import { SWEEP_INTERVAL_MS, startWorker } from "./worker.js";
+import { RECONCILE_INTERVAL_MS, SWEEP_INTERVAL_MS, startWorker } from "./worker.js";
 
 const database = setupTestDatabase();
 const nats = setupTestNats();
@@ -226,5 +227,115 @@ describe("parseWorkerEnv", () => {
         REDIS_URL: "redis://h:6379",
       }).PORT,
     ).toBe(8080);
+  });
+});
+
+describe("worker refund reconciler", () => {
+  const REQUESTED_AT = new Date("2027-03-01T12:10:00.000Z");
+
+  function recordingReconciler() {
+    let calls = 0;
+    return {
+      calls: () => calls,
+      booking: {
+        reconcileRefunds: async () => {
+          calls += 1;
+          return { reEmitted: [], escalated: [] };
+        },
+      },
+    };
+  }
+
+  it("re-emits a stale orphan refund obligation through the booking service", async () => {
+    const paymentId = randomUUID();
+    await prisma.orphanRefundObligation.create({
+      data: {
+        paymentId,
+        orderId: randomUUID(),
+        amount: 1000,
+        currency: "EUR",
+        capturedAt: REQUESTED_AT,
+        status: "REFUND_REQUESTED",
+        refundRequestedAt: REQUESTED_AT,
+        refundLastRequestedAt: REQUESTED_AT,
+        correlationId: randomUUID(),
+      },
+    });
+    const booking = createBookingService({
+      db: prisma,
+      clock: { now: () => new Date(REQUESTED_AT.getTime() + 10 * 60_000) },
+      newId: randomUUID,
+    });
+
+    const worker = await startWorker({
+      bus,
+      prisma,
+      port: 0,
+      reconciler: { booking, intervalMs: 20 },
+    });
+    try {
+      await expect
+        .poll(
+          async () =>
+            (await prisma.orphanRefundObligation.findUniqueOrThrow({ where: { paymentId } }))
+              .refundAttempts,
+          { timeout: 10_000 },
+        )
+        .toBe(1);
+      expect(
+        await prisma.outboxEvent.count({
+          where: { eventType: "payment.refund_requested", aggregateId: paymentId },
+        }),
+      ).toBe(1);
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it("reconciles at start, then every 5 minutes by default, and stops without waiting out the interval", async () => {
+    expect(RECONCILE_INTERVAL_MS).toBe(5 * 60_000);
+    const reconciler = recordingReconciler();
+    const worker = await startWorker({
+      bus,
+      prisma,
+      port: 0,
+      reconciler: { booking: reconciler.booking },
+    });
+    await expect.poll(() => reconciler.calls(), { timeout: 10_000 }).toBe(1);
+    expect(worker.components.flat().map((component) => component.name)).toContain(
+      "refund reconciler",
+    );
+
+    const stopping = Date.now();
+    await worker.stop();
+    expect(Date.now() - stopping).toBeLessThan(5_000);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(reconciler.calls()).toBe(1);
+  });
+
+  it("keeps reconciling after a failed pass", async () => {
+    let calls = 0;
+    const worker = await startWorker({
+      bus,
+      prisma,
+      port: 0,
+      reconciler: {
+        booking: {
+          reconcileRefunds: async () => {
+            calls += 1;
+            if (calls === 1) {
+              throw new Error("database unavailable");
+            }
+            return { reEmitted: [], escalated: [] };
+          },
+        },
+        intervalMs: 20,
+      },
+    });
+    try {
+      await expect.poll(() => calls, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
+    } finally {
+      await worker.stop();
+    }
   });
 });

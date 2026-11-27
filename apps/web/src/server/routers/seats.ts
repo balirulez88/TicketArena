@@ -7,14 +7,14 @@ export const seatsRouter = createTRPCRouter({
     .input(seatMapInput)
     .output(seatMapOutput)
     .query(async ({ ctx, input }) => {
-      const event = await ctx.db.event.findUnique({
+      const event = await ctx.db().event.findUnique({
         where: { id: input.eventId },
         select: { id: true },
       });
       if (event === null) {
         throw eventNotFound(input.eventId);
       }
-      const seats = await ctx.db.seat.findMany({
+      const seats = await ctx.db().seat.findMany({
         where: { eventId: event.id },
         include: { row: { include: { section: true } } },
         orderBy: [

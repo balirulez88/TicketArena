@@ -10,7 +10,7 @@ import {
   withClient,
 } from "@ticketarena/booking/testing";
 import { silentLogger } from "@ticketarena/contracts";
-import { seedCatalog } from "@ticketarena/db";
+import { seedCatalog } from "@ticketarena/db/seed";
 import { setupTestDatabase, setupTestRedis } from "@ticketarena/test-infra";
 import { createRedisQueueStore } from "@ticketarena/waiting-room";
 import { createTRPCClient, httpLink } from "@trpc/client";
@@ -48,7 +48,7 @@ function contextFor(principal: Principal, now: Date = NOW): TRPCContext {
     principal,
     isAdmin: false,
     bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
-    db: db(),
+    db,
     logger: silentLogger,
     metrics: () => ({ increment: async () => undefined }),
     metricsReader: () => {
@@ -572,7 +572,7 @@ describe("booking.holdSeats saturation", () => {
           principal: alice,
           isAdmin: false,
           bookingTimeouts: DEFAULT_BOOKING_TIMEOUTS,
-          db: tight,
+          db: () => tight,
           logger: silentLogger,
           metrics: () => ({ increment: async () => undefined }),
           metricsReader: () => {

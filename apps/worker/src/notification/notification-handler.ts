@@ -53,6 +53,28 @@ function deliveryTargets(contact: {
   ];
 }
 
+type NotifiedEnvelope = z.infer<typeof notifiedEnvelope>;
+
+/**
+ * What makes two events the same message to the buyer. A refund step is one message per payment:
+ * Payment re-announces `payment.refund_requested` and `payment.refunded` under new event ids
+ * (reconciler re-emits, operator retries, repeated requests) so Booking can recover a lost
+ * confirmation, and the buyer must hear about each step once. Every other event is its own message.
+ */
+function dedupeKey(notified: NotifiedEnvelope): string {
+  switch (notified.type) {
+    case "payment.refund_requested":
+    case "payment.refunded":
+      return `refund:${notified.payload.paymentId}:${TEMPLATES[notified.type]}`;
+    default:
+      return `event:${notified.id}`;
+  }
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "P2002";
+}
+
 export type NotificationConsumerSteps = Required<
   Pick<ConsumerRunnerOptions, "beforeTransaction" | "handler">
 >;
@@ -79,18 +101,21 @@ export function createNotificationHandler(
   const logger = deps.logger ?? silentLogger;
 
   // Own transaction, not the runner's: the redelivery after a failed send must find PENDING and
-  // resume it. The upsert also reads the winner's row if a concurrent delivery created it first.
+  // resume it. The upsert also reads the winner's row if a concurrent delivery created it first,
+  // whether that was a copy of this event or another event with the same dedupe key.
   function recordPending(
+    dedupeKey: string,
     sourceEventId: string,
     channel: NotificationChannel,
     recipient: string,
     template: string,
   ) {
     return deps.prisma.notification.upsert({
-      where: { sourceEventId_channel: { sourceEventId, channel } },
+      where: { dedupeKey_channel: { dedupeKey, channel } },
       create: {
         id: deps.newId(),
         sourceEventId,
+        dedupeKey,
         channel,
         recipient,
         template,
@@ -100,9 +125,79 @@ export function createNotificationHandler(
     });
   }
 
+  function findByKey(dedupeKey: string, channel: NotificationChannel) {
+    return deps.prisma.notification.findUnique({
+      where: { dedupeKey_channel: { dedupeKey, channel } },
+    });
+  }
+
+  /**
+   * The one row this channel's message is sent under. A row already holding the key wins. Else a
+   * row this same event got before the key existed (no key, or the migration backfill's
+   * `event:<sourceEventId>`) is promoted to the key, keeping its id, because that id may already
+   * have reached the provider; without the key a later re-announcement of the refund would miss it
+   * and send again under a new id. A promoted row that is already SENT is not sent again. The
+   * promotion is one conditional UPDATE, so of two racing deliveries only one moves the row; if
+   * another delivery claimed the key first, the unique index refuses the promotion and that
+   * winner's row is used instead. Otherwise a new row is created under the key.
+   */
+  async function rowFor(
+    key: string,
+    sourceEventId: string,
+    channel: NotificationChannel,
+    recipient: string,
+    template: string,
+  ) {
+    const keyed = await findByKey(key, channel);
+    if (keyed !== null) {
+      return keyed;
+    }
+    const legacy = await deps.prisma.notification.findUnique({
+      where: { sourceEventId_channel: { sourceEventId, channel } },
+    });
+    // Promotable: no key (written by a pre-migration worker after the backfill ran, or during a
+    // rollback), or exactly the backfill's own fallback for this event. Any other key belongs to
+    // something else and is left alone.
+    if (
+      legacy !== null &&
+      (legacy.dedupeKey === null || legacy.dedupeKey === `event:${sourceEventId}`)
+    ) {
+      if (await promote(legacy.id, legacy.dedupeKey, key)) {
+        return { ...legacy, dedupeKey: key };
+      }
+      // Either a concurrent copy of this event promoted the row, or another event took the key.
+      const winner = await findByKey(key, channel);
+      if (winner !== null) {
+        return winner;
+      }
+    }
+    return recordPending(key, sourceEventId, channel, recipient, template);
+  }
+
+  /**
+   * `true` when this call moved the row from the key it was observed with to `key`; `false` when
+   * another delivery changed it first or already holds `key`. Conditional on the observed value, so
+   * of two racing deliveries only one moves the row.
+   */
+  async function promote(id: string, observed: string | null, key: string): Promise<boolean> {
+    try {
+      const promoted = await deps.prisma.notification.updateMany({
+        where: { id, dedupeKey: observed },
+        data: { dedupeKey: key },
+      });
+      return promoted.count === 1;
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
   async function sendPending(message: ReceivedMessage): Promise<void> {
     const notified = notifiedEnvelope.parse(JSON.parse(message.data));
     const template = TEMPLATES[notified.type];
+    const key = dedupeKey(notified);
     const contact = notified.payload.contact;
     // Only an `unknown_order` refund has no contact: the order and its buyer are gone, so there is
     // no one to tell. Acked, not retried; no redelivery could ever supply a recipient.
@@ -114,14 +209,12 @@ export function createNotificationHandler(
       return;
     }
     for (const { channel, recipient } of deliveryTargets(contact)) {
-      const existing = await deps.prisma.notification.findUnique({
-        where: { sourceEventId_channel: { sourceEventId: notified.id, channel } },
-      });
-      if (existing?.status === "SENT") {
+      const notification = await rowFor(key, notified.id, channel, recipient, template);
+      if (notification.status === "SENT") {
         continue;
       }
-      const notification =
-        existing ?? (await recordPending(notified.id, channel, recipient, template));
+      // A PENDING row another event created (a concurrent re-announcement) is sent again under
+      // its own id, so the provider's key dedupe absorbs the overlap.
       await deps.provider.send({
         idempotencyKey: notification.id,
         channel,
@@ -135,8 +228,12 @@ export function createNotificationHandler(
   // event has been handed to the provider; committing SENT with the dedupe row checkpoints both.
   async function recordSent(tx: TransactionClient, message: ReceivedMessage): Promise<undefined> {
     const notified = notifiedEnvelope.parse(JSON.parse(message.data));
+    // By dedupe key, not event id: the rows under the key are exactly the ones this delivery
+    // handed to the provider (one per channel, a promoted legacy row included, or one a concurrent
+    // re-announcement created). A legacy row whose promotion lost to another delivery keeps no key
+    // and was not sent here, so it is not checkpointed.
     const sent = await tx.notification.updateMany({
-      where: { sourceEventId: notified.id, status: "PENDING" },
+      where: { status: "PENDING", dedupeKey: dedupeKey(notified) },
       data: { status: "SENT", sentAt: deps.clock.now() },
     });
     if (sent.count > 0) {

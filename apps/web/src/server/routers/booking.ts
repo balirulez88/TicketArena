@@ -13,6 +13,7 @@ import {
   NotOnSaleError,
   SeatUnavailableError,
 } from "@ticketarena/booking";
+import { buyerContactSchema } from "@ticketarena/contracts";
 import type { QueueService } from "@ticketarena/waiting-room";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
@@ -21,6 +22,7 @@ import {
   admittedProcedure,
   bookingServiceFor,
   createTRPCRouter,
+  optionalMetrics,
   publicProcedure,
   type TRPCContext,
 } from "../trpc";
@@ -41,7 +43,8 @@ const releaseHoldInput = z.object({ holdId: z.uuid() });
 
 const placeOrderInput = z.object({
   holdId: z.uuid(),
-  contact: z.object({ email: z.email(), phone: z.string().trim().min(1).max(32).optional() }),
+  // The shared contact rule: every phone and email it accepts is one the log redactor masks.
+  contact: buyerContactSchema,
   idempotencyKey: z.uuid(),
 });
 
@@ -112,7 +115,8 @@ export const bookingRouter = createTRPCRouter({
       await onSlot(ctx, "heartbeat", (queue) =>
         queue.heartbeat(input.eventId, ctx.principal.sessionId),
       );
-      const booking = bookingServiceFor(ctx);
+      // Only the procedures that book resolve the counters (ADR 0005 outcomes, TD-070).
+      const booking = bookingServiceFor(ctx, optionalMetrics(ctx));
       try {
         return await booking.holdSeats(toBuyer(ctx.principal), input.eventId, input.seatIds);
       } catch (error) {
@@ -185,7 +189,7 @@ export const bookingRouter = createTRPCRouter({
     .input(placeOrderInput)
     .output(orderOutput)
     .mutation(async ({ ctx, input }) => {
-      const booking = bookingServiceFor(ctx);
+      const booking = bookingServiceFor(ctx, optionalMetrics(ctx));
       const buyer = toBuyer(ctx.principal);
       try {
         const order = await booking.placeOrder(

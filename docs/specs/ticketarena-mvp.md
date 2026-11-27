@@ -279,14 +279,17 @@ is published, so a missing order never means a message arrived early. An unknown
 `succeeded` payment is a **refund** (reason `unknown_order`), not poison: the capture took real
 money and the order may never have existed in this database (a demo reset keeps every order, so it
 is not a cause). With no order to
-attach a ledger row to, the obligation is the `payment.refund_requested` outbox event alone (no
-contact), written in the same transaction as the consumer's dedupe record; duplicates of that
-payment serialize on an advisory lock keyed by `paymentId` and find the earlier request in the
-outbox, so a redelivered or duplicate message refunds that `paymentId` exactly once. An unknown
-`orderId` on a `failed` event, and an unknown `paymentId` on a `refunded` event, stay `poison`. A
-`refunded` event for an unknown `orderId` is a logged noop when booking's outbox holds a
-`payment.refund_requested` for that `paymentId` (the `unknown_order` refund it asked for, which has
-no ledger row), and `poison` otherwise. A `refunded` event moves the payment's ledger row from
+attach a ledger row to, the obligation is an **orphan refund obligation** (`orphan_refund_obligations`:
+`paymentId` primary key, `orderId` with no foreign key, amount, currency, `capturedAt`,
+`REFUND_REQUESTED`), written with its `payment.refund_requested` (no contact) in the same
+transaction as the consumer's dedupe record. Only the transaction whose insert wrote the
+obligation emits the request: a concurrent duplicate's insert waits on the uncommitted row and
+then skips it, and a later one finds the row, so a redelivered or duplicate message refunds that
+`paymentId` exactly once. The obligation outlives the outbox row (retention) and holds everything
+needed to re-emit the request. An unknown `orderId` on a `failed` event, and an unknown
+`paymentId` on a `refunded` event, stay `poison`. A `refunded` event for an unknown `orderId` moves
+that `paymentId`'s orphan obligation to `REFUNDED` (a repeat is a noop), and is `poison` when the
+payment has neither a ledger row nor an orphan obligation. A `refunded` event moves the payment's ledger row from
 `REFUND_REQUESTED` or `MANUAL_REVIEW` to `REFUNDED` whatever the order's status: an amount
 mismatch is refunded while the order stays `PENDING_PAYMENT`. Every `noop` is logged with a reason code. `retry` (state not yet reached) does not
 occur in today's flow but is supported.
@@ -304,7 +307,7 @@ A success whose amount or currency differs from the order total is always refund
 | CONFIRMED       | refund                                                         | refund                                         | noop (duplicate)           | noop                | noop                                                         | ledger → `REFUNDED` if it was `REFUND_REQUESTED`/`MANUAL_REVIEW` | noop                       |
 | CANCELLED       | refund                                                         | refund                                         | noop (duplicate)           | noop                | noop                                                         | ledger → `REFUNDED`                                              | noop                       |
 | EXPIRED         | refund                                                         | refund                                         | noop (duplicate)           | noop                | noop                                                         | ledger → `REFUNDED`                                              | noop                       |
-| unknown orderId | refund (`unknown_order`, outbox event only)                    | refund (`unknown_order`, outbox event only)    | noop (request exists)      | poison              | poison                                                       | noop if booking requested its refund, else poison                | n/a                        |
+| unknown orderId | refund (`unknown_order`, orphan obligation)                    | refund (`unknown_order`, orphan obligation)    | noop (obligation exists)   | poison              | poison                                                       | orphan obligation → `REFUNDED`, noop if already, else poison     | n/a                        |
 
 Every refund caused by an on-time payment delivered after expiry increments `late_delivery_refund`.
 
@@ -314,8 +317,9 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
   gets a durable refund obligation in the same transaction that decides it. The system retries it
   until it is `REFUNDED` or a human resolves `MANUAL_REVIEW`. Money is never kept silently; the
   refund can lag. A capture whose order no longer exists has no ledger row to hold the obligation:
-  its `payment.refund_requested` outbox event (reason `unknown_order`) is the obligation, and the
-  reconciler, which scans ledger rows, does not see it.
+  booking keeps an orphan refund obligation per `paymentId` instead (`REFUND_REQUESTED →
+  REFUNDED`), which does not depend on the outbox row surviving retention and which the
+  reconciler must cover alongside the ledger.
 - Ledger disposition transitions: `REFUND_REQUESTED → REFUNDED | MANUAL_REVIEW`;
   `MANUAL_REVIEW → REFUND_REQUESTED | REFUNDED`. `APPLIED` is terminal in the MVP.
 - Execution: the Payment consumer refunds idempotently (unique `paymentId` in `payment.refunds`)

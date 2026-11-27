@@ -257,6 +257,32 @@ model OrderPayment {
   @@schema("public")
 }
 
+enum OrphanRefundStatus {
+  REFUND_REQUESTED
+  REFUNDED
+
+  @@schema("public")
+}
+
+/// The refund obligation for a capture whose order booking does not have (reason `unknown_order`;
+/// ADR 0006). The ledger cannot hold it (`order_payments` needs an order), and the outbox row is
+/// deleted by retention while the refund may still be open, so this row is the durable record:
+/// one per `paymentId` (the primary key makes a duplicate or concurrent capture write nothing),
+/// no foreign key to `orders`, and enough to re-emit its `payment.refund_requested` (an
+/// `unknown_order` request has no contact). `payment.refunded` moves it to `REFUNDED`.
+model OrphanRefundObligation {
+  paymentId         String             @id @db.Uuid
+  orderId           String             @db.Uuid
+  amount            Int
+  currency          String
+  capturedAt        DateTime           @db.Timestamptz(3)
+  status            OrphanRefundStatus
+  refundRequestedAt DateTime           @db.Timestamptz(3)
+
+  @@map("orphan_refund_obligations")
+  @@schema("public")
+}
+
 enum PaymentOutboxStatus {
   PENDING
   PUBLISHED

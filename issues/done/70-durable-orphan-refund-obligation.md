@@ -4,11 +4,13 @@
 
 **Blocked by:** 20 (refund execution)
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-27 on devflow/run-202611261713 (run 202611261713)
 
 **Status reason:** after the MVP, but it must land before outbox retention (ticket 27) and the refund reconciler (ticket 23), which both depend on it
 
-- [ ] A capture for an unknown `orderId` writes one booking-owned orphan obligation per `paymentId` (amount, currency, `capturedAt`, `REFUND_REQUESTED`) in the same transaction as its `payment.refund_requested` outbox row; a duplicate or concurrent capture event leaves exactly one obligation and one outbox row.
-- [ ] `payment.refunded` for that `paymentId` moves the orphan obligation to `REFUNDED`; a repeated `payment.refunded` changes nothing; a `payment.refunded` with neither a ledger row nor an orphan obligation is poison.
-- [ ] Deleting the obligation's `outbox_events` row leaves the open obligation readable with everything needed to re-emit its refund request.
-- [ ] The `decide()` matrix and the spec's unknown-order cells name the orphan obligation instead of "outbox event only".
+- [x] A capture for an unknown `orderId` writes one booking-owned orphan obligation per `paymentId` (amount, currency, `capturedAt`, `REFUND_REQUESTED`) in the same transaction as its `payment.refund_requested` outbox row; a duplicate or concurrent capture event leaves exactly one obligation and one outbox row.
+- [x] `payment.refunded` for that `paymentId` moves the orphan obligation to `REFUNDED`; a repeated `payment.refunded` changes nothing; a `payment.refunded` with neither a ledger row nor an orphan obligation is poison.
+- [x] Deleting the obligation's `outbox_events` row leaves the open obligation readable with everything needed to re-emit its refund request.
+- [x] The `decide()` matrix and the spec's unknown-order cells name the orphan obligation instead of "outbox event only".

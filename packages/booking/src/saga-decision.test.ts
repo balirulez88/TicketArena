@@ -230,11 +230,33 @@ describe("decide: unknown orderId", () => {
   });
 });
 
+describe("decide: unknown orderId, known payment", () => {
+  test.each(["REFUND_REQUESTED", "REFUNDED"] as const)(
+    "succeeded for an unknown orderId whose payment has a %s orphan obligation → noop (duplicate_payment)",
+    (status) => {
+      expect(decide(null, noLedger, onTime, T, { orphanObligation: status })).toEqual({
+        kind: "noop",
+        reason: "duplicate_payment",
+      });
+    },
+  );
+});
+
 describe("decide: unknown orderId, refunded", () => {
-  test("refunded for an unknown orderId whose refund booking requested → noop (unknown_order_refunded)", () => {
-    expect(decide(null, noLedger, refunded, T, { refundRequested: true })).toEqual({
+  test("refunded for an unknown orderId with an open orphan obligation → transition (orphan_refund_completed)", () => {
+    expect(decide(null, noLedger, refunded, T, { orphanObligation: "REFUND_REQUESTED" })).toEqual({
+      kind: "transition",
+      reason: "orphan_refund_completed",
+      order: null,
+      ledger: null,
+      at: T,
+    });
+  });
+
+  test("refunded for an unknown orderId whose orphan obligation is already REFUNDED → noop (already_refunded)", () => {
+    expect(decide(null, noLedger, refunded, T, { orphanObligation: "REFUNDED" })).toEqual({
       kind: "noop",
-      reason: "unknown_order_refunded",
+      reason: "already_refunded",
     });
   });
 });

@@ -914,3 +914,11 @@ What do holdSeats and placeOrder do when Upstash is missing or misconfigured?
 Assumed: Book uncounted (optionalMetrics, as admin.runRace does); the lazy metrics dependency logs the configuration error once at the boundary, not per request
 
 Answer: (open)
+
+## 2026-11-27 07:03 ticket 70
+
+Shape of the orphan refund obligation, and are existing unknown_order outbox rows backfilled?
+
+Assumed: Table public.orphan_refund_obligations keyed by paymentId (orderId without FK, amount, currency, capturedAt, status REFUND_REQUESTED|REFUNDED, refundRequestedAt); the PK insert replaces the advisory lock; existing unknown_order outbox rows are backfilled as open obligations from the earliest request, capturedAt = occurredAt; MANUAL_REVIEW and attempts are left to ticket 23
+
+Answer: (open)

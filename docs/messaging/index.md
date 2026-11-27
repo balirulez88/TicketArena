@@ -242,10 +242,11 @@ row with `refundRequestedAt = T`, `order.expired` and `payment.refund_requested`
 with a mismatched amount: order unchanged, `REFUND_REQUESTED` ledger row, `payment.refund_requested`
 with the contact; an on-time capture on an `EXPIRED` order, reason `late_delivery`, is also counted
 as `late_delivery_refund`, best-effort); `refund` `unknown_order` (a capture whose order no longer
-exists; a demo reset keeps orders, so it is not a cause: no ledger row is possible, so the `payment.refund_requested`
-outbox row, without contact, is the obligation; without an order row to lock, the handler takes an
-advisory lock on `refund:<paymentId>` and writes the request only if none exists for that payment,
-so a redelivery or a duplicate under a new event id refunds it once); `noop` (ack; a non-final
+exists; a demo reset keeps orders, so it is not a cause: no ledger row is possible, so the handler
+inserts an orphan refund obligation (`orphan_refund_obligations`, primary key `paymentId`,
+`INSERT … ON CONFLICT DO NOTHING`) and emits `payment.refund_requested` without contact only if
+that insert wrote the row; a concurrent duplicate's insert waits on the uncommitted row and skips
+it, so a redelivery or a duplicate under a new event id refunds it once); `noop` (ack; a non-final
 failure, reason `attempt_failed`, is also counted as `payment_attempt_failed` in the event's Redis
 counter hash, best-effort, and leaves the order open until its deadline); `retry` and `poison`
 (unknown `orderId` on a failure) are returned to the runner as a `HandlerOutcome`. Any decision
@@ -266,9 +267,11 @@ update (zero rows throws), whatever the order's status (an `amount_mismatch` ref
 order `PENDING_PAYMENT`); the order is unchanged and nothing is emitted. A repeat is `noop`
 `already_refunded`. A `paymentId` missing from a known order's ledger is `poison`
 (`unknown_payment`, or `refund_for_pending_order` on a `PENDING_PAYMENT` order). For an unknown
-`orderId` the handler asks booking's outbox whether it requested a refund of that payment (an
-`unknown_order` refund has no ledger row): if so the event is `noop` `unknown_order_refunded`,
-else `poison` (`unknown_order`).
+`orderId` the handler locks the payment's orphan refund obligation (an `unknown_order` refund has
+no ledger row): `transition` `orphan_refund_completed` moves it from `REFUND_REQUESTED` to
+`REFUNDED` by a conditional update (zero rows throws), emitting nothing; a repeat is `noop`
+`already_refunded`; a payment with no orphan obligation is `poison` (`unknown_order`). The outbox
+is never consulted, so the outcome does not depend on the request's outbox row still existing.
 
 Relay and runner take a `service` (`booking` default, `payment` or `notification`) that selects the outbox and
 `processed_messages` of that schema (ADR 0009); the worker runs one relay per outbox.

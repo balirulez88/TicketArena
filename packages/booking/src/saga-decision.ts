@@ -8,6 +8,8 @@
 
 export type SagaOrderStatus = "PENDING_PAYMENT" | "CONFIRMED" | "CANCELLED" | "EXPIRED";
 export type LedgerDisposition = "APPLIED" | "REFUND_REQUESTED" | "MANUAL_REVIEW" | "REFUNDED";
+/** The state of an orphan refund obligation: the refund obligation of an `unknown_order` capture. */
+export type OrphanObligationStatus = "REFUND_REQUESTED" | "REFUNDED";
 
 /** The locked order as the decision sees it; `null` when no order has the event's `orderId`. */
 export interface SagaOrderState {
@@ -39,7 +41,8 @@ export type TransitionReason =
   | "payment_on_time"
   | "late_capture"
   | "final_failure"
-  | "refund_completed";
+  | "refund_completed"
+  | "orphan_refund_completed";
 /**
  * `late_delivery`: an on-time capture that reached an already expired order. `unknown_order`: a
  * capture for an order that no longer exists.
@@ -57,8 +60,7 @@ export type NoopReason =
   | "payment_applied"
   | "order_not_pending"
   | "already_refunded"
-  | "refund_not_requested"
-  | "unknown_order_refunded";
+  | "refund_not_requested";
 /** No matrix cell retries today; the outcome exists for states a message may arrive before. */
 export type RetryReason = "state_not_reached";
 export type PoisonReason = "unknown_order" | "unknown_payment" | "refund_for_pending_order";
@@ -67,7 +69,10 @@ export type SagaDecision =
   | {
       readonly kind: "transition";
       readonly reason: TransitionReason;
-      /** The order's new status, or `null` when only the ledger row changes. */
+      /**
+       * The order's new status, or `null` when only the ledger row changes (or, for
+       * `orphan_refund_completed`, only the payment's orphan obligation, which moves to `REFUNDED`).
+       */
       readonly order: "CONFIRMED" | "EXPIRED" | "CANCELLED" | null;
       /** The ledger row to insert (new payment) or move (known payment), if any. */
       readonly ledger: {
@@ -80,7 +85,8 @@ export type SagaDecision =
   | {
       /**
        * Order unchanged; a `REFUND_REQUESTED` ledger row plus `payment.refund_requested` (for
-       * `unknown_order` only the event: there is no order to attach a ledger row to).
+       * `unknown_order` a `REFUND_REQUESTED` orphan obligation instead of the ledger row: there is
+       * no order to attach a ledger row to).
        */
       readonly kind: "refund";
       readonly reason: RefundReason;
@@ -94,11 +100,11 @@ export type SagaDecision =
 /** Facts besides the order and its ledger; read only where the matrix needs them. */
 export interface DecideContext {
   /**
-   * Booking's outbox holds a `payment.refund_requested` for the event's payment. Consulted only
-   * for a `payment.refunded` whose order is gone: an `unknown_order` refund has no ledger row,
-   * so this request is the only proof that booking asked for the money back.
+   * The event payment's orphan obligation, absent when it has none. Consulted only when the
+   * event's order is gone: an `unknown_order` refund has no ledger row, so this obligation is the
+   * only record that booking asked for the money back.
    */
-  readonly refundRequested?: boolean;
+  readonly orphanObligation?: OrphanObligationStatus;
 }
 
 export function decide(
@@ -108,9 +114,8 @@ export function decide(
   T: Date,
   context: DecideContext = {},
 ): SagaDecision {
-  if (order === null && event.type === "payment.refunded" && context.refundRequested === true) {
-    // The refund booking requested for a vanished order is done; there is no row to record it on.
-    return { kind: "noop", reason: "unknown_order_refunded" };
+  if (order === null && context.orphanObligation !== undefined) {
+    return decideOrphan(context.orphanObligation, event, T);
   }
   if (order === null) {
     // The order always commits before `order.placed` is published, so a missing order never
@@ -128,6 +133,26 @@ export function decide(
       return decideFailed(order, ledger, event, T);
     case "payment.refunded":
       return decideRefunded(order, ledger, event, T);
+  }
+}
+
+/** An event for a payment whose order is gone but whose orphan obligation exists. */
+function decideOrphan(status: OrphanObligationStatus, event: SagaEvent, T: Date): SagaDecision {
+  switch (event.type) {
+    case "payment.succeeded":
+      return { kind: "noop", reason: "duplicate_payment" };
+    case "payment.failed":
+      return { kind: "poison", reason: "unknown_order" };
+    case "payment.refunded":
+      return status === "REFUND_REQUESTED"
+        ? {
+            kind: "transition",
+            reason: "orphan_refund_completed",
+            order: null,
+            ledger: null,
+            at: T,
+          }
+        : { kind: "noop", reason: "already_refunded" };
   }
 }
 

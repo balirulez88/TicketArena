@@ -25,19 +25,20 @@
 All tables live in the `public` schema (`multiSchema` with `schemas = ["public"]`; every model and
 enum carries `@@schema("public")`).
 
-| Table                | Purpose                                                                                                                                                                                                                              |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `outbox_events`      | Transactional outbox: integration events written in the business TX                                                                                                                                                                  |
-| `processed_messages` | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007)                                                                                                                              |
-| `venues`             | Seeded venues                                                                                                                                                                                                                        |
-| `sections`           | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                                                                                                                                         |
-| `rows`               | Row label within a section                                                                                                                                                                                                           |
-| `events`             | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                                                                                                                                              |
-| `seats`              | **Per event** seat: `status` `AVAILABLE`, `HELD`, `IN_CHECKOUT` or `SOLD`, `holdId?`, `claimBuyerKey?`                                                                                                                               |
-| `holds`              | A buyer's hold: `buyerKey`, `status` `HELD`, `ORDERED`, `RELEASED` or `EXPIRED`, `holdExpiresAt`, `correlationId`                                                                                                                    |
-| `orders`             | One per hold: contact, `totalMinor`, `status`, fixed `paymentDeadline`, unique `(sessionId, idempotencyKey)`                                                                                                                         |
-| `order_lines`        | Seat prices copied at placement                                                                                                                                                                                                      |
-| `order_payments`     | Ledger of captured money: `paymentId` PK, `amount`, `capturedAt`, `disposition` (`APPLIED` for a confirmed order, `REFUND_REQUESTED` with `refundRequestedAt` for a refund obligation, `REFUNDED` once `payment.refunded` closes it) |
+| Table                       | Purpose                                                                                                                                                                                                                                                                       |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `outbox_events`             | Transactional outbox: integration events written in the business TX                                                                                                                                                                                                           |
+| `processed_messages`        | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007)                                                                                                                                                                       |
+| `venues`                    | Seeded venues                                                                                                                                                                                                                                                                 |
+| `sections`                  | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                                                                                                                                                                                  |
+| `rows`                      | Row label within a section                                                                                                                                                                                                                                                    |
+| `events`                    | `onSaleAt`, `queueOpensAt`, `queueClosesAt`, `demo` flag; unique `name`                                                                                                                                                                                                       |
+| `seats`                     | **Per event** seat: `status` `AVAILABLE`, `HELD`, `IN_CHECKOUT` or `SOLD`, `holdId?`, `claimBuyerKey?`                                                                                                                                                                        |
+| `holds`                     | A buyer's hold: `buyerKey`, `status` `HELD`, `ORDERED`, `RELEASED` or `EXPIRED`, `holdExpiresAt`, `correlationId`                                                                                                                                                             |
+| `orders`                    | One per hold: contact, `totalMinor`, `status`, fixed `paymentDeadline`, unique `(sessionId, idempotencyKey)`                                                                                                                                                                  |
+| `order_lines`               | Seat prices copied at placement                                                                                                                                                                                                                                               |
+| `order_payments`            | Ledger of captured money: `paymentId` PK, `amount`, `capturedAt`, `disposition` (`APPLIED` for a confirmed order, `REFUND_REQUESTED` with `refundRequestedAt` for a refund obligation, `REFUNDED` once `payment.refunded` closes it)                                          |
+| `orphan_refund_obligations` | Refund obligation for a capture whose order booking does not have (`unknown_order`): `paymentId` PK, `orderId` (no FK), `amount`, `currency`, `capturedAt`, `status` (`REFUND_REQUESTED` → `REFUNDED`), `refundRequestedAt`. Outlives its outbox row, which retention deletes |
 
 Catalog data is seeded, never edited through the API. `seedCatalog(prisma, now)`
 (`packages/db/src/seed.ts`) only inserts
@@ -349,6 +350,17 @@ ledger row plus `payment.refund_requested`), a redelivery of a known `paymentId`
 neither changes a seat, so seats a new buyer holds after the reset are
 not reclaimed. The `unknown_order` refund (an order with no row at all) remains as a safety net
 for an order that truly does not exist; a reset no longer creates that case.
+
+That refund's obligation lives in `orphan_refund_obligations`, because the ledger's foreign key
+to `orders` cannot hold it. The primary key on `paymentId` keeps one obligation per payment even
+for concurrent duplicate captures, and the row carries everything a re-emitted
+`payment.refund_requested` needs (`unknown_order` requests have no contact), so deleting its
+outbox row loses nothing. Migration `20261127000000_orphan_refund_obligations` backfilled one open
+obligation per `paymentId` from the existing `unknown_order` outbox rows, taking the earliest
+request's `occurredAt` as `capturedAt` and `refundRequestedAt` (the request carries no capture
+time). A backfilled obligation whose refund had already completed stays `REFUND_REQUESTED`, since
+booking cannot see Payment's schema; re-emitting it refunds nothing twice (`payment.refunds` is
+unique per `paymentId`). `packages/db/src/orphan-refund-backfill-migration.test.ts` pins the backfill.
 
 Catalog API (`apps/web`): `events.list`, `events.get`, `seats.map`. Inputs and outputs are zod
 validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.

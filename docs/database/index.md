@@ -488,5 +488,12 @@ Indexes: `(status, createdAt)` serves the relay's "oldest pending first" poll;
 - Every state change that other services must hear about writes its outbox row **in the same
   transaction** (see [ADR 0003](../adr/0003-transactional-outbox.md)).
 - Schema changes go through `pnpm --filter @ticketarena/db db:migrate`; migrations are committed.
+  `schema.prisma` must declare exactly what the migrations build: the drift test
+  (`packages/db/src/schema-drift.test.ts`, part of `pnpm run test`) runs `prisma migrate diff`
+  from a database built by every committed migration to the schema's datamodel and fails on any
+  difference. Its failure message is the SQL Prisma would generate to close the gap, each
+  statement naming the table and column that disagree: `ALTER COLUMN ... SET DATA TYPE` means
+  a field's `@db` type does not match its migration, `DROP COLUMN` means a migration adds what
+  the schema does not declare, and `ADD COLUMN` means the schema declares what no migration adds.
 - Concurrency-sensitive writes (seat holds, purchases) must state their isolation strategy in
   the spec (row locks, unique constraints, or optimistic versioning).

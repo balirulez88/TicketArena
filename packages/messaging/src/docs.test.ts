@@ -37,6 +37,9 @@ describe("logging docs", () => {
       "serialized error",
       "[Redacted]",
       "onProcedureError",
+      "buyerContactSchema",
+      "dots",
+      "IPv4",
     ]) {
       expect(section).toContain(term);
     }

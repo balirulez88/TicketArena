@@ -12,7 +12,14 @@ import {
 } from "@ticketarena/messaging";
 import type { AdmissionLimits, QueueService } from "@ticketarena/waiting-room";
 import { createAdmissionLoops } from "./admission.js";
-import { type StopPhases, stopPhases, type WorkerComponent } from "./lifecycle.js";
+import {
+  createStopBudget,
+  DEFAULT_SHUTDOWN_DEADLINE_MS,
+  type StopBudget,
+  type StopPhases,
+  stopPhases,
+  type WorkerComponent,
+} from "./lifecycle.js";
 import { createPeriodicLoop } from "./periodic-loop.js";
 import { createSweeperLoop } from "./sweeper.js";
 
@@ -60,6 +67,12 @@ export interface WorkerOptions {
   readonly health?: {
     readonly redis: () => Promise<unknown>;
   };
+  /**
+   * The deadline for stopping what a failed start already started, after which the start error
+   * propagates anyway. `startWorkerProcess` passes the failed start's one budget so the resource
+   * closes share it; defaults to a fresh `DEFAULT_SHUTDOWN_DEADLINE_MS` budget.
+   */
+  readonly stopBudget?: StopBudget;
 }
 
 /** `/health`: the worker itself is up; Redis, when probed, is `ok` or `unavailable`. */
@@ -140,12 +153,10 @@ export async function startWorker(options: WorkerOptions): Promise<RunningWorker
   try {
     await startLoops(options, started);
   } catch (error) {
-    for (const failure of await stopPhases(components)) {
-      (options.logger ?? silentLogger).error(
-        { err: failure.error, component: failure.component },
-        "worker component failed to stop after a failed start",
-      );
-    }
+    // Bounded: a stop that never settles (a runner's pull or a relay's claim transaction that
+    // hangs) must not swallow the start error; the log names the component still stopping.
+    const stopBudget = options.stopBudget ?? createStopBudget(DEFAULT_SHUTDOWN_DEADLINE_MS);
+    await stopBudget.stop(components, options.logger ?? silentLogger);
     throw error;
   }
 

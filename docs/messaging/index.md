@@ -50,9 +50,10 @@ run during a Redis outage (see [waiting room](../architecture/waiting-room.md#re
   rows wait for a failed or in-flight earlier one, at one row per aggregate per tick. Rows of a rolled-back transaction never exist for the relay.
   A tick that fails outside a row's publish (claim query, mark or commit; e.g. the database is unreachable)
   rolls back, leaves its rows `PENDING`, and the loop retries on the next tick. It is logged at `error` with the
-  cause (`outbox relay tick failed`), rate-limited by `failure-reporter.ts`: the first failure, any failure with a
-  different cause, and then one line per 60 s window (`FAILURE_LOG_WINDOW_MS`) while the same cause persists,
-  carrying `failures` and `suppressed` counts. The first successful tick after them logs `outbox relay recovered`
+  cause (`outbox relay tick failed`), rate-limited by `failure-reporter.ts` per cause: the first failure of each
+  cause, and then at most one line per 60 s window (`FAILURE_LOG_WINDOW_MS`) per cause while it persists, even
+  when causes alternate, carrying `failures` and `suppressed` counts. At most 32 causes
+  (`MAX_TRACKED_FAILURE_CAUSES`) keep a window; past that the least recently logged one is forgotten. The first successful tick after them logs `outbox relay recovered`
   at `info` with `failures` and `outageMs`. The relay takes an optional `now` clock for this.
 - **Consumer runner** (`consumer-runner.ts`): durable pull consumer per consumer name (`AckWait` 30 s,
   no `BackOff`, `MaxDeliver` -1). Each message runs in one transaction that first inserts
@@ -192,7 +193,9 @@ fails after the EMAIL was sent, both stay `PENDING` and the redelivery offers th
 Unique `(sourceEventId, channel)` plus the consumer's `processed_messages` keep a redelivered or `+dup@` event at one record per
 channel (AT-43, for all five kinds). Dedupe is by event id: a refund request the reconciler
 re-emits (or an operator retries) has a new event id, so it is a new source event and the buyer gets
-another `refund-initiated`, at most 3 per obligation before manual review.
+another `refund-initiated`, at most 3 per obligation before manual review. Likewise Payment's
+re-announcement of an executed refund (its answer to a duplicate request) is a new
+`payment.refunded` event, so the buyer can get another `refund-completed`.
 The mock provider records deliveries and dedupes by key.
 **External delivery is at-least-once**: a crash between the call and the `SENT` commit repeats it on redelivery, and only
 the provider's key dedupe absorbs that.
@@ -259,12 +262,13 @@ is never dropped silently.
 
 **Refund execution.** `payment-refund` (`service: "payment"`, `apps/worker/src/payment/refund-handler.ts`)
 consumes `payment.refund_requested`: in the runner's transaction it inserts one `payment.refunds`
-row (primary key `paymentId`, `INSERT … ON CONFLICT DO NOTHING`) and, only if that insert wrote the
-row, emits `payment.refunded` through the payment outbox. `processed_messages` absorbs a
+row (primary key `paymentId`, `INSERT … ON CONFLICT DO NOTHING`), reads the row back and emits
+`payment.refunded` from it through the payment outbox. `processed_messages` absorbs a
 redelivery; the primary key absorbs a duplicate request under a new event id, including a
 concurrent one, whose insert waits on the uncommitted row and then skips it. So a payment is
-refunded once and `payment.refunded` is emitted once (AT-23); a skipped duplicate is logged and
-acked. Every request is executed, with or without a contact. `booking-saga-refunded` runs
+refunded once (AT-23); a duplicate request re-announces that refund (`payment.refunded` with the
+executed refund's `refundedAt`, amount and currency, a new event id), so booking recovers a lost
+confirmation from the reconciler's re-emit and applies a repeat as `noop` `already_refunded`. Every request is executed, with or without a contact. `booking-saga-refunded` runs
 `createPaymentSagaHandler` on `payment.refunded`: `transition` `refund_completed` moves the
 payment's ledger row from `REFUND_REQUESTED` or `MANUAL_REVIEW` to `REFUNDED` by a conditional
 update (zero rows throws), whatever the order's status (an `amount_mismatch` refund leaves the

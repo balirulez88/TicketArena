@@ -96,7 +96,7 @@ interface LockedObligation {
   readonly orderId: string;
   readonly amount: number;
   readonly currency: string;
-  readonly status: RefundObligationStatus | "APPLIED";
+  readonly status: RefundObligationStatus;
   readonly refundAttempts: number;
   readonly refundRequestedAt: Date;
   readonly refundLastRequestedAt: Date;
@@ -136,7 +136,7 @@ const sources = {
                o."correlationId"::text AS "correlationId", o."holdId"::text AS "holdId",
                p."refundReason"::text AS reason, o."contactEmail", o."contactPhone"
         FROM order_payments p JOIN orders o ON o.id = p."orderId"
-        WHERE p."paymentId" = ${paymentId}::uuid
+        WHERE p."paymentId" = ${paymentId}::uuid AND p.disposition <> 'APPLIED'
         FOR UPDATE OF p`,
     async markRequested(
       tx: TransactionClient,
@@ -208,6 +208,71 @@ const sources = {
 } as const;
 
 type Source = (typeof sources)[keyof typeof sources];
+
+/**
+ * Cutover catch-up (docs/operations/deployment.md, "Refund cutover"): the refund migrations run
+ * before this worker replaces the previous one, and an emergency rollback runs the previous one
+ * again, so until the contract migration that one may still write refund obligations in its
+ * shape: a ledger row without `refundReason` and `refundLastRequestedAt`, and an `unknown_order`
+ * refund as its outbox row only. This completes both exactly as the migrations' backfills did, and
+ * is idempotent: a row that is complete, or a payment that has an orphan obligation in any state,
+ * is never touched again. It runs before the claims of every pass, so the claim never meets an
+ * incomplete row (one has no `refundLastRequestedAt`, so no stale claim matches it either).
+ * Removed with the contract migration.
+ */
+async function catchUpOldWorkerObligations(db: PrismaClient): Promise<number> {
+  return db.$transaction(async (tx) => {
+    const ledger = await tx.$executeRaw`
+      UPDATE order_payments AS p
+      SET "refundRequestedAt" = COALESCE(p."refundRequestedAt", p."capturedAt"),
+          "refundLastRequestedAt" = COALESCE(p."refundLastRequestedAt", p."refundRequestedAt", p."capturedAt"),
+          "refundReason" = COALESCE(
+            p."refundReason",
+            (SELECT (e."payload" -> 'payload' ->> 'reason')::"RefundReason"
+             FROM outbox_events e
+             WHERE e."eventType" = 'payment.refund_requested'
+               AND e."aggregateId" = p."paymentId"::text
+               AND e."payload" -> 'payload' ->> 'reason' <> 'unknown_order'
+             ORDER BY e."createdAt"
+             LIMIT 1),
+            (SELECT CASE o.status::text
+                      WHEN 'EXPIRED' THEN 'order_expired'
+                      WHEN 'CANCELLED' THEN 'order_cancelled'
+                      WHEN 'CONFIRMED' THEN 'order_confirmed'
+                      ELSE 'amount_mismatch'
+                    END::"RefundReason"
+             FROM orders o WHERE o.id = p."orderId"))
+      WHERE p.disposition <> 'APPLIED'
+        AND (p."refundReason" IS NULL OR p."refundRequestedAt" IS NULL
+             OR p."refundLastRequestedAt" IS NULL)`;
+    // From the payment's earliest request: it carries no capture time, so its `occurredAt` (the
+    // saga's T, never before the capture) is the historical proxy for `capturedAt`.
+    const orphans = await tx.$executeRaw`
+      INSERT INTO orphan_refund_obligations
+        ("paymentId", "orderId", amount, currency, "capturedAt", status, "refundRequestedAt",
+         "correlationId", "refundAttempts", "refundLastRequestedAt")
+      SELECT DISTINCT ON (e."aggregateId")
+        (e."payload" -> 'payload' ->> 'paymentId')::uuid,
+        (e."payload" -> 'payload' ->> 'orderId')::uuid,
+        (e."payload" -> 'payload' ->> 'amount')::integer,
+        e."payload" -> 'payload' ->> 'currency',
+        (e."payload" ->> 'occurredAt')::timestamptz,
+        'REFUND_REQUESTED',
+        (e."payload" ->> 'occurredAt')::timestamptz,
+        COALESCE((e."payload" ->> 'correlationId')::uuid,
+                 (e."payload" -> 'payload' ->> 'paymentId')::uuid),
+        0,
+        (e."payload" ->> 'occurredAt')::timestamptz
+      FROM outbox_events e
+      WHERE e."eventType" = 'payment.refund_requested'
+        AND e."payload" -> 'payload' ->> 'reason' = 'unknown_order'
+        AND NOT EXISTS (
+          SELECT 1 FROM orphan_refund_obligations r WHERE r."paymentId"::text = e."aggregateId")
+      ORDER BY e."aggregateId", e."createdAt"
+      ON CONFLICT ("paymentId") DO NOTHING`;
+    return ledger + orphans;
+  });
+}
 
 /**
  * The reconciler (spec: Refund obligations and reconciliation): no refund obligation is forgotten.
@@ -337,6 +402,10 @@ export function createRefundReconciler({
 
   return {
     async reconcileRefunds() {
+      const caughtUp = await catchUpOldWorkerObligations(db);
+      if (caughtUp > 0) {
+        logger.warn({ caughtUp }, "refund obligations written by the previous worker caught up");
+      }
       const reEmitted: string[] = [];
       const escalated: string[] = [];
       for (const source of [sources.ledger, sources.orphan]) {
@@ -355,6 +424,7 @@ export function createRefundReconciler({
     async retryRefund(paymentId) {
       const retried = await db.$transaction(async (tx) => {
         // A payment id is in at most one table: the ledger if booking has its order, else orphaned.
+        // An APPLIED ledger row is a payment, not a refund obligation, so it is NOT_FOUND too.
         for (const source of [sources.ledger, sources.orphan]) {
           const [row] = await source.lockOne(tx, paymentId);
           if (row === undefined) {

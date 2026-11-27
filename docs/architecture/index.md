@@ -290,12 +290,17 @@ failed sweep is logged and retried next time; `stop()` cancels the wait at once)
 
 **Start and stop** (`lifecycle.ts`, TD-034, TD-035). If any start step fails after a loop has
 started (a consumer's subscribe rejects, say), `startWorker` stops everything already running and
-closes the server before the error propagates. `RunningWorker.components` lists the started parts
+closes the server before the error propagates; that cleanup draws on a `StopBudget`
+(`createStopBudget`, default `DEFAULT_SHUTDOWN_DEADLINE_MS`), so a stop that never settles is logged by name
+(`worker did not stop within ...`, `pending`) and the start error still propagates. `RunningWorker.components` lists the started parts
 by name in stop order (health server, sweeper and refund reconciler, admission ticker and slot reaper, `relay:<service>`,
 `consumer:<durable>`); each phase stops together, phases one after another. `main.ts` starts and
-stops only through `startWorkerProcess` and `shutdownWorkerProcess`, with `process.exit` injected:
-a failed start is logged (`worker failed to start`), the bus, Redis and Prisma are closed and the
-process exits 1; on SIGTERM or SIGINT every component and then the bus, Redis and Prisma are
+stops only through `startWorkerProcess` and `shutdownWorkerProcess`, with `process.exit` injected.
+Prisma, Redis and the NATS connection are opened inside `startWorkerProcess`'s `start`, each
+registered the moment it exists, so a failed start (the NATS connect included) is logged
+(`worker failed to start`), what was opened is closed newest first, and the process exits 1. A
+failed start has one budget whose clock starts at the first stop: `startWorker`'s cleanup and the
+resource closes both spend from it, so the whole failed-start cleanup ends within 25 s; on SIGTERM or SIGINT every component and then the bus, Redis and Prisma are
 stopped, a failing stop is logged with its component and the rest still close (exit 1), and the
 whole shutdown is bounded by `DEFAULT_SHUTDOWN_DEADLINE_MS` (25 s, under Fly's 30 s
 `kill_timeout`): at the deadline the components still stopping are logged and the process exits 1.
@@ -323,13 +328,19 @@ exits, so its rows stay `PENDING` for the next start.
   anything is written. Two rules apply at any depth: the value of a key matching `email`,
   `phone` or `recipient` (case-insensitive: `contactEmail`, `contact.phone`, a notification's
   `recipient`) becomes `[Redacted]`, and inside any string an email address or a run of 7 or more
-  digits (optional `+`, spaces, dashes, parentheses) not touching a word character becomes
-  `[Redacted]`. Why both: errors are logged whole (`err`) because their name and stack are needed
+  digits (optional leading `+` and `(`, separated by spaces, dots, dashes or parentheses) not
+  touching a word character becomes `[Redacted]`. The value rule covers every format the checkout
+  accepts: `booking.placeOrder` validates its contact with `buyerContactSchema`
+  (`packages/contracts/src/buyer-contact.ts`: `z.email()`, and a phone of 7 to 15 digits in that
+  shape), and a table test runs each accepted format through both. A phone that starts like an
+  IPv4 address (four dot-separated groups of 1 to 3 digits) is refused at checkout, because the
+  redactor keeps IPv4 addresses readable. Why both: errors are logged whole (`err`) because their name and stack are needed
   to debug, and a Prisma or validation error can embed the buyer's contact in its message (TD-048),
   which no key rule sees. The value rule over-redacts on purpose (a bare 7+ digit number or
   `YYYY-MM-DD` date in a message is lost); UUIDs, ISO timestamps, IP addresses and numeric fields
-  survive, so correlation ids stay traceable. tRPC procedure errors go to the same logger through
-  `onProcedureError` (the API route's `onError`), never `console`. Code that logs a new contact
+  survive, so correlation ids stay traceable (a decimal number of 7+ digits is lost too). tRPC
+  procedure errors go to the same logger through `onProcedureError` (the API route's `onError`),
+  never `console`. Code that logs a new contact
   field under another key name must extend `CONTACT_KEY` in `log-redaction.ts`.
 
 ## Children

@@ -57,12 +57,12 @@ SET "refundLastRequestedAt" = r."refundRequestedAt",
 ALTER TABLE "orphan_refund_obligations" ALTER COLUMN "correlationId" SET NOT NULL,
 ALTER COLUMN "refundLastRequestedAt" SET NOT NULL;
 
--- A refund obligation always carries what its re-emit needs (hand-written: Prisma cannot express a
--- CHECK); APPLIED is the only disposition without one.
-ALTER TABLE "order_payments" ADD CONSTRAINT "order_payments_refund_obligation_complete" CHECK (
-  "disposition" = 'APPLIED'
-  OR ("refundReason" IS NOT NULL AND "refundRequestedAt" IS NOT NULL AND "refundLastRequestedAt" IS NOT NULL)
-);
+-- Expand only (docs/operations/deployment.md, "Refund cutover"): this migration runs while the
+-- previous worker still runs, and an emergency rollback runs that worker on this schema again. It
+-- writes ledger refund obligations without `refundReason` and `refundLastRequestedAt`, so both stay
+-- nullable here and no CHECK requires them; each reconciler pass fills them in on such rows first.
+-- The CHECK that every non-APPLIED row carries them is the contract step, a later migration once no
+-- release that predates this one can run.
 
 -- CreateIndex (hand-written: Prisma cannot express a partial index). The reconciler and
 -- refund_pending_age_max read only open obligations, a small slice of a ledger that grows with

@@ -392,6 +392,39 @@ describe("retryRefund: no refund obligation", () => {
     expect(error).toMatchObject({ code: "NOT_FOUND" });
     expect(String(error)).toContain(paymentId);
   });
+
+  test("is NOT_FOUND for an APPLIED payment, which owes no refund, and changes nothing", async () => {
+    const buyer = freshBuyer();
+    const { eventId, seatIds } = await freeSeats(1);
+    const hold = await at(NOW).holdSeats(buyer, eventId, seatIds);
+    const order = await at(NOW).placeOrder(
+      buyer,
+      hold.id,
+      { email: "alice@example.com" },
+      randomUUID(),
+    );
+    const paymentId = randomUUID();
+    const data = paymentMessage(
+      "payment.succeeded",
+      { paymentId, orderId: order.id, correlationId: hold.correlationId },
+      order.totalMinor,
+    );
+    // Delivered on time, so the payment confirms the order instead of being refunded.
+    const onTime = createPaymentSagaHandler({
+      clock: { now: () => new Date(NOW.getTime() + 4 * 60_000) },
+      newId: randomUUID,
+    });
+    await db().$transaction((tx) => onTime(tx, { data }, { emit: outboxEmit(tx, data) }));
+    const before = await db().orderPayment.findUniqueOrThrow({ where: { paymentId } });
+    expect(before.disposition).toBe("APPLIED");
+
+    const error = await failureOf(at(afterMinutes(45)).retryRefund(paymentId));
+
+    expect(error).toMatchObject({ code: "NOT_FOUND" });
+    expect(String(error)).toContain(paymentId);
+    expect(await db().orderPayment.findUniqueOrThrow({ where: { paymentId } })).toEqual(before);
+    expect(await requestsFor(paymentId)).toEqual([]);
+  });
 });
 
 describe("AT-24 reconciler", () => {

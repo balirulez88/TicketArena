@@ -16,10 +16,13 @@ CREATE TABLE "orphan_refund_obligations" (
 
 -- Backfill (hand-written): until this migration the outbox row was the only record of an
 -- unknown_order refund, so every such request becomes an open obligation; money is never
--- forgotten. The request carries no capture time, so `capturedAt` takes the request's
--- `occurredAt`, the saga's T, which is never before the capture. Booking cannot tell from its own
--- schema whether Payment already refunded it, so it stays REFUND_REQUESTED: a re-emitted request
--- refunds nothing twice (payment.refunds is unique per paymentId).
+-- forgotten. The request carries no capture time, so `capturedAt` takes the earliest request's
+-- `occurredAt`, the saga's T, which is never before the capture: a historical proxy, not the
+-- capture time. Booking cannot tell from its own schema whether Payment already refunded it, so it
+-- stays REFUND_REQUESTED: the reconciler's re-emit refunds nothing twice (payment.refunds is unique
+-- per paymentId), and Payment answers it by announcing the executed refund again, which closes the
+-- obligation as REFUNDED. Requests the previous worker writes after this migration are caught up
+-- by the reconciler (docs/operations/deployment.md, "Refund cutover").
 INSERT INTO "orphan_refund_obligations"
     ("paymentId", "orderId", "amount", "currency", "capturedAt", "status", "refundRequestedAt")
 SELECT DISTINCT ON ("aggregateId")

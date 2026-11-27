@@ -70,16 +70,23 @@ and merges such duplicates; on a database without duplicates it changes nothing.
   references move to it.
 - Their events point at the surviving venue.
 - A duplicate's section moves to the surviving venue, unless a section of that name is already in
-  the group: then the sections merge into one (the surviving venue's own, else the lowest `id`),
-  which keeps its own price.
+  the group: then the sections merge into one (the surviving venue's own, else the lowest `id`).
+- Same-name sections merge only if they all have the same `priceMinor` and `currency`, because a
+  seat's price is its section's and a merge would reprice existing seats on the seat map and at
+  checkout. If any group differs, the migration aborts before it changes a row, with an error that
+  lists each conflicting venue, section name and every section's `id`, price and currency. Fix:
+  give the listed sections the same `priceMinor` and `currency`, or rename all but one of them,
+  then rerun `prisma migrate deploy`.
 - Rows of merged sections move the same way: a row whose label the merged section already holds
   merges into one row (the surviving section's own, else the lowest `id`), and its seats move to
   that row. No seat is deleted; two seats of one event on one merged row and number would abort the
   migration on `seats_eventId_rowId_number_key`, which seeded data cannot produce.
 
-`packages/db/src/venue-merge-migration.test.ts` migrates a database to just before this step,
-inserts two same-name venues with sections, rows, events and seats, applies the remaining
-migrations and checks the result.
+`packages/db/src/venue-merge-migration.test.ts` migrates databases to just before this step,
+inserts two same-name venues with sections, rows, events and seats, and applies the remaining
+migrations: with matching section prices it checks the merged result and that every seat keeps
+its price and currency; with a differing price or currency it checks the abort and that nothing
+changed.
 
 ### Indexes and unique constraints
 
@@ -359,9 +366,14 @@ for concurrent duplicate captures, and the row carries everything a re-emitted
 outbox row loses nothing. Migration `20261127000000_orphan_refund_obligations` backfilled one open
 obligation per `paymentId` from the existing `unknown_order` outbox rows, taking the earliest
 request's `occurredAt` as `capturedAt` and `refundRequestedAt` (the request carries no capture
-time). A backfilled obligation whose refund had already completed stays `REFUND_REQUESTED`, since
-booking cannot see Payment's schema; re-emitting it refunds nothing twice (`payment.refunds` is
-unique per `paymentId`), and it ends in `MANUAL_REVIEW` (see [Refund reconciler](#refund-reconciler)). `packages/db/src/orphan-refund-backfill-migration.test.ts` pins the backfill.
+time, so this is a historical proxy for it: the saga's T, never before the capture). A backfilled
+obligation whose refund had already completed stays `REFUND_REQUESTED`, since booking cannot see
+Payment's schema; the reconciler's re-emit refunds nothing twice (`payment.refunds` is unique per
+`paymentId`), and Payment answers it by announcing the executed refund again, which closes it as
+`REFUNDED` (see [Refund reconciler](#refund-reconciler)). `unknown_order` requests the previous
+worker writes after the migration are caught up by the reconciler
+([refund cutover](../operations/deployment.md#refund-cutover)).
+`packages/db/src/orphan-refund-backfill-migration.test.ts` pins the backfill.
 
 ### Refund reconciler
 
@@ -369,7 +381,9 @@ No refund obligation is forgotten (spec: Refund obligations and reconciliation).
 `BookingService.reconcileRefunds()` every 5 minutes (`packages/booking/src/refund-reconciler.ts`);
 the limits are injectable (`RefundReconcilerLimits`, defaults `DEFAULT_REFUND_RECONCILER_LIMITS`:
 stale after 10 min, 3 re-emits, batches of 100). A pass covers the ledger (`order_payments`) and the
-orphan refund obligations the same way:
+orphan refund obligations the same way, after a **cutover catch-up** that completes refund
+obligations a previous worker wrote in its own shape
+([refund cutover](../operations/deployment.md#refund-cutover)):
 
 - **Stale** means `REFUND_REQUESTED` with `refundLastRequestedAt <= T - 10 min`. The age is taken
   from the **last** request (the saga's first request, a re-emit, or an operator's retry), so
@@ -397,30 +411,37 @@ orphan refund obligations the same way:
 `MANUAL_REVIEW` → `REFUND_REQUESTED`, re-emits the request and resets `refundAttempts` to 0 with
 `refundLastRequestedAt = T`, in one transaction, so the reconciler gives it a full 3 re-emits
 again. It is `NOT_FOUND` (`RefundObligationNotFoundError`) for a payment with no refund obligation
-and `REFUND_NOT_IN_MANUAL_REVIEW` (`RefundNotInManualReviewError`, nothing changed) for any other
-state; it returns the obligation as it now is.
+(an `APPLIED` ledger row is a payment, not a refund obligation, so it is `NOT_FOUND` too) and
+`REFUND_NOT_IN_MANUAL_REVIEW` (`RefundNotInManualReviewError`, nothing changed) for any other
+state; it returns the obligation as it now is, with its first `refundRequestedAt` kept.
 
 `BookingService.refundPendingAgeMax()` is `refund_pending_age_max` for the dashboard: ms from the
 first request (`refundRequestedAt`, never moved by a re-emit) of the oldest open obligation
 (`REFUND_REQUESTED` or `MANUAL_REVIEW`, both tables) to `T`, 0 when none is open.
 
-**Known limitation: a request Payment does not answer ends in `MANUAL_REVIEW`.** Payment emits
-`payment.refunded` only when its insert wrote the `payment.refunds` row, so a re-emitted (duplicate)
-request for a refund it already executed emits nothing. An obligation whose `payment.refunded` was
-lost, or never written (for instance a backfilled orphan obligation whose refund had completed),
-is therefore re-emitted 3 times, refunds nothing twice, and then waits in `MANUAL_REVIEW`; an
-operator's retry repeats that once more. It is bounded, never a loop, but needs a human to close it
-until Payment re-answers duplicates. Each re-emit also has a new event id, so Notification sends the
-buyer another `refund-initiated` (see [messaging](../messaging/index.md#notification)).
+**A lost confirmation is recovered.** Payment answers every request, a duplicate too: a re-emit
+for a refund it already executed refunds nothing twice and announces that refund again
+(`payment.refunded` with the executed refund's `refundedAt`, amount and currency, a new event id,
+through its outbox in the same transaction). So an obligation whose `payment.refunded` was lost, or
+never closed it (a backfilled orphan obligation whose refund had completed), is `REFUNDED` after
+the next re-emit; `apps/worker/src/refund-recovery-flow.test.ts` loses the first confirmation and
+shows each kind converging with one refund. `MANUAL_REVIEW` is left for a Payment that does not
+answer at all. Each re-emit has a new event id, so Notification sends the buyer another
+`refund-initiated`, and a re-announcement another `refund-completed` (see
+[messaging](../messaging/index.md#notification)).
 
 Migration `20261128000000_refund_reconciler` added `refundReason` and `refundLastRequestedAt` to
 `order_payments`, `correlationId`, `refundAttempts` and `refundLastRequestedAt` to
 `orphan_refund_obligations`, and `MANUAL_REVIEW` to the orphan status. It backfilled the reason and
 the correlation id from the payment's earliest `payment.refund_requested` outbox row (a ledger row
 without one takes the reason its order's status implies; an orphan without one takes its
-`paymentId` as correlation id) and `refundLastRequestedAt` from `refundRequestedAt`. The CHECK
-`order_payments_refund_obligation_complete` keeps every non-`APPLIED` ledger row re-emittable.
-`packages/db/src/refund-reconciler-migration.test.ts` pins the backfill.
+`paymentId` as correlation id) and `refundLastRequestedAt` from `refundRequestedAt`. It is
+expand-only: `refundReason` and `refundLastRequestedAt` stay nullable on `order_payments` and no
+CHECK requires them, because the previous worker still writes ledger rows without them during the
+deploy and after a rollback; the CHECK is a later contract migration
+([refund cutover](../operations/deployment.md#refund-cutover)).
+`packages/db/src/refund-reconciler-migration.test.ts` pins the backfill and the previous worker's
+writes on the migrated schema.
 
 Catalog API (`apps/web`): `events.list`, `events.get`, `seats.map`. Inputs and outputs are zod
 validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.

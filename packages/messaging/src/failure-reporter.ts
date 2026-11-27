@@ -1,7 +1,14 @@
 import type { Logger } from "@ticketarena/contracts";
 
-/** How often a repeated identical failure is logged again while an outage lasts. */
+/** How often a repeated failure with the same cause is logged again while an outage lasts. */
 export const FAILURE_LOG_WINDOW_MS = 60_000;
+
+/**
+ * How many distinct causes keep their own window during one outage. Causes can carry ids or
+ * addresses, so an unbounded map would grow with every new message text; past the bound the
+ * least recently logged cause is forgotten and, at worst, logged once more than the window allows.
+ */
+export const MAX_TRACKED_FAILURE_CAUSES = 32;
 
 export interface FailureReporterOptions {
   readonly logger: Logger;
@@ -17,17 +24,21 @@ export interface FailureReporter {
   succeeded(): void;
 }
 
+interface CauseWindow {
+  readonly loggedAt: number;
+  suppressed: number;
+}
+
 /**
  * Reports a background loop's failed iterations so an outage is visible without flooding the log:
- * the first failure, a failure with a different cause, and one line per window while the same
- * cause persists (with how many it stood for), then one line when the loop recovers.
+ * the first failure of each cause, then at most one line per window per cause while it persists
+ * (with how many it stood for), even when causes alternate, then one line when the loop recovers.
  */
 export function createFailureReporter(options: FailureReporterOptions): FailureReporter {
   let failures = 0;
   let firstFailureAt = 0;
-  let lastLoggedAt = 0;
-  let lastCause: string | undefined;
-  let suppressed = 0;
+  // Insertion order is log order: the first key is always the least recently logged cause.
+  const windows = new Map<string, CauseWindow>();
 
   return {
     failed(error) {
@@ -37,14 +48,23 @@ export function createFailureReporter(options: FailureReporterOptions): FailureR
         firstFailureAt = at;
       }
       failures += 1;
-      if (cause === lastCause && at - lastLoggedAt < FAILURE_LOG_WINDOW_MS) {
-        suppressed += 1;
+      const window = windows.get(cause);
+      if (window !== undefined && at - window.loggedAt < FAILURE_LOG_WINDOW_MS) {
+        window.suppressed += 1;
         return;
       }
-      options.logger.error({ err: error, failures, suppressed }, options.failureMessage);
-      lastCause = cause;
-      lastLoggedAt = at;
-      suppressed = 0;
+      options.logger.error(
+        { err: error, failures, suppressed: window?.suppressed ?? 0 },
+        options.failureMessage,
+      );
+      windows.delete(cause);
+      if (windows.size >= MAX_TRACKED_FAILURE_CAUSES) {
+        const oldest = windows.keys().next();
+        if (oldest.done !== true) {
+          windows.delete(oldest.value);
+        }
+      }
+      windows.set(cause, { loggedAt: at, suppressed: 0 });
     },
     succeeded() {
       if (failures === 0) {
@@ -55,8 +75,7 @@ export function createFailureReporter(options: FailureReporterOptions): FailureR
         options.recoveryMessage,
       );
       failures = 0;
-      lastCause = undefined;
-      suppressed = 0;
+      windows.clear();
     },
   };
 }

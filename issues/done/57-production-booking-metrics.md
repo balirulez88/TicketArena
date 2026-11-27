@@ -18,6 +18,27 @@ Each criterion names its test and the sabotage that test must catch. Tests use t
 - [x] `placeOrder` end to end: through the router, an order whose transaction is retried once after a real `40001` (test-scoped trigger) succeeds and sends `deadlock_retry` once; an order refused on a saturated pool before its event is known sends `booking_busy` to the unknown-event key ticket 54 documented. Each test asserts the exact commands.
 - [x] Best effort: with the fake server returning 500, never answering (request timeout) or refusing the connection, `holdSeats` and `placeOrder` still succeed with their normal result, and the failure is logged once per increment with the metric name. Sabotage: awaiting the increment inside the booking result path makes the never-answering case exceed its test timeout.
 - [x] TD-070: no production caller builds the booking service without metrics: the Wiring and end-to-end tests above prove the counters reach Upstash from the app, and `docs/index.md` no longer claims more than the code does. Sabotage: as for Wiring.
-- [ ] Every entry in `docs/technical-debt.md` whose Target is ticket 57 (TD-070) is `RESOLVED`, with the tests that prove it named in `Verification` (the host refuses the merge otherwise).
+- [x] ~~Every entry in `docs/technical-debt.md` whose Target is ticket 57 (TD-070) is `RESOLVED`, with the tests that prove it named in `Verification`.~~ Superseded by [ADR 0024](../../docs/adr/0024-frozen-debt-register-check.md) (Q13): the register is frozen and never edited; the evidence is recorded below instead.
 
 **Documentation deliverable (reviewed, not test-verified):** `docs/database/index.md` states that production counts go to Upstash through the context, which counters each operation sends, and that they are best-effort (a request cut short by the platform may lose an increment).
+
+## Evidence (ADR 0024: TD-070)
+
+`holdSeats` and `placeOrder` build their booking service with `optionalMetrics(ctx)`, which resolves the context's process-wide lazy `createRedisBookingMetrics` over the Upstash client (`apps/web/src/server/routers/booking.ts`, `apps/web/src/server/trpc.ts`). Tests in `apps/web/src/server/routers/booking-metrics.test.ts`:
+
+- Wiring: "holdSeats and placeOrder count through the one metrics instance the context resolves"
+- Wiring: "procedures that do not book never resolve the metrics"
+- holdSeats: "a successful hold sends HINCRBY booking:metrics:<eventId> hold_ok 1"
+- holdSeats: "a hold that exhausts its lock-timeout retries is BOOKING_BUSY and sends deadlock_retry three times, then booking_busy once"
+- holdSeats: "a hold refused on a saturated pool sends booking_busy once"
+- placeOrder: "an order retried once after a real 40001 succeeds and sends deadlock_retry once"
+- placeOrder: "an order refused on a saturated pool before its event is known sends booking_busy to the unknown-event key"
+
+## Best-effort counters (Q14)
+
+Checked, already met: counters are best effort. With a missing or invalid Upstash configuration the lazy metrics dependency logs `metrics configuration is invalid` once per process (the outcome is cached in the process-wide context services) and rethrows on every later resolve; `optionalMetrics` turns that into "no metrics", so the booking proceeds uncounted. Admission is unchanged: `holdSeats` still requires the admission token and keeps its Redis rules (ADR 0008). Tests:
+
+- `apps/web/src/server/routers/booking-metrics.test.ts` :: "without an Upstash configuration a hold and an order still succeed, and the boundary says why once" (an admitted buyer, through the router)
+- `apps/web/src/server/upstash-metrics.test.ts` :: "a bad configuration logs once, fails every time with the same message and parses once"
+- `apps/web/src/server/routers/booking-metrics.test.ts` :: "when Upstash %s, holdSeats and placeOrder succeed and each failed increment is logged once with its metric" (500, connection refused)
+- `apps/web/src/server/routers/booking-metrics.test.ts` :: "when Upstash never answers, holdSeats and placeOrder return before their increments time out, and each is logged once"

@@ -180,13 +180,60 @@ describe("the refund reconciler migration on a database with refund obligations"
     ]);
   });
 
-  it("refuses a ledger refund obligation without what its re-emit needs", async () => {
-    await expect(
-      client.query(
-        `INSERT INTO order_payments ("paymentId", "orderId", amount, currency, "capturedAt", disposition)
-         VALUES (gen_random_uuid(), $1, 1, 'EUR', now(), 'REFUND_REQUESTED')`,
-        [ids.cancelledOrder],
-      ),
-    ).rejects.toThrow(/order_payments_refund_obligation_complete/);
+  // The migration runs while the old worker still runs, and a rollback runs it again on this
+  // schema: its writes must keep succeeding until a later contract migration (deployment.md).
+  it("accepts the old worker's ledger refund obligation, written without a reason or a last request", async () => {
+    const paymentId = "40000000-0000-4000-8000-000000000006";
+    await client.query(
+      `INSERT INTO order_payments ("paymentId", "orderId", amount, currency, "capturedAt", disposition,
+         "refundRequestedAt")
+       VALUES ($1, $2, 1000, 'EUR', $3, 'REFUND_REQUESTED', $3)`,
+      [paymentId, ids.cancelledOrder, AT],
+    );
+
+    const { rows } = await client.query(
+      `SELECT disposition, "refundReason", "refundLastRequestedAt" FROM order_payments
+       WHERE "paymentId" = $1`,
+      [paymentId],
+    );
+    expect(rows).toEqual([
+      { disposition: "REFUND_REQUESTED", refundReason: null, refundLastRequestedAt: null },
+    ]);
+  });
+
+  it("after a rollback, keeps the old worker's writes working: APPLIED rows, and closing a row the new worker wrote", async () => {
+    const applied = "40000000-0000-4000-8000-000000000007";
+    const newShape = "40000000-0000-4000-8000-000000000008";
+    await client.query(
+      `INSERT INTO order_payments ("paymentId", "orderId", amount, currency, "capturedAt", disposition)
+       VALUES ($1, $2, 1000, 'EUR', $3, 'APPLIED')`,
+      [applied, ids.cancelledOrder, AT],
+    );
+    await client.query(
+      `INSERT INTO order_payments ("paymentId", "orderId", amount, currency, "capturedAt", disposition,
+         "refundRequestedAt", "refundReason", "refundLastRequestedAt")
+       VALUES ($1, $2, 1000, 'EUR', $3, 'REFUND_REQUESTED', $3, 'order_expired', $3)`,
+      [newShape, ids.expiredOrder, AT],
+    );
+
+    // The old saga's payment.refunded update, as on main.
+    const closed = await client.query(
+      `UPDATE order_payments SET disposition = 'REFUNDED'
+       WHERE "paymentId" = $1 AND disposition IN ('REFUND_REQUESTED', 'MANUAL_REVIEW')`,
+      [newShape],
+    );
+    expect(closed.rowCount).toBe(1);
+    // Its own refund obligation, beside the new worker's rows.
+    await client.query(
+      `INSERT INTO order_payments ("paymentId", "orderId", amount, currency, "capturedAt", disposition,
+         "refundRequestedAt")
+       VALUES ('40000000-0000-4000-8000-00000000000a', $1, 1000, 'EUR', $2, 'REFUND_REQUESTED', $2)`,
+      [ids.expiredOrder, AT],
+    );
+    // The old saga's unknown_order refund: an outbox row only, which the reconciler catches up.
+    await request("40000000-0000-4000-8000-000000000009", {
+      correlationId: CORRELATION,
+      payload: { paymentId: "40000000-0000-4000-8000-000000000009", reason: "unknown_order" },
+    });
   });
 });

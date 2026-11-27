@@ -1,10 +1,12 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { Logger } from "@ticketarena/contracts";
 import type { PrismaClient } from "@ticketarena/db";
 import { createPrismaClient } from "@ticketarena/db";
 import { connectJetStreamMessageBus, type MessageBus } from "@ticketarena/messaging";
 import { setupTestDatabase, setupTestNats } from "@ticketarena/test-infra";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createStopBudget } from "./lifecycle.js";
 import { startWorker } from "./worker.js";
 
 // TD-034: a worker that fails to start must leave no relay or consumer runner working against
@@ -176,4 +178,44 @@ describe("startWorker cleanup on a failed start (TD-034)", () => {
     expect(after).toEqual(before);
     expect(await outboxStatus(later)).toBe("PENDING");
   });
+
+  it("rejects within its stop deadline when a started component's stop never settles, naming it", async () => {
+    const stuck = consumer("startup-stuck");
+    const bad = consumer("startup-refused");
+    const lines: Record<string, unknown>[] = [];
+    const logger: Logger = {
+      info: () => undefined,
+      warn: () => undefined,
+      error: (fields, msg) => void lines.push({ ...fields, msg }),
+      child: () => logger,
+    };
+    const hangingBus: MessageBus = {
+      ensureTopology: () => bus.ensureTopology(),
+      close: () => bus.close(),
+      publish: (input) => bus.publish(input),
+      subscribe: async (spec) => {
+        if (spec.consumer === bad.consumer) {
+          throw new Error(`subscribe ${spec.consumer} refused`);
+        }
+        // A pull that never returns: the runner's in-flight fetch keeps its stop from settling.
+        return { fetch: () => new Promise(() => undefined) };
+      },
+    };
+
+    // The test timeout is the sabotage check: without the deadline the rejection never comes.
+    await expect(
+      startWorker({
+        bus: hangingBus,
+        prisma,
+        port: 0,
+        logger,
+        consumers: [stuck, bad],
+        relay: { intervalMs: 5 },
+        stopBudget: createStopBudget(500),
+      }),
+    ).rejects.toThrow(`subscribe ${bad.consumer} refused`);
+    expect(lines).toContainEqual(
+      expect.objectContaining({ pending: [`consumer:${stuck.consumer}`], deadlineMs: 500 }),
+    );
+  }, 5_000);
 });

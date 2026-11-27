@@ -1,3 +1,4 @@
+export { buyerContactSchema } from "./buyer-contact";
 export type { CausedEventInput, JsonValue } from "./caused-event";
 export { type Envelope, envelopeSchema } from "./envelope";
 export { type HoldExpiredPayload, holdExpiredPayloadSchema } from "./hold-expired";

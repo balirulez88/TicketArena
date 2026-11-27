@@ -1,5 +1,5 @@
 import type { Logger } from "@ticketarena/contracts";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_SHUTDOWN_DEADLINE_MS,
   shutdownWorkerProcess,
@@ -45,37 +45,135 @@ function recordingComponent(name: string, order: string[]): WorkerComponent {
 }
 
 describe("startWorkerProcess", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("turns a failed start into a logged error, closes the resources and exits non-zero", async () => {
     const { logger, lines } = recordingLogger();
     const { exit, codes } = recordingExit();
     const closed: string[] = [];
     const failure = new Error("worker health server cannot listen on port 8080");
 
-    const worker = await startWorkerProcess({
-      start: async () => {
+    const started = await startWorkerProcess({
+      start: async (opened) => {
+        opened(recordingComponent("prisma", closed));
+        opened(recordingComponent("bus", closed));
         throw failure;
       },
-      resources: [[recordingComponent("bus", closed)], [recordingComponent("prisma", closed)]],
       logger,
       exit,
     });
 
-    expect(worker).toBeUndefined();
+    expect(started).toBeUndefined();
     expect(lines).toContainEqual(
       expect.objectContaining({ level: "error", err: failure, msg: "worker failed to start" }),
     );
+    // Closed in reverse order of opening: the bus before the database it relays from.
     expect(closed).toEqual(["bus", "prisma"]);
     expect(codes).toEqual([1]);
   });
 
-  it("returns the started worker and does not exit", async () => {
+  it("closes what was opened before the NATS connect failed, and exits non-zero", async () => {
+    const { logger, lines } = recordingLogger();
+    const { exit, codes } = recordingExit();
+    const closed: string[] = [];
+    const refused = new Error("connect ECONNREFUSED 127.0.0.1:4222");
+
+    await startWorkerProcess({
+      start: async (opened) => {
+        opened(recordingComponent("prisma", closed));
+        opened(recordingComponent("redis", closed));
+        throw refused;
+      },
+      logger,
+      exit,
+    });
+
+    expect(lines).toContainEqual(
+      expect.objectContaining({ level: "error", err: refused, msg: "worker failed to start" }),
+    );
+    expect(closed).toEqual(["redis", "prisma"]);
+    expect(codes).toEqual([1]);
+  });
+
+  it("bounds the cleanup of a failed start by the 25 s budget, naming the resource that did not close", async () => {
+    vi.useFakeTimers();
+    const { logger, lines } = recordingLogger();
+    const { exit, codes } = recordingExit();
+    const closed: string[] = [];
+
+    const outcome = startWorkerProcess({
+      start: async (opened) => {
+        opened(recordingComponent("prisma", closed));
+        opened({ name: "bus", stop: () => new Promise<void>(() => undefined) });
+        throw new Error("subscribe refused");
+      },
+      logger,
+      exit,
+    });
+    await vi.advanceTimersByTimeAsync(DEFAULT_SHUTDOWN_DEADLINE_MS - 1);
+    expect(codes).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(await outcome).toBeUndefined();
+    expect(codes).toEqual([1]);
+    expect(lines).toContainEqual(
+      expect.objectContaining({
+        level: "error",
+        pending: ["bus"],
+        deadlineMs: DEFAULT_SHUTDOWN_DEADLINE_MS,
+      }),
+    );
+    expect(closed).toEqual([]);
+  });
+
+  it("spends one 25 s budget on the worker's cleanup and the resources: a stuck component and a stuck resource exit at 25 s, not 50 s", async () => {
+    vi.useFakeTimers();
+    const { logger, lines } = recordingLogger();
+    const { exit, codes } = recordingExit();
+    const never = () => new Promise<void>(() => undefined);
+
+    const outcome = startWorkerProcess({
+      // What startWorker does on a failed start: stop what it started from the shared budget, then reject.
+      start: async (opened, stopBudget) => {
+        opened({ name: "bus", stop: never });
+        await stopBudget.stop([[{ name: "consumer:stuck", stop: never }]], logger);
+        throw new Error("subscribe refused");
+      },
+      logger,
+      exit,
+    });
+    await vi.advanceTimersByTimeAsync(DEFAULT_SHUTDOWN_DEADLINE_MS - 1);
+    expect(codes).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(await outcome).toBeUndefined();
+    expect(codes).toEqual([1]);
+    expect(lines).toContainEqual(
+      expect.objectContaining({ level: "error", pending: ["consumer:stuck"] }),
+    );
+    expect(lines).toContainEqual(expect.objectContaining({ level: "error", pending: ["bus"] }));
+  });
+
+  it("returns the started worker with its resources in stop order, and does not exit", async () => {
     const { logger } = recordingLogger();
     const { exit, codes } = recordingExit();
     const running = { port: 1, components: [], stop: async () => undefined };
+    const prisma = recordingComponent("prisma", []);
+    const bus = recordingComponent("bus", []);
 
     expect(
-      await startWorkerProcess({ start: async () => running, resources: [], logger, exit }),
-    ).toBe(running);
+      await startWorkerProcess({
+        start: async (opened) => {
+          opened(prisma);
+          opened(bus);
+          return running;
+        },
+        logger,
+        exit,
+      }),
+    ).toEqual({ worker: running, resources: [[bus], [prisma]] });
     expect(codes).toEqual([]);
   });
 });

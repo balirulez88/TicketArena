@@ -14,4 +14,12 @@
 - [x] Outbox lag (age of the oldest `PENDING` row) is computable for the dashboard.
 - [x] TD-036: `ensureTopology()` falls back to updating a stream only when adding it fails because the stream already exists; any other `add` failure (for example invalid configuration, or the broker unreachable) propagates with its original cause, and no update is attempted (tests against real NATS for both). Sabotage: restoring the bare `catch {}` around the add turns the second test red.
 - [x] The delivery guarantee and its bounds (7-day `max_age`, single-node disk loss) are documented in `docs/messaging`.
-- [ ] Every entry in `docs/technical-debt.md` whose Target is ticket 26 (TD-036) is `RESOLVED`, with the tests that prove it named in `Verification` (the host refuses the merge otherwise).
+- [x] ~~Every entry in `docs/technical-debt.md` whose Target is ticket 26 (TD-036) is `RESOLVED`, with the tests that prove it named in `Verification`.~~ Superseded by [ADR 0024](../../docs/adr/0024-frozen-debt-register-check.md) (Q1): the register is frozen and never edited; the evidence is recorded below instead.
+
+## Evidence (ADR 0024: TD-036)
+
+`ensureTopology()` falls back to `streams.update` only on `JetStreamApiError` code `STREAM_NAME_EXISTS` and rethrows every other `add` failure unchanged (`packages/messaging/src/jetstream-message-bus.ts`). Tests against real NATS, in `packages/messaging/src/jetstream-message-bus.test.ts` (`JetStream topology failures (TD-036)`):
+
+- Fallback: "falls back to update only when the stream already exists with another configuration"
+- Failure propagation: "propagates any other add failure with its original cause and attempts no update"
+- Failure propagation: "propagates an unreachable broker's failure from the add"

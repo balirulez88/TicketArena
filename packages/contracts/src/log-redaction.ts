@@ -7,17 +7,27 @@
  * structured case: an order's `contactEmail`, an event's `contact.phone`, a notification's
  * `recipient`), and a contact detail inside free text by its shape (the case TD-048 names: an
  * error message or stack that embeds a query argument). The value rule errs towards
- * over-redaction: any run of 7 or more digits that is not part of an id is treated as a phone.
+ * over-redaction: any run of 7 or more digits that is not part of an id or an IPv4 address is
+ * treated as a phone.
  */
+import { IPV4_LEAD } from "./buyer-contact";
+
 export const REDACTED = "[Redacted]";
 
 // contactEmail, buyerEmail, e-mail, contactPhone, phoneNumber, recipient (an email or a phone).
 const CONTACT_KEY = /e-?mail|phone|recipient/i;
-const EMAIL_IN_TEXT = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
-// 7+ digits with optional +, parentheses, spaces or dashes; never adjacent to a word character or
-// dash, so the digit runs inside UUIDs and ISO timestamps are left alone. Dots are not separators,
-// so IP addresses and versions survive.
-const PHONE_IN_TEXT = /(?<![\w-])\+?\(?\d(?:[\s()-]{0,2}\d){6,}(?![\w-])/g;
+// The local part takes every character `z.email()` (the checkout's email rule) accepts, so no
+// accepted address is only partly masked.
+const EMAIL_IN_TEXT = /[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
+// 7+ digits with an optional leading + and (, separated by spaces, dots, dashes or parentheses:
+// every phone format `buyerContactSchema` accepts. A match never starts next to a word character
+// or a dash and never ends before a word character or a dash glued to one, so the digit runs inside
+// UUIDs and ISO timestamps are left alone; an IPv4 address (which the checkout refuses as a phone)
+// is skipped whole, and no match restarts inside one, so addresses stay readable.
+const PHONE_IN_TEXT = new RegExp(
+  String.raw`(?<![\w-]|\d\.)(?!${IPV4_LEAD})\+?\(?\d(?:[\s().-]*\d){6,}(?!\w|-\w)`,
+  "g",
+);
 
 function redactText(text: string): string {
   return text.replace(EMAIL_IN_TEXT, REDACTED).replace(PHONE_IN_TEXT, REDACTED);

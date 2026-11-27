@@ -33,6 +33,7 @@ afterAll(async () => {
 });
 
 const REFUNDED_AT = new Date("2027-03-01T12:10:00.000Z");
+const REANNOUNCED_AT = new Date("2027-03-01T12:25:00.000Z");
 const handler = createRefundHandler({ clock: { now: () => REFUNDED_AT }, newId: randomUUID });
 
 function refundRequested(
@@ -83,6 +84,7 @@ async function refundRunner() {
 function refundedEventsFor(paymentId: string) {
   return prisma.paymentOutboxEvent.findMany({
     where: { eventType: "payment.refunded", aggregateId: paymentId },
+    orderBy: { createdAt: "asc" },
   });
 }
 
@@ -164,25 +166,46 @@ describe("mock Payment refund handler", () => {
     expect(refunded?.payload).not.toHaveProperty("payload.contact");
   });
 
-  it("AT-23: a duplicate payment.refund_requested under a new event id yields one refund row and one payment.refunded", async () => {
+  it("AT-23: a duplicate payment.refund_requested under a new event id refunds nothing twice and re-announces the executed refund", async () => {
     const request = refundRequested();
     const first = request.envelope(randomUUID());
     const duplicate = request.envelope(randomUUID());
     const { runner, subject, consumer } = await refundRunner();
+    await bus.publish({ subject, data: JSON.stringify(first), msgId: first.id });
+    await runner.pollOnce();
 
-    for (const message of [first, duplicate]) {
-      await bus.publish({ subject, data: JSON.stringify(message), msgId: message.id });
-      await runner.pollOnce();
-    }
+    // Later, a re-emit by Booking's reconciler, whose clock has moved on.
+    const later = createRefundHandler({ clock: { now: () => REANNOUNCED_AT }, newId: randomUUID });
+    await prisma.$transaction((tx) =>
+      later(tx, { data: JSON.stringify(duplicate) }, { emit: paymentOutboxEmit(tx) }),
+    );
 
-    expect(await prisma.paymentProcessedMessage.count({ where: { consumer } })).toBe(2);
-    expect(await prisma.paymentRefund.count({ where: { paymentId: request.paymentId } })).toBe(1);
-    expect(await refundedEventsFor(request.paymentId)).toMatchObject([
-      { payload: { causationId: first.id } },
-    ]);
+    expect(await prisma.paymentProcessedMessage.count({ where: { consumer } })).toBe(1);
+    expect(
+      await prisma.paymentRefund.findMany({ where: { paymentId: request.paymentId } }),
+    ).toMatchObject([{ refundedAt: REFUNDED_AT }]);
+    const [original, reannounced, ...more] = await refundedEventsFor(request.paymentId);
+    expect(more).toEqual([]);
+    expect(original?.payload).toMatchObject({ causationId: first.id });
+    // The same refund, announced again: the facts of the executed refund, a new event id.
+    expect(reannounced?.id).not.toBe(original?.id);
+    expect(reannounced?.payload).toMatchObject({
+      type: "payment.refunded",
+      occurredAt: REANNOUNCED_AT.toISOString(),
+      orderId: request.orderId,
+      holdId: request.holdId,
+      payload: {
+        paymentId: request.paymentId,
+        orderId: request.orderId,
+        amount: 12_500,
+        currency: "EUR",
+        refundedAt: REFUNDED_AT.toISOString(),
+        contact: { email: "buyer+late@example.com" },
+      },
+    });
   });
 
-  it("AT-23: two duplicates that race yield one refund row and one payment.refunded", async () => {
+  it("AT-23: two duplicates that race yield one refund row, announced by each", async () => {
     const request = refundRequested();
     const first = { data: JSON.stringify(request.envelope(randomUUID())) };
     const duplicate = { data: JSON.stringify(request.envelope(randomUUID())) };
@@ -227,7 +250,17 @@ describe("mock Payment refund handler", () => {
     await Promise.all([winner, racer]);
 
     expect(await prisma.paymentRefund.count({ where: { paymentId: request.paymentId } })).toBe(1);
-    expect(await refundedEventsFor(request.paymentId)).toHaveLength(1);
+    // The racer waited for the winner's row, skipped its insert and re-announced that refund.
+    const announced = await refundedEventsFor(request.paymentId);
+    expect(announced).toHaveLength(2);
+    expect(announced.map((event) => event.payload)).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({ refundedAt: REFUNDED_AT.toISOString() }),
+      }),
+      expect.objectContaining({
+        payload: expect.objectContaining({ refundedAt: REFUNDED_AT.toISOString() }),
+      }),
+    ]);
   });
 
   it("rejects a request whose payload is invalid, writing nothing", async () => {

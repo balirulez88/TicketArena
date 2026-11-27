@@ -109,6 +109,39 @@ properties (volume and `store_dir`, `sync_interval`, no public services, the wor
 health check, the job order, `vercel.json`), and run the worker's `[env]` plus sample secrets
 through `parseWorkerEnv`.
 
+### Refund cutover
+
+The refund obligation migrations (`20261127000000_orphan_refund_obligations`,
+`20261128000000_refund_reconciler`) are staged, because the previous worker keeps running after
+`migrate` until `worker` replaces it, and an emergency rollback runs it on the migrated schema
+again. That worker writes a ledger refund obligation without `refundReason` and
+`refundLastRequestedAt`, and an `unknown_order` refund as its outbox row only, with no orphan
+obligation.
+
+1. **Expand (these migrations).** New tables and columns only. On `order_payments`,
+   `refundReason` and `refundLastRequestedAt` are nullable and no CHECK requires them, so the
+   previous worker's writes succeed after the migration and after a rollback. The
+   `orphan_refund_obligations` columns can be `NOT NULL`: only the new worker writes that table.
+   Each migration backfills what exists when it runs.
+2. **New worker.** It writes complete ledger rows and the orphan obligations itself, in the same
+   transaction as the request. Every reconciler pass (at start-up, then every 5 minutes) first runs
+   an idempotent catch-up (`packages/booking/src/refund-reconciler.ts`): it fills the missing
+   fields of any incomplete ledger row by the migration's rules and creates the orphan obligation
+   for any `unknown_order` request that has none, from the payment's earliest request. So rows the
+   previous worker wrote during the cutover, or during a rollback, become complete obligations on
+   the next pass. Until then nothing is lost: the reconciler cannot claim a row without
+   `refundLastRequestedAt`, and the request's outbox row still exists.
+3. **Contract (deferred to a later migration).** The CHECK that every non-`APPLIED` ledger row
+   carries `refundReason`, `refundRequestedAt` and `refundLastRequestedAt` is added only once no
+   release older than these migrations can run: after a later release is live, so the rollback
+   target already writes complete rows. The same change removes the catch-up, which scans the
+   outbox's `payment.refund_requested` rows on every pass. It has no ticket yet.
+
+Tests: `packages/db/src/refund-reconciler-migration.test.ts` (the previous worker's writes after the
+migration and after a rollback), `packages/booking/src/refund-cutover.test.ts` (the catch-up) and
+`apps/worker/src/refund-recovery-flow.test.ts` (a backfilled orphan obligation whose refund had
+completed converges to `REFUNDED`).
+
 ## One-time setup runbook
 
 Done once by a maintainer with accounts on each platform. Names below are the defaults in the
@@ -163,8 +196,9 @@ From then on every push to `main` that passes CI deploys itself.
 - **Stopping.** Fly sends SIGTERM and kills after `kill_timeout = "30s"`. The worker stops its
   loops and connections within `DEFAULT_SHUTDOWN_DEADLINE_MS` (25 s, `apps/worker/src/lifecycle.ts`),
   then exits 0; a failed stop or the deadline exits 1 and logs the component (`worker did not stop
-  within ...`). A start that fails (for example the health port is taken) logs `worker failed to
-  start` and exits 1.
+  within ...`). A start that fails (for example the health port is taken or NATS is unreachable) logs
+  `worker failed to start`, stops what it started and closes what it had opened within one shared 25 s budget
+  (naming any part that did not stop) and exits 1.
 - **Logs.** `fly logs --app ticketarena-worker` (pino JSON, `correlationId` per flow); Vercel →
   Project → Logs for the web app.
 - **Rollback.** The default is a revert commit pushed to `main`: it passes CI and deploys like any

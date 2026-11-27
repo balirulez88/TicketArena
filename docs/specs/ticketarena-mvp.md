@@ -323,8 +323,9 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
 - Ledger disposition transitions: `REFUND_REQUESTED → REFUNDED | MANUAL_REVIEW`;
   `MANUAL_REVIEW → REFUND_REQUESTED | REFUNDED`. `APPLIED` is terminal in the MVP.
 - Execution: the Payment consumer refunds idempotently (unique `paymentId` in `payment.refunds`)
-  and emits `payment.refunded` only when its insert wrote the row, so a duplicate request (a new
-  event id) refunds nothing and emits nothing; transient failures follow the retry schedule, then
+  and answers every request with `payment.refunded` built from that row, so a duplicate request (a
+  new event id) refunds nothing and re-announces the refund already executed (its `refundedAt`),
+  which lets a lost confirmation be recovered; transient failures follow the retry schedule, then
   the DLQ. Every request is executed; an `unknown_order` request has no contact, and its
   `payment.refunded` carries none.
 - Reconciler (worker, every 5 min): each `REFUND_REQUESTED` row whose last request (first request,
@@ -616,8 +617,8 @@ Saga and money
 - AT-21 Second payment on a confirmed order (`+double@`) → second payment refunded; exactly one
   `APPLIED`.
 - AT-22 Amount mismatch → refund, not confirmation.
-- AT-23 Refund idempotency: duplicate `payment.refund_requested` → one refund row, one
-  `payment.refunded`.
+- AT-23 Refund idempotency: duplicate `payment.refund_requested` → one refund row; each duplicate
+  re-announces that refund (`payment.refunded` with the original `refundedAt`).
 - AT-24 Reconciler: a `REFUND_REQUESTED` row older than 10 min is re-emitted; after 3 re-emits it
   becomes `MANUAL_REVIEW`; admin retry moves it back.
 - AT-25 `decide()` matrix: every cell of the matrix, including poison for unknown orders/payments.

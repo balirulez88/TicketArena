@@ -809,7 +809,7 @@ The last AC asks to mark TD-036 RESOLVED in docs/technical-debt.md, but CLAUDE.m
 
 Assumed: CLAUDE.md wins, as for ticket 14: the register is not edited; the TD-036 tests are named in the commit message and a human updates TD-036 if wanted
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): Apply ADR 0024; record the fallback and failure-propagation tests in ticket 26.
 
 ## 2026-11-26 17:29 ticket 43
 
@@ -817,7 +817,7 @@ The last AC asks to mark TD-001, TD-003, TD-010, TD-011 and TD-028 RESOLVED in d
 
 Assumed: CLAUDE.md wins, as for tickets 14 and 26: the register is not edited; the verifying tests are named in the commit message and a human updates the entries
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): Apply ADR 0024; record all five verification cases in ticket 43, including price and currency preservation.
 
 ## 2026-11-26 19:36 ticket 43
 
@@ -825,7 +825,7 @@ Fix TD-028 by editing the unique venues.name migration or by adding a new one?
 
 Assumed: A new migration 20261030025000_merge_duplicate_venues runs just before the unique index; the applied migration is untouched (no checksum change); lowest-id venue survives, same-name sections and same-label rows merge into the survivor's, no seat is deleted
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): A separate migration before the unique index, the original migration's checksum preserved. The lowest venue ID survives; same-name sections merge only when price and currency match; a conflict aborts with an actionable error; every seat is preserved.
 
 ## 2026-11-26 19:36 ticket 43
 
@@ -833,7 +833,7 @@ Where does the seed command live once packages/db stops reading process.env?
 
 Assumed: apps/worker (pnpm --filter @ticketarena/worker db:seed), validated by parseSeedEnv; the URL is not a CLI argument so the secret stays out of the process list
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): pnpm --filter @ticketarena/worker db:seed; the entry point validates DATABASE_URL from the environment and imports the seeder from @ticketarena/db/seed.
 
 ## 2026-11-26 19:36 ticket 43
 
@@ -841,7 +841,7 @@ How is the database made lazy for procedures that do not use it?
 
 Assumed: ctx.db becomes a function () => PrismaClient (not a getter, since tests spread the context); the env scan skips packages/test-infra and the generated Prisma client
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): ctx.db(), one successfully initialized client shared per process; the first DB-using procedure validates config; generated Prisma code and the test infrastructure environment boundary are exempt from the scan.
 
 ## 2026-11-26 19:38 ticket 45
 
@@ -849,7 +849,7 @@ The last AC asks to mark TD-031 and TD-032 RESOLVED in docs/technical-debt.md, b
 
 Assumed: CLAUDE.md wins, as for tickets 14, 26 and 43: the register is not edited; the verifying tests are named in the commit message and a human updates the entries
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): Apply ADR 0024; record the logging and recovery tests in ticket 45; ticket 25 owns the poison-message DLQ gate.
 
 ## 2026-11-26 19:44 ticket 45
 
@@ -857,7 +857,7 @@ How are repeated identical relay/consumer failures rate-limited?
 
 Assumed: First failure and any new cause (error name+message) log at error; the same cause logs at most once per 60 s (FAILURE_LOG_WINDOW_MS) with failures/suppressed counts; recovery logs one info line with failures and outageMs; shared by relay and consumer runner
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): The first occurrence logs at error, repeats at most once per 60 s per cause (alternating causes included), and one recovery line carries the failure count and outage duration.
 
 ## 2026-11-26 19:53 ticket 24
 
@@ -865,7 +865,7 @@ What delay applies past the 4th delivery?
 
 Assumed: 2m repeats for every later delivery; ending retries is ticket 25's DLQ gate (deliveryCount > 5), which goes before the handler and leaves RETRY_DELAYS_MS alone
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): Two minutes for the fifth and later failed deliveries until the DLQ gate lands; ticket 25 runs the deliveryCount > 5 gate before the handler.
 
 ## 2026-11-26 19:55 ticket 46
 
@@ -873,7 +873,7 @@ The last AC asks to mark TD-034 and TD-035 RESOLVED in docs/technical-debt.md, b
 
 Assumed: CLAUDE.md wins, as for tickets 14, 26, 43 and 45: the register is not edited; the verifying tests are named in the commit message and a human updates the entries
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): Apply ADR 0024; record the startup and shutdown evidence in ticket 46, including the bounded partial-start cleanup test.
 
 ## 2026-11-26 20:07 ticket 46
 
@@ -881,7 +881,7 @@ What is the worker's shutdown deadline and how is it configured?
 
 Assumed: DEFAULT_SHUTDOWN_DEADLINE_MS = 25000 in apps/worker/src/lifecycle.ts (under Fly's 30 s kill_timeout), overridable via a deadlineMs option, no env variable; one deadline for the whole ordered shutdown; a relay tick cut off at the deadline rolls back and its rows stay PENDING
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): One 25 s shutdown budget, below Fly's 30 s; a test-injectable option is enough; failed-start cleanup is bounded too and the log names the stuck component.
 
 ## 2026-11-26 20:09 ticket 51
 
@@ -889,7 +889,7 @@ The last AC asks to mark TD-048 RESOLVED in docs/technical-debt.md, but CLAUDE.m
 
 Assumed: CLAUDE.md wins, as for tickets 14, 26, 43, 45 and 46: the register is not edited; the verifying tests are named in the commit message and a human updates the entry
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): Apply ADR 0024; record worker, web and actual tRPC route redaction evidence in ticket 51.
 
 ## 2026-11-26 20:18 ticket 51
 
@@ -897,7 +897,7 @@ Redact buyer contact details by key, by value pattern, or both?
 
 Assumed: Both, in one shared redactLogLine in packages/contracts applied via pino streamWrite: keys matching /e-?mail|phone|recipient/i become [Redacted] at any depth, and emails or 7+ digit phone-like runs inside any string are redacted; over-redaction of bare long numbers is accepted
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): Both: structured contact keys are masked, and contact data in free text (error messages and stacks included), covering every format checkout accepts.
 
 ## 2026-11-26 20:20 ticket 57
 
@@ -905,7 +905,7 @@ The last AC asks to mark TD-070 RESOLVED in docs/technical-debt.md, but CLAUDE.m
 
 Assumed: CLAUDE.md wins, as for the earlier tickets of this run: the register is not edited; the verifying tests are named in the commit message and a human updates the entry
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): Apply ADR 0024; record the holdSeats and placeOrder metrics-wiring evidence in ticket 57.
 
 ## 2026-11-26 20:31 ticket 57
 
@@ -913,7 +913,7 @@ What do holdSeats and placeOrder do when Upstash is missing or misconfigured?
 
 Assumed: Book uncounted (optionalMetrics, as admin.runRace does); the lazy metrics dependency logs the configuration error once at the boundary, not per request
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): Counters are best effort: the booking proceeds uncounted and the metrics config error is logged once per process; admission keeps its existing token and Redis rules.
 
 ## 2026-11-27 07:03 ticket 70
 
@@ -921,7 +921,7 @@ Shape of the orphan refund obligation, and are existing unknown_order outbox row
 
 Assumed: Table public.orphan_refund_obligations keyed by paymentId (orderId without FK, amount, currency, capturedAt, status REFUND_REQUESTED|REFUNDED, refundRequestedAt); the PK insert replaces the advisory lock; existing unknown_order outbox rows are backfilled as open obligations from the earliest request, capturedAt = occurredAt; MANUAL_REVIEW and attempts are left to ticket 23
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): One Booking-owned row per paymentId with no order FK, written with the outbox event in one transaction; backfilled from the earliest request, occurredAt documented as the historical capture-time proxy. Completed confirmations are recovered via Payment re-announcing the outcome, and requests written during the cutover are caught by a catch-up backfill.
 
 ## 2026-11-27 07:30 ticket 23
 
@@ -929,7 +929,7 @@ Which timestamp makes a refund obligation 'older than 10 min', and when does it 
 
 Assumed: A new refundLastRequestedAt (first request, each re-emit, each retry) ages it, so re-emits are >= 10 min apart; refundRequestedAt keeps the first request and drives refund_pending_age_max; with refundAttempts >= 3 the next stale pass moves it to MANUAL_REVIEW, emitting nothing
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): refundLastRequestedAt drives the 10-minute retry window and the first refundRequestedAt the age metric; the third re-emit gets its full 10-minute window and escalation happens on the next eligible pass.
 
 ## 2026-11-27 07:30 ticket 23
 
@@ -937,4 +937,4 @@ What does retryRefund do with the attempt count, and with a row not in MANUAL_RE
 
 Assumed: Resets refundAttempts to 0 (a fresh 3 re-emits) and re-emits; REFUND_NOT_IN_MANUAL_REVIEW for any other status, NOT_FOUND without an obligation; service-level only, the admin endpoint is ticket 36
 
-Answer: (open)
+Answer: Decided (2026-11-27, PR #19 review): Re-emit from MANUAL_REVIEW, reset attempts to zero, keep the first request time. NOT_FOUND for a missing or APPLIED payment with no refund obligation; REFUND_NOT_IN_MANUAL_REVIEW for an obligation in another state; APPLIED is covered by a test. Ticket 36 owns the admin endpoint.

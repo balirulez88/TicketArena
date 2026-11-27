@@ -13,6 +13,7 @@ import {
   NotOnSaleError,
   SeatUnavailableError,
 } from "@ticketarena/booking";
+import { buyerContactSchema } from "@ticketarena/contracts";
 import type { QueueService } from "@ticketarena/waiting-room";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
@@ -42,7 +43,8 @@ const releaseHoldInput = z.object({ holdId: z.uuid() });
 
 const placeOrderInput = z.object({
   holdId: z.uuid(),
-  contact: z.object({ email: z.email(), phone: z.string().trim().min(1).max(32).optional() }),
+  // The shared contact rule: every phone and email it accepts is one the log redactor masks.
+  contact: buyerContactSchema,
   idempotencyKey: z.uuid(),
 });
 

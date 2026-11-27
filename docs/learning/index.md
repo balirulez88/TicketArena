@@ -36,3 +36,4 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [23: Refund reconciler és manual review](23-refund-reconciler.md): stale obligation re-emit outboxon át, `SKIP LOCKED`, 3 re-emit után `MANUAL_REVIEW`, `retryRefund`, AT-24
 - [59: Terminális outbox hibák](59-terminal-outbox-failures.md): tartós vs átmeneti publish hiba, `FAILED` végállapot cap-pel, aggregátum elengedése, requeue az eredeti id-n, append-only history, health alert
 - [25: Dead-letter queue routing](25-dead-letter-queue.md): kapu a handler előtt, `deliveryCount > 5`, séma és verzió ellenőrzés, `dlq:<consumer>:<id>` dedupe, `term` csak PubAck után, sikertelen publish `nak(2m)`
+- [27: Consumer recovery és outbox re-publish](27-consumer-recovery-and-outbox-republish.md): ack floor, checkpoint scan, legkorábbi start, soha nem skippelünk, outbox re-publish eredeti id-n, 14 napos retention

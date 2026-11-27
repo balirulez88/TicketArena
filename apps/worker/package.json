@@ -8,6 +8,8 @@
     "start": "tsx src/main.ts",
     "db:seed": "tsx src/seed-main.ts",
     "outbox:requeue": "tsx src/outbox-requeue-main.ts",
+    "outbox:republish": "tsx src/outbox-republish-main.ts",
+    "consumer:recover": "tsx src/consumer-recover-main.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

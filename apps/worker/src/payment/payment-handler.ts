@@ -83,11 +83,23 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
   async function handleOrderPlaced(
     tx: TransactionClient,
     message: ReceivedMessage,
-    { emit }: HandlerContext,
+    context: HandlerContext,
   ): Promise<undefined> {
     const placed = orderPlacedEnvelope.parse(JSON.parse(message.data));
-    const order = placed.payload;
     const at = deps.clock.now();
+    if (!deadlinePassed(placed.payload, at)) {
+      await attemptPayment(tx, placed, at, context);
+    }
+    return undefined;
+  }
+
+  async function attemptPayment(
+    tx: TransactionClient,
+    placed: ReturnType<typeof orderPlacedEnvelope.parse>,
+    at: Date,
+    { emit }: HandlerContext,
+  ): Promise<void> {
+    const order = placed.payload;
     const paymentId = deps.newId();
     const outcome = attemptOutcome(order.contact.email);
     const attempt = {
@@ -105,7 +117,7 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
       ? { status: "CAPTURED" as const, capturedAt: captureTime(order, at) }
       : { status: "FAILED" as const, failureReason: outcome.reason };
     if (!(await recordAttempt(tx, { ...attempt, ...settled }))) {
-      return undefined;
+      return;
     }
 
     let result: { type: "payment.succeeded" | "payment.failed"; payload: JsonValue };
@@ -188,6 +200,22 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
       );
       return false;
     }
+    return true;
+  }
+
+  /**
+   * ADR 0011: a recovery replay can deliver order.placed long after its deadline. The order can no
+   * longer be paid (booking expires it), so charging now would only capture money to refund. The
+   * caller acks it as handled: the dedupe row commits, nothing else is written.
+   */
+  function deadlinePassed(order: { orderId: string; paymentDeadline: string }, at: Date): boolean {
+    if (at.getTime() <= new Date(order.paymentDeadline).getTime()) {
+      return false;
+    }
+    logger.info(
+      { orderId: order.orderId, paymentDeadline: order.paymentDeadline },
+      "order.placed skipped: its payment deadline has passed",
+    );
     return true;
   }
 

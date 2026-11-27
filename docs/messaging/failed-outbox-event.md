@@ -52,7 +52,9 @@ record that it was not delivered.
 
 Before requeueing an event whose later events were already delivered, check ADR 0022's table: every
 current consumer either applies the earlier event correctly when it arrives late or refuses it
-without a change, so a requeue converges to the in-order end state.
+without a change, so a requeue converges to the in-order end state. A later event that a consumer
+refused as `poison` was dead-lettered; once the requeued event is consumed, replay it by recreating
+that consumer ([consumer recovery runbook](consumer-recovery.md#replaying-a-dead-lettered-message)).
 
 ## 4. Requeue
 

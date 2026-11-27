@@ -986,3 +986,27 @@ DLQ body shape and failure delay?
 Assumed: DeadLetter {consumer, subject, streamSeq, deliveryCount, error {cause, message}, envelope as the raw data string}; envelope id = Nats-Msg-Id; a failed DLQ publish naks a fixed 2 min indefinitely; budget gate runs before the dedupe check per ADR 0011
 
 Answer: (open)
+
+## 2026-11-27 13:40 ticket 27
+
+What does outbox re-publish select and record?
+
+Assumed: Only PUBLISHED rows by publishedAt in [from, to), back to PENDING under original ids, publishedAt cleared, permanentFailures reset, a PUBLISHED->PENDING history entry with operator and reason; FAILED/PENDING untouched
+
+Answer: (open)
+
+## 2026-11-27 13:40 ticket 27
+
+What does the 14-day retention keep?
+
+Assumed: Hourly pruneRetention ages outbox rows by publishedAt; never deletes PENDING/FAILED, any row with history (kept for good), or unknown_order refund requests without an orphan obligation; no new indexes
+
+Answer: (open)
+
+## 2026-11-27 13:40 ticket 27
+
+When is a processed_messages checkpoint reliable, and how is a dead-lettered message replayed?
+
+Assumed: Reliable when the stream's first retained message is newer than the 14-day retention; an ack floor under another filter is ignored; --ignore-ack-floor replays a terminated (dead-lettered) message
+
+Answer: (open)

@@ -40,7 +40,7 @@ below shows what is built.
 | ------------------- | --------------------------------------------- | -------------------------------------- |
 | Monorepo & modules  | scaffolded                                    | [architecture/](architecture/index.md) |
 | Database & Prisma   | catalog, holds, orders, payment, notification | [database/](database/index.md)         |
-| Async messaging     | relay and consumer runner                     | [messaging/](messaging/index.md)       |
+| Async messaging     | relay, consumer runner, recovery runbook      | [messaging/](messaging/index.md)       |
 | Agent workflow & CI | operational                                   | [workflow/](workflow/index.md)         |
 | Deployment & ops    | Vercel, Fly.io, Neon, Upstash; setup runbook  | [operations/](operations/index.md)     |
 | Technical debt      | frozen record (harness-v1 era)                | [technical-debt.md](technical-debt.md) |
@@ -86,7 +86,7 @@ below shows what is built.
   `booking.holdSeats` / `booking.getHold` / `booking.activeHold` / `booking.releaseHold` (`packages/booking`), which write
   `seat.held` and `hold.released` outbox events; the worker's sweeper expires abandoned holds every 15 s and writes `hold.expired`, and expires unpaid orders at `paymentDeadline + 60 s` (`order.expired`, seats freed); `orders` and `order_lines` back `booking.placeOrder` / `booking.getOrder`, which write
   `order.placed`; envelope schemas live in `packages/contracts`.
-- `packages/messaging` and `apps/worker`: the `MessageBus` port with its JetStream adapter, the outbox relay (250 ms, batch of 100; a full stream rejects publishes and the rows wait `PENDING`, measured as outbox lag; a row that fails permanently 5 times becomes `FAILED`, keeps its payload and history, releases its aggregate, raises the `/health` alert and is recovered by `outbox:requeue`, [ADR 0022](adr/0022-terminal-failed-outbox-events.md)), the consumer runner, the sweeper, the waiting-room admission ticker and reaper, and the worker app with `/health`.
+- `packages/messaging` and `apps/worker`: the `MessageBus` port with its JetStream adapter, the outbox relay (250 ms, batch of 100; a full stream rejects publishes and the rows wait `PENDING`, measured as outbox lag; a row that fails permanently 5 times becomes `FAILED`, keeps its payload and history, releases its aggregate, raises the `/health` alert and is recovered by `outbox:requeue`, [ADR 0022](adr/0022-terminal-failed-outbox-events.md)), the consumer runner, consumer recovery (`consumer:recover` recreates a durable by ADR 0011's rules: ack floor, `processed_messages` checkpoint scan, earliest; `outbox:republish` re-sends `PUBLISHED` rows of a time range under their original ids; an hourly retention job deletes published outbox rows and `processed_messages` after 14 days; [runbook](messaging/consumer-recovery.md)), the sweeper, the waiting-room admission ticker and reaper, and the worker app with `/health`.
 - `packages/waiting-room`: `QueueService` with the `QueueStore` port, its node-redis and Upstash
   REST adapters (the same atomic Lua scripts and key layout, configurable key prefix, one shared
   contract suite run against both) and the schedule `AdmissionPolicy`; served as

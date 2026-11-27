@@ -1,5 +1,8 @@
 import {
+  AckPolicy,
   type Consumer,
+  type ConsumerConfig,
+  DeliverPolicy,
   DiscardPolicy,
   JetStreamApiCodes,
   JetStreamApiError,
@@ -18,6 +21,13 @@ import {
   type NatsConnection,
   RequestError,
 } from "@nats-io/transport-node";
+import type {
+  ConsumerAdmin,
+  ConsumerStart,
+  DurableConsumerState,
+  RetainedStreamState,
+  StoredMessageRef,
+} from "./consumer-admin.js";
 import {
   type ConsumerSpec,
   type FetchOptions,
@@ -36,6 +46,11 @@ const MIB = 1024 * 1024;
 const MSG_ID_HEADER = "Nats-Msg-Id";
 // JetStream API error code for "stream name already in use with a different configuration".
 const STREAM_NAME_EXISTS = 10058;
+// JetStream API error code for "consumer already exists" with a different configuration.
+const CONSUMER_EXISTS = 10148;
+// How many messages one pull of the recovery scan asks for, and how long it waits for them.
+const SCAN_BATCH = 256;
+const SCAN_EXPIRES_MS = 1_000;
 // Publish-failure classification (ADR 0022), pinned by publish-failure-classification.test.ts
 // against real NATS (@nats-io 3.4.0):
 // - an oversized payload is refused by the client itself, before anything is sent, with an
@@ -99,6 +114,44 @@ const STREAMS: Readonly<Record<StreamKind, StreamDefinition>> = {
 export async function connectJetStreamMessageBus(
   options: JetStreamMessageBusOptions,
 ): Promise<MessageBus> {
+  const parts = await openJetStream(options);
+  return new JetStreamMessageBus(
+    parts.connection,
+    parts.manager,
+    parts.client,
+    parts.naming,
+    options.streamMaxBytes ?? {},
+  );
+}
+
+/**
+ * The operator's view of the main stream and its durable consumers, for the recreation script
+ * (ADR 0011 consumer recovery). Same connection options and namespacing as the message bus.
+ */
+export async function connectJetStreamConsumerAdmin(
+  options: Omit<JetStreamMessageBusOptions, "streamMaxBytes">,
+): Promise<ConsumerAdmin> {
+  const parts = await openJetStream(options);
+  return new JetStreamConsumerAdmin(parts.connection, parts.manager, parts.client, parts.naming);
+}
+
+/** Stream and subject namespacing shared by the bus and the admin. */
+interface Naming {
+  readonly streamPrefix: string;
+  /** Empty, or the subject prefix followed by its `.`. */
+  readonly subjectPrefix: string;
+}
+
+interface OpenJetStream {
+  readonly connection: NatsConnection;
+  readonly manager: JetStreamManager;
+  readonly client: JetStreamClient;
+  readonly naming: Naming;
+}
+
+async function openJetStream(
+  options: Omit<JetStreamMessageBusOptions, "streamMaxBytes">,
+): Promise<OpenJetStream> {
   const timeout =
     options.requestTimeoutMs === undefined ? {} : { timeout: options.requestTimeoutMs };
   const connection = await connect({
@@ -114,29 +167,51 @@ export async function connectJetStreamMessageBus(
   });
   try {
     const manager = await jetstreamManager(connection, timeout);
-    return new JetStreamMessageBus(
+    return {
       connection,
       manager,
-      jetstream(connection, timeout),
-      options.streamPrefix ?? "",
-      options.subjectPrefix === undefined ? "" : `${options.subjectPrefix}.`,
-      options.streamMaxBytes ?? {},
-    );
+      client: jetstream(connection, timeout),
+      naming: {
+        streamPrefix: options.streamPrefix ?? "",
+        subjectPrefix: options.subjectPrefix === undefined ? "" : `${options.subjectPrefix}.`,
+      },
+    };
   } catch (error) {
     await connection.close();
     throw error;
   }
 }
 
+/**
+ * The durable consumer settings every consumer runs with: explicit acks, no BackOff (it would
+ * override AckWait) and MaxDeliver -1, so the server never gives up on a message by itself; the
+ * application owns the retry budget (ADR 0011). The recreation script creates consumers with
+ * exactly these, adding only where delivery starts.
+ */
+function durableConsumerConfig(consumer: string, filterSubject: string, ackWaitMs: number) {
+  return {
+    durable_name: consumer,
+    ack_policy: "explicit",
+    ack_wait: ackWaitMs * NANOS_PER_MS,
+    max_deliver: -1,
+    filter_subject: filterSubject,
+  } as const satisfies Partial<ConsumerConfig>;
+}
+
 class JetStreamMessageBus implements MessageBus {
+  private readonly streamPrefix: string;
+  private readonly subjectPrefix: string;
+
   constructor(
     private readonly connection: NatsConnection,
     private readonly manager: JetStreamManager,
     private readonly client: JetStreamClient,
-    private readonly streamPrefix: string,
-    private readonly subjectPrefix: string,
+    naming: Naming,
     private readonly streamMaxBytes: Partial<Record<StreamKind, number>>,
-  ) {}
+  ) {
+    this.streamPrefix = naming.streamPrefix;
+    this.subjectPrefix = naming.subjectPrefix;
+  }
 
   async ensureTopology(): Promise<void> {
     for (const kind of ["main", "dlq"] as const) {
@@ -203,15 +278,26 @@ class JetStreamMessageBus implements MessageBus {
 
   async subscribe(spec: ConsumerSpec): Promise<MessageSubscription> {
     const stream = this.streamName(spec.stream);
-    // No BackOff (it would override AckWait) and MaxDeliver -1: the server never gives up on a
-    // message by itself; the application owns the retry budget (ADR 0011).
-    await this.manager.consumers.add(stream, {
-      durable_name: spec.consumer,
-      ack_policy: "explicit",
-      ack_wait: (spec.ackWaitMs ?? DEFAULT_ACK_WAIT_MS) * NANOS_PER_MS,
-      max_deliver: -1,
-      filter_subject: this.subjectPrefix + spec.filterSubject,
-    });
+    const config = durableConsumerConfig(
+      spec.consumer,
+      this.subjectPrefix + spec.filterSubject,
+      spec.ackWaitMs ?? DEFAULT_ACK_WAIT_MS,
+    );
+    try {
+      await this.manager.consumers.add(stream, config);
+    } catch (error) {
+      if (!(error instanceof JetStreamApiError && error.code === CONSUMER_EXISTS)) {
+        throw error;
+      }
+      // The durable exists with another start position: the recreation script placed it there
+      // (ADR 0011 consumer recovery). Where delivery starts can be neither updated nor reset
+      // without losing that, so only the settings that may change converge, in place.
+      await this.manager.consumers.update(stream, spec.consumer, {
+        ack_wait: config.ack_wait,
+        max_deliver: config.max_deliver,
+        filter_subject: config.filter_subject,
+      });
+    }
     const consumer = await this.client.consumers.get(stream, spec.consumer);
     return new JetStreamSubscription(consumer, this.subjectPrefix);
   }
@@ -223,6 +309,142 @@ class JetStreamMessageBus implements MessageBus {
   private streamName(kind: StreamKind): string {
     return this.streamPrefix + STREAMS[kind].name;
   }
+}
+
+class JetStreamConsumerAdmin implements ConsumerAdmin {
+  constructor(
+    private readonly connection: NatsConnection,
+    private readonly manager: JetStreamManager,
+    private readonly client: JetStreamClient,
+    private readonly naming: Naming,
+  ) {}
+
+  async consumerState(consumer: string): Promise<DurableConsumerState | undefined> {
+    try {
+      const info = await this.manager.consumers.info(this.stream(), consumer);
+      return {
+        filterSubject: (info.config.filter_subject ?? "").slice(this.naming.subjectPrefix.length),
+        ackFloorStreamSeq: info.ack_floor.stream_seq,
+      };
+    } catch (error) {
+      if (error instanceof JetStreamApiError && error.code === JetStreamApiCodes.ConsumerNotFound) {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
+  async deleteConsumer(consumer: string): Promise<void> {
+    await this.manager.consumers.delete(this.stream(), consumer);
+  }
+
+  async createConsumer(spec: {
+    readonly consumer: string;
+    readonly filterSubject: string;
+    readonly start: ConsumerStart;
+  }): Promise<void> {
+    const config = durableConsumerConfig(
+      spec.consumer,
+      this.naming.subjectPrefix + spec.filterSubject,
+      DEFAULT_ACK_WAIT_MS,
+    );
+    await this.manager.consumers.add(
+      this.stream(),
+      spec.start === "earliest"
+        ? { ...config, deliver_policy: DeliverPolicy.All }
+        : { ...config, deliver_policy: DeliverPolicy.StartSequence, opt_start_seq: spec.start.seq },
+    );
+  }
+
+  async streamState(): Promise<RetainedStreamState> {
+    const { state } = await this.manager.streams.info(this.stream());
+    return {
+      firstSeq: state.first_seq,
+      lastSeq: state.last_seq,
+      firstTimestamp: state.messages === 0 ? null : new Date(state.first_ts),
+    };
+  }
+
+  async *scan(
+    filterSubject: string,
+    fromSeq: number,
+    toSeq: number,
+  ): AsyncIterable<StoredMessageRef> {
+    if (fromSeq > toSeq) {
+      return;
+    }
+    // An ordered consumer reads without acks and leaves no durable state behind.
+    const reader = await this.client.consumers.get(this.stream(), {
+      filter_subjects: this.naming.subjectPrefix + filterSubject,
+      deliver_policy: DeliverPolicy.StartSequence,
+      opt_start_seq: fromSeq,
+    });
+    // The last stream sequence yielded; the scan has covered everything up to here.
+    let reached = fromSeq - 1;
+    let complete = false;
+    try {
+      let arrived = true;
+      while (!complete && arrived) {
+        const batch = await reader.fetch({ max_messages: SCAN_BATCH, expires: SCAN_EXPIRES_MS });
+        arrived = false;
+        for await (const message of batch) {
+          arrived = true;
+          const streamSeq = message.info.streamSequence;
+          if (streamSeq > toSeq) {
+            complete = true;
+            break;
+          }
+          yield { streamSeq, msgId: storedMsgId(message) };
+          reached = streamSeq;
+          // The last matching message there is, or the end of the range: the scan is complete.
+          complete = streamSeq === toSeq || message.info.pending === 0;
+        }
+      }
+    } finally {
+      await reader.delete();
+    }
+    // A pull that brought nothing proves only that nothing arrived in time (a slow link, an ordered
+    // consumer reset), not that no matching message is left. Recovery reads a finished scan as
+    // "every retained message was seen", so a cut-short scan would skip unprocessed messages
+    // (ADR 0011: replay, never skip). Ask the broker how many matching messages lie past the last
+    // one yielded; if any do, fail instead of ending quietly, and the operator reruns the
+    // recreation. This may also count messages stored after `toSeq`, which only fails safe.
+    if (!complete && (await this.pendingFrom(filterSubject, reached + 1)) > 0) {
+      throw new Error(
+        `Consumer recovery scan of "${filterSubject}" ended early at stream sequence ${reached} ` +
+          `(range ${fromSeq}..${toSeq}) while matching messages remain; nothing was changed, rerun it`,
+      );
+    }
+  }
+
+  /** How many retained messages match `filterSubject` from `fromSeq` on, by a fresh count. */
+  private async pendingFrom(filterSubject: string, fromSeq: number): Promise<number> {
+    // A throwaway consumer: its creation reports the count, and it is deleted straight away
+    // (the inactivity threshold cleans it up should the delete be lost).
+    const probe = await this.manager.consumers.add(this.stream(), {
+      filter_subject: this.naming.subjectPrefix + filterSubject,
+      deliver_policy: DeliverPolicy.StartSequence,
+      opt_start_seq: fromSeq,
+      ack_policy: AckPolicy.None,
+      inactive_threshold: 60_000 * NANOS_PER_MS,
+    });
+    await this.manager.consumers.delete(this.stream(), probe.name);
+    return probe.num_pending;
+  }
+
+  async close(): Promise<void> {
+    await this.connection.drain();
+  }
+
+  private stream(): string {
+    return this.naming.streamPrefix + STREAMS.main.name;
+  }
+}
+
+/** The message's `Nats-Msg-Id`, or undefined when the publisher set none. */
+function storedMsgId(message: JsMsg): string | undefined {
+  const msgId = message.headers?.get(MSG_ID_HEADER);
+  return msgId === undefined || msgId === "" ? undefined : msgId;
 }
 
 class JetStreamSubscription implements MessageSubscription {

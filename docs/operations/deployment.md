@@ -219,8 +219,12 @@ From then on every push to `main` that passes CI deploys itself.
   the admission ticker and reaper assume a single worker, and JetStream runs as a single node.
 - **NATS data.** Fly snapshots the volume daily (`fly volumes snapshots list`). Losing the
   volume loses only undelivered messages and consumer positions; the outbox rows stay in Postgres.
-- **Recovery.** Consumer recovery (recreating a consumer and republishing from the outbox) is
-  decided in [ADR 0011](../adr/0011-delivery-retry-dlq-recovery.md); its runbook and script are
-  specified in the [MVP spec](../specs/ticketarena-mvp.md#consumer-recovery-runbook-and-script)
-  and built by ticket 27 (`issues/27-consumer-recovery-and-outbox-republish.md`). Until then
-  there is no recovery runbook beyond the steps above.
+- **Recovery.** Recreating a consumer, replaying a dead-lettered message and recovering from a lost
+  NATS volume follow the [consumer recovery runbook](../messaging/consumer-recovery.md)
+  ([ADR 0011](../adr/0011-delivery-retry-dlq-recovery.md)): stop the worker
+  (`fly scale count 0 --app ticketarena-worker`), run `consumer:recover` or `outbox:republish` from a
+  machine that reaches Neon (direct URL) and NATS, then scale it back to 1. After a lost volume,
+  start the worker first (it declares the empty stream and its consumers), then re-publish the lost
+  window from the outbox. Recovery reaches back 14 days: the worker's retention job deletes
+  published outbox rows and `processed_messages` older than that. A `FAILED` outbox row has its own
+  [runbook](../messaging/failed-outbox-event.md).

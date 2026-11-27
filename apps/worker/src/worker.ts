@@ -10,6 +10,7 @@ import {
   type MessageBus,
   type OutboxFailureMetrics,
   type OutboxRelayOptions,
+  pruneRetention,
   type ServiceName,
 } from "@ticketarena/messaging";
 import type { AdmissionLimits, QueueService } from "@ticketarena/waiting-room";
@@ -30,6 +31,9 @@ export const SWEEP_INTERVAL_MS = 15_000;
 
 /** How often the reconciler looks for stale refund obligations (spec: Refund obligations and reconciliation). */
 export const RECONCILE_INTERVAL_MS = 5 * 60_000;
+
+/** How often the retention job deletes outbox rows and processed_messages past 14 days (ADR 0011). */
+export const RETENTION_INTERVAL_MS = 60 * 60_000;
 
 /** How often the admission ticker admits from each queue (spec: Waiting room). */
 export const ADMIT_INTERVAL_MS = 1000;
@@ -53,6 +57,14 @@ export interface WorkerOptions {
   /** The refund reconciler; the booking service carries its clock and its age and re-emit limits. */
   readonly reconciler?: {
     readonly booking: Pick<BookingService, "reconcileRefunds">;
+    readonly intervalMs?: number;
+  };
+  /**
+   * The retention job (`pruneRetention`): `now` is the clock it ages rows by. Deleting is never
+   * urgent, so it runs hourly; a failed pass is retried by the next one.
+   */
+  readonly retention?: {
+    readonly now: () => Date;
     readonly intervalMs?: number;
   };
   /** The admission ticker and slot reaper; the queue service carries the clock they decide with. */
@@ -239,6 +251,7 @@ async function startLoops(options: WorkerOptions, started: StartedLoops): Promis
   }
   startSweeper(options, started.sweepers);
   startReconciler(options, started.sweepers);
+  startRetention(options, started.sweepers);
   startAdmission(options, started.admission);
 }
 
@@ -260,6 +273,28 @@ function startReconciler(options: WorkerOptions, jobs: WorkerComponent[]): void 
   });
   loop.start();
   jobs.push({ name: "refund reconciler", stop: () => loop.stop() });
+}
+
+/** Stopped in the sweepers' phase too: it only deletes rows nothing will read again. */
+function startRetention(options: WorkerOptions, jobs: WorkerComponent[]): void {
+  const retention = options.retention;
+  if (retention === undefined) {
+    return;
+  }
+  const logger = options.logger ?? silentLogger;
+  const loop = createPeriodicLoop({
+    task: async () => {
+      const pruned = await pruneRetention({ prisma: options.prisma, now: retention.now() });
+      if (Object.values(pruned).some((rows) => rows.outbox + rows.processed > 0)) {
+        logger.info({ pruned }, "retention job deleted rows past the retention");
+      }
+    },
+    intervalMs: retention.intervalMs ?? RETENTION_INTERVAL_MS,
+    logger,
+    failureMessage: "retention job failed; will retry",
+  });
+  loop.start();
+  jobs.push({ name: "retention job", stop: () => loop.stop() });
 }
 
 function startSweeper(options: WorkerOptions, sweepers: WorkerComponent[]): void {

@@ -29,7 +29,7 @@ enum carries `@@schema("public")`).
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `outbox_events`             | Transactional outbox: integration events written in the business TX                                                                                                                                                                                                                                                                                          |
 | `outbox_event_history`      | Append-only audit of outbox rows: permanent publish failures and status changes (see below)                                                                                                                                                                                                                                                                  |
-| `processed_messages`        | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007)                                                                                                                                                                                                                                                      |
+| `processed_messages`        | Consumer dedupe checkpoint: `(consumer, messageId)` primary key, written in the handler's TX (ADR 0007); kept 14 days (see Retention)                                                                                                                                                                                                                        |
 | `venues`                    | Seeded venues                                                                                                                                                                                                                                                                                                                                                |
 | `sections`                  | Priced area of a venue: `priceMinor` (integer minor units), `currency` `EUR`                                                                                                                                                                                                                                                                                 |
 | `rows`                      | Row label within a section                                                                                                                                                                                                                                                                                                                                   |
@@ -491,7 +491,7 @@ Indexes: `(status, createdAt)` serves the relay's "oldest pending first" poll;
 
 **`FAILED` rows** ([ADR 0022](../adr/0022-terminal-failed-outbox-events.md)) keep everything they were
 inserted with (id, aggregate, event type and payload, byte for byte): they are never deleted, never
-`PUBLISHED`, and any retention rule for outbox rows must exclude them (none deletes outbox rows yet).
+`PUBLISHED`, and the retention job (below) excludes them.
 The relay never claims them, so they no longer hold back later rows of their aggregate. Only an
 operator's requeue (`requeueFailedOutboxEvent`, runbook
 [failed-outbox-event](../messaging/failed-outbox-event.md)) brings one back to `PENDING`.
@@ -502,19 +502,31 @@ Append-only audit per outbox row, one table in each service's schema, `outboxId`
 (`ON DELETE CASCADE`, index `(outboxId, id)`). Rows are only inserted, never updated or deleted;
 `readOutboxHistory(db, service, outboxId)` returns them in `id` order.
 
-| Column                   | Notes                                                                                              |
-| ------------------------ | -------------------------------------------------------------------------------------------------- |
-| `id` (bigserial)         | Append order                                                                                       |
-| `kind`                   | `PUBLISH_FAILED` (one permanent publish failure) or `STATUS_CHANGED` (CHECK)                       |
-| `fromStatus`, `toStatus` | Only on `STATUS_CHANGED`: `PENDING` → `FAILED` (relay, at the cap), `FAILED` → `PENDING` (requeue) |
-| `attempt`                | The row's `attempts` when the entry was written                                                    |
-| `error`                  | The failure reason; required on `PUBLISH_FAILED`                                                   |
-| `operator`, `reason`     | Who requeued the row and why (requeue entries only)                                                |
-| `at` (timestamptz)       | When it happened                                                                                   |
+| Column                   | Notes                                                                                                                                    |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `id` (bigserial)         | Append order                                                                                                                             |
+| `kind`                   | `PUBLISH_FAILED` (one permanent publish failure) or `STATUS_CHANGED` (CHECK)                                                             |
+| `fromStatus`, `toStatus` | Only on `STATUS_CHANGED`: `PENDING` → `FAILED` (relay, at the cap), `FAILED` → `PENDING` (requeue), `PUBLISHED` → `PENDING` (re-publish) |
+| `attempt`                | The row's `attempts` when the entry was written                                                                                          |
+| `error`                  | The failure reason; required on `PUBLISH_FAILED`                                                                                         |
+| `operator`, `reason`     | Who requeued or re-published the row and why (those entries only)                                                                        |
+| `at` (timestamptz)       | When it happened                                                                                                                         |
 
 Transient failures (a broker outage, a full stream) are not recorded here; they only count in
 `attempts` and `lastError`, so an outage cannot flood the history. Migration
 `20261130000000_terminal_failed_outbox_events` added the two columns, the history tables and the CHECKs.
+
+### Retention
+
+The worker's retention job (`pruneRetention`, hourly; ADR 0011 retention invariant) deletes, in each
+service schema, `outbox_events` rows `PUBLISHED` more than 14 days ago (by `publishedAt`) and
+`processed_messages` rows whose `processedAt` is more than 14 days old, in batches of 1,000. It never
+deletes a `PENDING` or `FAILED` row, nor a row with any `outbox_event_history` entry, so the
+history's `ON DELETE CASCADE` never removes an audit trail; and it keeps a booking `unknown_order`
+`payment.refund_requested` row until its `orphan_refund_obligations` row exists (the reconciler's
+cutover catch-up reads it). Ledger rows, orphan obligations and refunds are never touched: they do
+not depend on the outbox. Events published more than 14 days ago can no longer be re-published
+([runbook](../messaging/consumer-recovery.md#the-14-day-limit)).
 
 ## Rules
 

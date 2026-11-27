@@ -1,6 +1,19 @@
 // Public entry point of the messaging package.
 
 export type { CausedEventInput, EmitCausedEvent, JsonValue } from "./caused-event.js";
+export type {
+  ConsumerAdmin,
+  ConsumerStart,
+  DurableConsumerState,
+  RetainedStreamState,
+  StoredMessageRef,
+} from "./consumer-admin.js";
+export {
+  type RecoveryRule,
+  type RecreateConsumerOptions,
+  type RecreateConsumerResult,
+  recreateConsumer,
+} from "./consumer-recovery.js";
 export {
   type ConsumerRunner,
   type ConsumerRunnerOptions,
@@ -12,6 +25,7 @@ export {
   type MessageSchema,
 } from "./consumer-runner.js";
 export {
+  connectJetStreamConsumerAdmin,
   connectJetStreamMessageBus,
   DEFAULT_ACK_WAIT_MS,
   type JetStreamMessageBusOptions,
@@ -46,4 +60,16 @@ export {
   type OutboxRelay,
   type OutboxRelayOptions,
 } from "./outbox-relay.js";
+export {
+  OutboxRepublishRefused,
+  type RepublishInput,
+  republishOutboxEvents,
+} from "./outbox-republish.js";
+export {
+  DEFAULT_RETENTION_BATCH_SIZE,
+  type PrunedRows,
+  type PruneRetentionOptions,
+  pruneRetention,
+  RETENTION_MS,
+} from "./outbox-retention.js";
 export type { ServiceName } from "./service-store.js";

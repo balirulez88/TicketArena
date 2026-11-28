@@ -38,6 +38,9 @@ export interface PaymentHandlerDeps {
 
 const ATTEMPT_NO = 1;
 const DUPLICATE_RESULT_MAGIC = "+dup@";
+const DOUBLE_CAPTURE_MAGIC = "+double@";
+/** `+double@`: the extra charge is the order's second attempt, with its own payment id. */
+const DOUBLE_CAPTURE_ATTEMPT_NO = 2;
 const FINAL_FAILURE_MAGIC = "+fail@";
 const LATE_CAPTURE_MAGIC = "+late@";
 /**
@@ -52,13 +55,29 @@ const FINAL_FAILURE_REASON = "card_declined";
 const RANDOM_FAILURE_REASON = "provider_declined";
 const orderPlacedEnvelope = envelopeSchema(orderPlacedPayloadSchema);
 
+type PlacedOrder = ReturnType<typeof orderPlacedEnvelope.parse>["payload"];
+
+/** The fields every attempt of the order shares; the outcome fields are added by the caller. */
+function attemptRow(order: PlacedOrder, paymentId: string, attemptNo: number, at: Date) {
+  return {
+    paymentId,
+    orderId: order.orderId,
+    attemptNo,
+    amount: order.amountMinor,
+    currency: order.currency,
+    contactEmail: order.contact.email,
+    ...(order.contact.phone === undefined ? {} : { contactPhone: order.contact.phone }),
+    createdAt: at,
+  };
+}
+
 export type PaymentConsumerSteps = Required<
   Pick<ConsumerRunnerOptions, "beforeTransaction" | "handler">
 >;
 
 /**
- * The mock provider: one attempt per order (MVP), decided immediately: captured, or failed
- * (`+fail@` finally, a random failure non-finally). It touches only the
+ * The mock provider: one attempt per order (MVP; `+double@` adds a second capture), decided
+ * immediately: captured, or failed (`+fail@` finally, a random failure non-finally). It touches only the
  * `payment` schema and learns about the order solely from `order.placed` (ADR 0009). Spread the
  * result into a consumer runner bound to `service: "payment"` so the dedupe row and the result
  * events share the handler's transaction.
@@ -102,16 +121,7 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
     const order = placed.payload;
     const paymentId = deps.newId();
     const outcome = attemptOutcome(order.contact.email);
-    const attempt = {
-      paymentId,
-      orderId: order.orderId,
-      attemptNo: ATTEMPT_NO,
-      amount: order.amountMinor,
-      currency: order.currency,
-      contactEmail: order.contact.email,
-      ...(order.contact.phone === undefined ? {} : { contactPhone: order.contact.phone }),
-      createdAt: at,
-    };
+    const attempt = attemptRow(order, paymentId, ATTEMPT_NO, at);
 
     const settled = outcome.captured
       ? { status: "CAPTURED" as const, capturedAt: captureTime(order, at) }
@@ -136,8 +146,9 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
     } else {
       // Invariant (spec: Mock Payment service): `final: true` lets booking cancel the order and
       // free its seats, so it is never sent while another attempt may still capture or has.
-      // The check sees committed attempts only. That suffices while the MVP records only attempt
-      // 1: nothing else writes attempts concurrently. Whoever adds retries must serialize attempts
+      // The check sees committed attempts only. That suffices while the MVP records attempt 1
+      // and, only for `+double@` (which never fails), attempt 2 in attempt 1's own transaction:
+      // nothing else writes attempts concurrently. Whoever adds retries must serialize attempts
       // per order (in every branch) before this check holds under concurrency.
       const otherLive = await tx.paymentAttempt.count({
         where: {
@@ -178,6 +189,55 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
       { orderId: order.orderId, paymentId, copies, result: result.type },
       "payment attempted",
     );
+
+    if (settled.status === "CAPTURED" && order.contact.email.includes(DOUBLE_CAPTURE_MAGIC)) {
+      await captureAgain(tx, placed, at, settled.capturedAt, emit);
+    }
+  }
+
+  /**
+   * `+double@`: the provider charges the order a second time, as attempt 2 with a new payment id,
+   * so booking sees two distinct captures for one order and must refund the extra one (AT-21).
+   * Attempts per order stay serialized: only the transaction whose attempt 1 insert succeeded
+   * reaches this point, and a concurrent repeat of the `order.placed` waits on that uncommitted
+   * attempt 1 and then skips (`recordAttempt`), so it never writes attempt 2. A plain insert, not
+   * a skipped duplicate: under that guarantee a conflict on attempt 2 would be a bug.
+   */
+  async function captureAgain(
+    tx: TransactionClient,
+    placed: ReturnType<typeof orderPlacedEnvelope.parse>,
+    at: Date,
+    capturedAt: Date,
+    emit: HandlerContext["emit"],
+  ): Promise<void> {
+    const order = placed.payload;
+    const paymentId = deps.newId();
+    await tx.paymentAttempt.create({
+      data: {
+        ...attemptRow(order, paymentId, DOUBLE_CAPTURE_ATTEMPT_NO, at),
+        status: "CAPTURED",
+        capturedAt,
+      },
+    });
+    await emit({
+      id: deps.newId(),
+      type: "payment.succeeded",
+      version: 1,
+      occurredAt: at.toISOString(),
+      aggregateType: "payment",
+      aggregateId: paymentId,
+      orderId: order.orderId,
+      ...(placed.holdId === undefined ? {} : { holdId: placed.holdId }),
+      payload: {
+        paymentId,
+        orderId: order.orderId,
+        attemptNo: DOUBLE_CAPTURE_ATTEMPT_NO,
+        amount: order.amountMinor,
+        currency: order.currency,
+        capturedAt: capturedAt.toISOString(),
+      },
+    });
+    logger.info({ orderId: order.orderId, paymentId }, "payment captured a second time");
   }
 
   /**
@@ -233,7 +293,7 @@ export function createPaymentHandler(deps: PaymentHandlerDeps): PaymentConsumerS
     if (email.includes(FINAL_FAILURE_MAGIC)) {
       return { captured: false, final: true, reason: FINAL_FAILURE_REASON };
     }
-    if (email.includes(LATE_CAPTURE_MAGIC)) {
+    if (email.includes(LATE_CAPTURE_MAGIC) || email.includes(DOUBLE_CAPTURE_MAGIC)) {
       return { captured: true };
     }
     if (deps.random.next() < successRate) {

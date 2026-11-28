@@ -33,6 +33,7 @@ Ticketenként egy rövid jegyzet, amely az interjún megvédhető tervezési dö
 - [51: Log redaction policy](51-log-redaction-policy.md): `streamWrite` hook a serializált soron, kulcs és alak szerinti redaction, TD-048, tRPC hibák a loggeren át
 - [57: Produkciós booking metrikák](57-production-booking-metrics.md): `optionalMetrics` a context-ből, nem várt `HINCRBY` Upstashba, best-effort, `unknown` kulcs, fake Upstash a rendszerhatáron
 - [70: Tartós refund obligation ismeretlen orderhez](70-durable-orphan-refund-obligation.md): `orphan_refund_obligations`, `paymentId` PK mint dedupe, emit csak ha írt sort, `FOR UPDATE` + `decide()`, outbox retentiontől független, backfill migráció
+- [22: Késői kézbesítés, dupla fizetés, összeg-eltérés](22-late-delivery-double-payment-mismatch.md): `capturedAt` dönt, best-effort grace, `+double@` két attempt egy tranzakcióban, partial unique index egy `APPLIED`-re
 - [23: Refund reconciler és manual review](23-refund-reconciler.md): stale obligation re-emit outboxon át, `SKIP LOCKED`, 3 re-emit után `MANUAL_REVIEW`, `retryRefund`, AT-24
 - [59: Terminális outbox hibák](59-terminal-outbox-failures.md): tartós vs átmeneti publish hiba, `FAILED` végállapot cap-pel, aggregátum elengedése, requeue az eredeti id-n, append-only history, health alert
 - [25: Dead-letter queue routing](25-dead-letter-queue.md): kapu a handler előtt, `deliveryCount > 5`, séma és verzió ellenőrzés, `dlq:<consumer>:<id>` dedupe, `term` csak PubAck után, sikertelen publish `nak(2m)`

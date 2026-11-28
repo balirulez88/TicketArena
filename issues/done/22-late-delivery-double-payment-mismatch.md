@@ -4,7 +4,9 @@
 
 **Blocked by:** 20
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-28 on devflow/run-202611281705 (run 202611281705)
 
 - [ ] On time is `capturedAt <= paymentDeadline`, independent of delivery time.
 - [ ] A refund caused by an on-time payment delivered after expiry increments `late_delivery_refund`.

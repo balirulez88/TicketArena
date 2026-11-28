@@ -330,12 +330,18 @@ the provider's key dedupe absorbs that.
 latency and outcome drawn from the injected `Random`/`Clock`. Outcome: a `+fail@` email is a final
 failure (`FAILED`, `failureReason` `card_declined`, `payment.failed` with `final: true`); a `+late@`
 email always captures, stamped `capturedAt = paymentDeadline + 1 s` (provider time, delivered at
-once, so booking sees a late capture on a still-open order); otherwise
+once, so booking sees a late capture on a still-open order); a `+double@` email always captures
+and, in the same transaction, records a second `CAPTURED` attempt (attempt 2, a new `paymentId`,
+same `capturedAt`) with its own `payment.succeeded`, so booking applies one and refunds the other
+(`order_confirmed`, AT-21); otherwise
 the attempt captures (`CAPTURED`, `payment.succeeded`) when the draw is below `successRate`
 (`paymentSuccessRate` in `createServiceConsumers`, default 1) and else fails non-finally
 (`provider_declined`, `final: false`). **Invariant:** `final: true` is never emitted while another
 attempt of the order is `ATTEMPTING` or `CAPTURED`. The check reads committed attempts only, which
-suffices while the MVP records only attempt 1. It is not safe under concurrent attempts: adding
+suffices while the MVP records only attempt 1 (and, for `+double@`, attempt 2 in attempt 1's own
+transaction: only the transaction whose attempt 1 insert succeeded writes it, so a concurrent repeat
+of the `order.placed` waits on attempt 1 and skips without reaching attempt 2; `+double@` never
+fails, so no `final` check runs beside it). It is not safe under concurrent attempts: adding
 retries requires serializing attempts per order in every branch first. A `+dup@` email emits the
 result twice under distinct event ids. An `order.placed` repeated under a new event id gets past
 `processed_messages`; the attempt insert skips the existing `(orderId, attemptNo)` row instead, so the
@@ -374,7 +380,8 @@ row with `refundRequestedAt = refundLastRequestedAt = T`, `order.expired` and `p
 `refund` (a capture the order cannot keep: on an `EXPIRED`, `CANCELLED` or `CONFIRMED` order, or
 with a mismatched amount: order unchanged, `REFUND_REQUESTED` ledger row (its `refundReason` kept for the reconciler), `payment.refund_requested`
 with the contact; an on-time capture on an `EXPIRED` order, reason `late_delivery`, is also counted
-as `late_delivery_refund`, best-effort); `refund` `unknown_order` (a capture whose order no longer
+as `late_delivery_refund`, best-effort; a second capture on a `CONFIRMED` order, e.g. `+double@`,
+is reason `order_confirmed`, so exactly one payment stays `APPLIED`); `refund` `unknown_order` (a capture whose order no longer
 exists; a demo reset keeps orders, so it is not a cause: no ledger row is possible, so the handler
 inserts an orphan refund obligation (`orphan_refund_obligations`, primary key `paymentId`,
 `INSERT … ON CONFLICT DO NOTHING`, keeping the capture's correlation id) and emits `payment.refund_requested` without contact only if
@@ -385,6 +392,19 @@ counter hash, best-effort, and leaves the order open until its deadline); `retry
 (unknown `orderId` on a failure) are returned to the runner as a `HandlerOutcome`. Any decision
 the handler does not apply yet throws `... is not handled yet` and is retried, so captured money
 is never dropped silently.
+
+**On time and the settlement grace (best-effort).** On time is `capturedAt <= paymentDeadline`
+(provider time), never the delivery time. An on-time capture delivered after the deadline still
+confirms while the order is `PENDING_PAYMENT` (AT-19); once the sweeper has expired the order at
+`paymentDeadline + 60 s`, the same capture finds it `EXPIRED` and is refunded with reason
+`late_delivery`, counted as `late_delivery_refund` (AT-18). The grace is best-effort, not a
+guarantee: the sweeper runs every 15 s and skips an order the saga has locked, so an order can stay
+open somewhat past deadline plus grace (an on-time capture delivered then still confirms), and a
+capture whose delivery is delayed beyond the grace (broker backlog, a stopped consumer, retries) is
+refunded although the buyer paid on time. Nothing extends the grace for a payment in flight; a
+provider status query before expiry is phase 2 (ADR 0006). The counter is fire-and-forget, so a
+rolled-back and retried message can over-count it; a broker redelivery of the same event is
+absorbed by `processed_messages` before the handler runs, so it neither refunds nor counts again.
 
 **Refund execution.** `payment-refund` (`service: "payment"`, `apps/worker/src/payment/refund-handler.ts`)
 consumes `payment.refund_requested`: in the runner's transaction it inserts one `payment.refunds`

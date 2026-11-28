@@ -9,7 +9,7 @@ Egy üzenet, amelyet a handler soha nem tud feldolgozni (hibás séma, ismeretle
 ## Döntés
 
 1. **A kapu a handler előtt fut** (`consumer-runner.ts`, `gate`). Ha `deliveryCount > 5` (`RETRY_BUDGET`), az üzenet a DLQ-ba megy anélkül, hogy a `beforeTransaction` vagy a handler lefutna. Így az az üzenet is a DLQ-ba kerül, amely minden alkalommal összeomlasztja a folyamatot. A `deliveryCount` a JetStream számlálója, ezért túléli az újraindítást. Ha a runner kap `schemas`-t (verziónként egy `safeParse`-os séma), akkor a nem-JSON, az ismeretlen verziójú és a sémának nem megfelelő üzenet már az első kézbesítéskor a DLQ-ba megy. A worker minden consumere átadja a sémáit (`ENVELOPE_SCHEMAS` a `consumers.ts`-ben).
-2. **Publish, PubAck, és csak utána `term`** (`deadLetter`). A DLQ üzenet a `ta.dlq.<consumer>` subjectre megy `Nats-Msg-Id = dlq:<consumer>:<envelope id>` azonosítóval; a törzs a `DeadLetter` (eredeti envelope bájtra pontosan, hiba oka, `deliveryCount`). A kulcs ötlet: az azonosító az envelope id-ből származik, ezért ha a folyamat a PubAck és a `term` között összeomlik, az újrapublikálás a DLQ stream duplikáció-ablakán belül nem hoz létre második másolatot.
+2. **Publish, PubAck, és csak utána `term`** (`deadLetter`). A DLQ üzenet a `ta.dlq.<consumer>` subjectre megy `Nats-Msg-Id = dlq:<consumer>:<envelope id>` azonosítóval; a törzs az eredeti üzenet változatlanul, a metaadat (consumer, subject, `streamSeq`, `deliveryCount`, ok, indoklás) `TA-DLQ-*` headerekben (`dead-letter.ts`, olvasás: `readDeadLetters`). Burkoló (JSON wrapper) nincs, mert az megnövelné a méretet: a `max_payload` közelében lévő üzenet így soha nem kerülhetne a DLQ-ba. Ha az eredeti mellett nem marad 8 KiB a headereknek, a törzs karakterhatáron részekre bomlik (`<dlq id>:part:<n>/<total>`); a felosztás csak az adattól és a limittől függ. A kulcs ötlet: az azonosító az envelope id-ből származik, ezért ha a folyamat a PubAck és a `term` között összeomlik, az újrapublikálás a DLQ stream duplikáció-ablakán (10 perc) belül nem hoz létre második másolatot; az ablakon túl a broker már nem deduplikál. `Nats-Msg-Id` nélküli üzenet is a DLQ-ba megy (`missing_msg_id`), `dlq:<consumer>:main:<stream seq>:<adat SHA-256 eleje>` azonosítóval, ami újrakézbesítéskor ugyanaz.
 3. **Sikertelen DLQ publish → `nak(2 perc)`, soha `term`.** Így nem veszhet el üzenet úgy, hogy nincs róla másolat. A `poison` handler kimenet a rollback után kerül a DLQ-ba (`handler_poison`).
 
 Mellékhatás: a `poison` eddig újrakézbesítést jelentett, most DLQ. Ezért az ADR 0022 táblázata és a `failed-outbox-consumer-flow.test.ts` frissült: a `payment.refunded` a DLQ-ból az operátor replay-ével (a durable újralétrehozásával) érvényesül.
@@ -35,14 +35,16 @@ Mellékhatás: a `poison` eddig újrakézbesítést jelentett, most DLQ. Ezért 
 
 ## Mi romolhat el
 
-| Hiba                                                          | Teszt                                                                                                              |
-| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Kimerült keret után kétszeres DLQ-bejegyzés, vagy handler fut | `consumer-runner-dlq.test.ts`: "dead-letters the 6th delivery without invoking the handler…" (AT-28)               |
-| Crash a publish és a `term` között második másolatot ad       | ugyanott: "creates no second DLQ entry when the process crashes between the DLQ publish and term"                  |
-| Sikertelen DLQ publish után `term`, az üzenet elvész          | `consumer-runner-dlq-failure.test.ts`: valódi NATS, túl kicsi DLQ, `nak` 2 perccel, később egy másolat (AT-29)     |
-| Méreg-üzenet eléri a handlert vagy a fizetési providert       | `consumer-runner-dlq.test.ts` (schema, nem-JSON, verzió, AT-30); `consumer-dlq-flow.test.ts`: `providerCalls` üres |
-| `poison` kimenet félig írt állapotot hagy                     | "dead-letters a handler's poison outcome…": nincs `processed_messages`, nincs outbox sor                           |
-| Érvényes üzenetet is DLQ-ba tesz a kapu                       | "hands a message valid for a known version to the handler"; a flow teszt érvényes `order.placed` esete             |
+| Hiba                                                          | Teszt                                                                                                                                  |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Kimerült keret után kétszeres DLQ-bejegyzés, vagy handler fut | `consumer-runner-dlq.test.ts`: "dead-letters the 6th delivery without invoking the handler…" (AT-28)                                   |
+| Crash a publish és a `term` között második másolatot ad       | ugyanott: "creates no second DLQ entry when the process crashes between the DLQ publish and term"                                      |
+| Sikertelen DLQ publish után `term`, az üzenet elvész          | `consumer-runner-dlq-failure.test.ts`: valódi NATS, túl kicsi DLQ, `nak` 2 perccel, később egy másolat (AT-29)                         |
+| Méreg-üzenet eléri a handlert vagy a fizetési providert       | `consumer-runner-dlq.test.ts` (schema, nem-JSON, verzió, AT-30); `consumer-dlq-flow.test.ts`: `providerCalls` üres                     |
+| `Nats-Msg-Id` nélküli üzenet másolat nélkül `term`-ölődik     | `consumer-runner-dlq.test.ts`: "dead-letters a message without a Nats-Msg-Id…"; `consumer-runner-dlq-failure.test.ts`: `nak` 2 perccel |
+| `max_payload` közeli üzenet nem fér a DLQ-másolatba           | `consumer-runner-dlq.test.ts`: "preserves a message just under the broker's max_payload in full…"                                      |
+| `poison` kimenet félig írt állapotot hagy                     | "dead-letters a handler's poison outcome…": nincs `processed_messages`, nincs outbox sor                                               |
+| Érvényes üzenetet is DLQ-ba tesz a kapu                       | "hands a message valid for a known version to the handler"; a flow teszt érvényes `order.placed` esete                                 |
 
 ## Interjúkérdések
 

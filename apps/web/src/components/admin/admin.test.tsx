@@ -351,6 +351,21 @@ describe("AdminDashboard message health", () => {
     );
   });
 
+  test("labels redeliveries as the broker's current count, not a running total", async () => {
+    deliveryFigures = {
+      consumers: { payment: { lag: 0, pendingAcks: 0, redeliveries: 2 } },
+      dlq: { size: 0, oldestAgeMs: null },
+    };
+    renderWithApi(<AdminDashboard />);
+
+    const consumers = await screen.findByRole("table", { name: "Consumer delivery" });
+    expect(
+      within(consumers)
+        .getAllByRole("columnheader")
+        .map((header) => header.textContent),
+    ).toEqual(["Consumer", "Lag", "Pending acks", "Redeliveries (current)"]);
+  });
+
   test("says the NATS figures are unavailable when the worker cannot be read", async () => {
     renderWithApi(<AdminDashboard />);
 

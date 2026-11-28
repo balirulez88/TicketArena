@@ -5,8 +5,9 @@ import { parseRepublishCommand } from "./outbox-republish.js";
 // Entry point for `pnpm --filter @ticketarena/worker outbox:republish` (runbook:
 // docs/messaging/consumer-recovery.md). It moves one service's PUBLISHED outbox rows published in a
 // time range back to PENDING, so the relay publishes them again under their original ids; a refusal
-// (empty range, no operator or reason) changes nothing and exits non-zero with the reason.
-const command = parseRepublishCommand(process.argv.slice(2), process.env);
+// (empty range, a range before the 14-day replay window, no operator or reason) changes nothing and
+// exits non-zero with the reason.
+const command = parseRepublishCommand(process.argv.slice(2), process.env, new Date());
 const prisma = createPrismaClient({ connectionString: command.databaseUrl, driver: "pg" });
 try {
   const moved = await republishOutboxEvents(prisma, {

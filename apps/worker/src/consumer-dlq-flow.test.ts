@@ -3,8 +3,8 @@ import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
 import {
   connectJetStreamMessageBus,
   createConsumerRunner,
-  type DeadLetter,
   type MessageBus,
+  readDeadLetters,
 } from "@ticketarena/messaging";
 import { setupTestDatabase, setupTestNats } from "@ticketarena/test-infra";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -110,7 +110,10 @@ async function deliverToPayment(orderId: string, envelopeId: string, body: objec
       providerCalls,
       redelivered,
       dlq: copies.map((copy) => {
-        const letter: DeadLetter = JSON.parse(copy.data);
+        const [letter] = readDeadLetters([copy]);
+        if (letter === undefined) {
+          throw new Error("no dead letter in the DLQ copy");
+        }
         return {
           msgId: copy.msgId,
           cause: letter.error.cause,

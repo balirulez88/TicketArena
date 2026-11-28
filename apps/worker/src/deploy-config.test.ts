@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseWorkerEnv } from "./env.js";
+import { DEFAULT_HEALTH_PROBE_DEADLINE_MS } from "./worker.js";
 
 // The Fly.io and CI files are not executed by any test, so these checks pin the properties the
 // deployment relies on (ADR 0013) and keep the files consistent with each other and with the
@@ -88,6 +89,13 @@ describe("the worker on Fly.io", () => {
     expect(check["type"]).toBe("http");
     expect(check["path"]).toBe("/health");
     expect(check["port"]).toBe(env["PORT"]);
+  });
+
+  it("bounds the /health probes well inside the check's timeout, so a hung probe never fails it", () => {
+    const timeout = /^(\d+)s$/.exec(table(workerToml, "checks.health")["timeout"] ?? "");
+
+    expect(timeout?.[1]).toBeDefined();
+    expect(DEFAULT_HEALTH_PROBE_DEADLINE_MS).toBeLessThanOrEqual((Number(timeout?.[1]) * 1000) / 2);
   });
 
   it("its [env] plus the documented secrets pass the worker's configuration boundary", () => {

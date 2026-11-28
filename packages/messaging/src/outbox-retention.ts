@@ -11,7 +11,8 @@ export const RETENTION_MS = 14 * 86_400_000;
 export const DEFAULT_RETENTION_BATCH_SIZE = 1_000;
 
 export interface PruneRetentionOptions {
-  readonly prisma: PrismaClient;
+  /** A client or an open transaction: the job only runs raw DELETEs. */
+  readonly prisma: Pick<PrismaClient, "$executeRawUnsafe">;
   readonly now: Date;
   /** Defaults to `RETENTION_MS`. */
   readonly retentionMs?: number;
@@ -62,6 +63,12 @@ export async function pruneRetention(
   const batchSize = options.batchSize ?? DEFAULT_RETENTION_BATCH_SIZE;
   const prune = async (service: ServiceName): Promise<PrunedRows> => {
     const store = serviceStore(service);
+    // The inner SELECT reads the statement's snapshot, so a row an operator is re-publishing
+    // right now still looks PUBLISHED and unaudited there. The outer WHERE is what protects it:
+    // the DELETE waits on the re-publish's row lock and, under READ COMMITTED, re-evaluates its
+    // own conditions on the committed row version, which is PENDING by then, so the row and its
+    // new history survive. Checking status suffices: every history write either moves a row out
+    // of PUBLISHED in the same transaction (re-publish) or is on a row that is not PUBLISHED.
     const outbox = await deleteInBatches(
       options.prisma,
       `DELETE FROM ${store.outboxTable} WHERE "id" IN (
@@ -70,7 +77,9 @@ export async function pruneRetention(
            AND e."publishedAt" < ($1::timestamptz AT TIME ZONE 'UTC')
            AND NOT EXISTS (SELECT 1 FROM ${store.historyTable} h WHERE h."outboxId" = e."id")
            ${service === "booking" ? KEEP_FOR_REFUND_CUTOVER : ""}
-         LIMIT $2)`,
+         LIMIT $2)
+       AND "status" = 'PUBLISHED'
+       AND "publishedAt" < ($1::timestamptz AT TIME ZONE 'UTC')`,
       cutoff,
       batchSize,
     );
@@ -97,7 +106,7 @@ export async function pruneRetention(
 }
 
 async function deleteInBatches(
-  prisma: PrismaClient,
+  prisma: Pick<PrismaClient, "$executeRawUnsafe">,
   sql: string,
   cutoff: Date,
   batchSize: number,

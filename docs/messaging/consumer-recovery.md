@@ -69,8 +69,10 @@ A dead-lettered message ([DLQ](index.md#worker-relay-and-consumer-runner), copy 
 floor has already moved past it and rule 1 would never deliver it again. Once the cause is fixed and
 deployed:
 
-1. Read the copy's `streamSeq`, `error` and `envelope` from `TICKETARENA_DLQ`
-   (`nats stream get TICKETARENA_DLQ <seq>`). Check in [ADR 0022's table](../adr/0022-terminal-failed-outbox-events.md)
+1. Read the copy from `TICKETARENA_DLQ` (`nats stream get TICKETARENA_DLQ <seq>`): the
+   `TA-DLQ-Stream-Seq`, `TA-DLQ-Cause` and `TA-DLQ-Reason` headers, and the original envelope as the
+   body (a copy with `TA-DLQ-Part` headers is split: join the parts' bodies in order, or use
+   `readDeadLetters`). Check in [ADR 0022's table](../adr/0022-terminal-failed-outbox-events.md)
    that applying it now converges.
 2. Stop the worker, then run `consumer:recover --consumer <name> --ignore-ack-floor`. Rule 2 starts at
    the first message without a `processed_messages` row, which is the dead-lettered one or an earlier
@@ -94,7 +96,11 @@ pnpm --filter @ticketarena/worker outbox:republish \
 
 The range is on `publishedAt`, the time the message entered the stream (`from` inclusive, `to`
 exclusive). Choose it to cover the lost window, for example from the last good volume snapshot until
-now. Run it once per service whose outbox published in the window. The relays then publish the rows
+now. `--from` must lie in the **replay window**: no earlier than 14 days before now. Only inside it
+does every consumer still hold the `processed_messages` rows that deduplicate a re-published event.
+An earlier `--from` is refused (exit 1, nothing changed), and the error names the window's start to
+pass instead. This holds even for a row that is still in the outbox because it has history: that row
+is kept for its audit, not for replay. Run it once per service whose outbox published in the window. The relays then publish the rows
 again in their per-aggregate order, **under their original ids**. A consumer that already processed an
 event deduplicates it, and one that never saw it applies it. For each row the script:
 
@@ -105,8 +111,10 @@ event deduplicates it, and one that never saw it applies it. For each row the sc
 - appends a `PUBLISHED` -> `PENDING` entry with your name and reason to `outbox_event_history`, in
   the same transaction.
 
-An empty range, a missing operator or a missing reason is refused (exit 1, nothing changed). The
-script prints the number of rows it moved.
+An empty range, a range starting before the replay window, a missing operator or a missing reason is
+refused (exit 1, nothing changed). The script prints the number of rows it moved. It is safe to run
+while the worker's retention job runs: a row the job had selected but that the script moved to
+`PENDING` first is kept, with its new history entry.
 
 After broker data loss the stream's durables are gone with it, and the recreation script has no
 stream to read. Start the worker: `ensureTopology()` declares the empty stream again, and each
@@ -118,8 +126,9 @@ stream). Then run `outbox:republish`, so the re-published messages reach every c
 The worker's retention job (hourly) deletes outbox rows that were `PUBLISHED` more than **14 days**
 ago, and `processed_messages` rows older than 14 days. Both are kept longer than the stream's 7 days,
 so recovery can always reach past the stream. **Events published more than 14 days ago cannot be
-recovered automatically.** Their outbox rows are gone, and replaying them would no longer be
-deduplicated by `processed_messages`. The retention job never deletes a `PENDING` row, a `FAILED`
+recovered automatically**, and `outbox:republish` refuses a `--from` before that. Their outbox rows
+are gone, or kept only for their audit, and replaying them would no longer be deduplicated by
+`processed_messages`. The retention job never deletes a `PENDING` row, a `FAILED`
 row, a row with `outbox_event_history` (so a re-published row keeps its audit), or an
 `unknown_order` refund request whose orphan refund obligation does not exist yet.
 

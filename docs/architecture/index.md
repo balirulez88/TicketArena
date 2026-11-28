@@ -163,9 +163,11 @@ payment without an obligation (an `APPLIED` one included) is `NOT_FOUND`, an obl
 state `PRECONDITION_FAILED` with domain code `REFUND_NOT_IN_MANUAL_REVIEW`, both naming the payment.
 
 **Dashboard.** `/admin` shows, below the per-event table, a message-health card (outbox lag per
-service, consumer table, DLQ size and oldest age, oldest open refund; a note when the NATS figures
-are unavailable), the stuck refunds (polled every 5 s, a "Retry refund" button on `MANUAL_REVIEW`
-rows only) and the live feed (polled every 1 s after its cursor, the newest 300 entries kept in the
+service; the consumer table, its redeliveries column labelled "Redeliveries (current)" because it is
+the broker's count of messages being redelivered now, not a running total; DLQ size and oldest age;
+oldest open refund; a note when the NATS figures are unavailable), the stuck refunds (polled every
+5 s, a "Retry refund" button on `MANUAL_REVIEW` rows only) and the live feed (polled every 1 s after
+its cursor, the newest 300 entries kept in the
 browser, a "Group by correlation id" toggle).
 
 **Demo actions.** Both take no input: the server picks the one event flagged `demo` (anything but

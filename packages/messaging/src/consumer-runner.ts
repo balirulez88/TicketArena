@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { type Logger, logBindingsFor, silentLogger } from "@ticketarena/contracts";
 import type { PrismaClient, TransactionClient } from "@ticketarena/db";
 import { createBackgroundLoop, sleep } from "./background-loop.js";
 import { createEmitCausedEvent, type EmitCausedEvent } from "./caused-event.js";
+import { type DeadLetter, deadLetterCopies } from "./dead-letter.js";
 import { createFailureReporter } from "./failure-reporter.js";
 import type { MessageBus, PublishAck, ReceivedMessage } from "./message-bus.js";
 import { type ServiceName, serviceStore } from "./service-store.js";
@@ -42,25 +44,6 @@ export interface MessageSchema {
     readonly success: boolean;
     readonly error?: { readonly message: string } | undefined;
   };
-}
-
-/** Why a message was dead-lettered. */
-export type DeadLetterCause =
-  | "retry_budget_exhausted"
-  | "schema_invalid"
-  | "unknown_version"
-  | "handler_poison";
-
-/** The JSON body of a DLQ copy on `ta.dlq.<consumer>` (`Nats-Msg-Id = dlq:<consumer>:<id>`). */
-export interface DeadLetter {
-  readonly consumer: string;
-  /** The original subject, without any namespace the adapter adds. */
-  readonly subject: string;
-  readonly streamSeq: number;
-  readonly deliveryCount: number;
-  readonly error: { readonly cause: DeadLetterCause; readonly message: string };
-  /** The original message data, byte for byte (it may not even be JSON). */
-  readonly envelope: string;
 }
 
 export interface ConsumerRunnerOptions {
@@ -137,16 +120,20 @@ export async function createConsumerRunner(
     const log = logger.child({ messageId, ...logBindingsFor(parseJson(message.data)) });
     if (messageId === undefined) {
       // Without an id there is no safe dedupe key, and an empty or shared one would make
-      // unrelated messages look like duplicates. Redelivery cannot fix it: stop it here.
-      log.error({ subject: message.subject }, "message has no Nats-Msg-Id; terminated");
-      message.term("missing Nats-Msg-Id");
+      // unrelated messages look like duplicates. Redelivery cannot fix it: dead-letter it.
+      await deadLetter(
+        message,
+        missingIdDlqId(options.consumer, message),
+        { cause: "missing_msg_id", message: "message has no Nats-Msg-Id" },
+        log,
+      );
       return;
     }
     // The gate runs before any consumer code, so a message that crashes the process on every
     // delivery still reaches the DLQ once its budget is spent (ADR 0011).
     const rejection = gate(message);
     if (rejection !== undefined) {
-      await deadLetter(message, messageId, rejection, log);
+      await deadLetter(message, `dlq:${options.consumer}:${messageId}`, rejection, log);
       return;
     }
     try {
@@ -175,7 +162,7 @@ export async function createConsumerRunner(
         // The transaction has rolled back, so the DLQ copy is the only trace the message leaves.
         await deadLetter(
           message,
-          messageId,
+          `dlq:${options.consumer}:${messageId}`,
           { cause: "handler_poison", message: error.result.reason },
           log,
         );
@@ -201,32 +188,37 @@ export async function createConsumerRunner(
   }
 
   /**
-   * Publishes the DLQ copy and `term`s only after its PubAck. The DLQ id is derived from the
-   * envelope id, so a crash between PubAck and `term` republishes inside the DLQ stream's
-   * duplicate window and the broker stores no second copy. A failed publish naks, never terms.
+   * Publishes the DLQ copy (every part of it) and `term`s only after each PubAck. The DLQ id is
+   * derived from the message, never random, so a crash between PubAck and `term` republishes
+   * the same ids and the broker stores no second copy, but only inside the DLQ stream's
+   * duplicate window (10 min): a redelivery later than that stores another copy. A failed
+   * publish naks with 2 min, never terms.
    */
   async function deadLetter(
     message: ReceivedMessage,
-    envelopeId: string,
+    dlqId: string,
     error: DeadLetter["error"],
     log: Logger,
   ): Promise<void> {
     const deliveryCount = message.deliveryCount;
-    const letter: DeadLetter = {
-      consumer: options.consumer,
-      subject: message.subject,
-      streamSeq: message.streamSeq,
-      deliveryCount,
-      error,
-      envelope: message.data,
-    };
-    let ack: PublishAck;
+    const copies = deadLetterCopies(
+      {
+        consumer: options.consumer,
+        subject: message.subject,
+        streamSeq: message.streamSeq,
+        deliveryCount,
+        error,
+        envelope: message.data,
+      },
+      dlqId,
+      options.bus.maxPayloadBytes?.(),
+    );
+    const acks: PublishAck[] = [];
     try {
-      ack = await options.bus.publish({
-        subject: `ta.dlq.${options.consumer}`,
-        data: JSON.stringify(letter),
-        msgId: `dlq:${options.consumer}:${envelopeId}`,
-      });
+      // One at a time: a failure stops the rest, and the redelivery republishes them all.
+      for (const copy of copies) {
+        acks.push(await options.bus.publish(copy));
+      }
     } catch (publishError) {
       log.error(
         { err: publishError, cause: error.cause, deliveryCount, delayMs: DLQ_FAILURE_DELAY_MS },
@@ -240,8 +232,10 @@ export async function createConsumerRunner(
         cause: error.cause,
         reason: error.message,
         deliveryCount,
-        dlqStreamSeq: ack.streamSeq,
-        duplicate: ack.duplicate,
+        dlqId,
+        parts: acks.length,
+        dlqStreamSeq: acks[0]?.streamSeq,
+        duplicate: acks.every((ack) => ack.duplicate),
       },
       "message dead-lettered",
     );
@@ -299,6 +293,16 @@ export async function createConsumerRunner(
   });
 
   return { pollOnce, ...loop };
+}
+
+/**
+ * The DLQ id of a message without `Nats-Msg-Id`: its main-stream sequence, which a redelivery
+ * keeps, plus a digest of its data, so a stream recreated inside the duplicate window (sequences
+ * restart) cannot make an unrelated message look like a duplicate copy and be termed unkept.
+ */
+function missingIdDlqId(consumer: string, message: ReceivedMessage): string {
+  const digest = createHash("sha256").update(message.data).digest("hex").slice(0, 16);
+  return `dlq:${consumer}:main:${message.streamSeq}:${digest}`;
 }
 
 function parseJson(data: string): unknown {

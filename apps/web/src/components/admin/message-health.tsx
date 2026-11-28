@@ -22,6 +22,10 @@ function Figure({ label, value }: { readonly label: string; readonly value: stri
   );
 }
 
+/**
+ * Redeliveries are the broker's count for the messages it is redelivering now, not a running total
+ * since the consumer was created: they drop back as those messages are acked, hence "(current)".
+ */
 function DeliveryFigures({
   delivery,
 }: {
@@ -36,7 +40,7 @@ function DeliveryFigures({
             <TableHead scope="col">Consumer</TableHead>
             <TableHead scope="col">Lag</TableHead>
             <TableHead scope="col">Pending acks</TableHead>
-            <TableHead scope="col">Redeliveries</TableHead>
+            <TableHead scope="col">Redeliveries (current)</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>

@@ -33,7 +33,7 @@ export interface RepublishInput {
  * with the operator and reason, in the same transaction as the move. Resolves to the rows moved.
  */
 export async function republishOutboxEvents(
-  prisma: PrismaClient,
+  prisma: Pick<PrismaClient, "$executeRawUnsafe">,
   input: RepublishInput,
 ): Promise<number> {
   if (input.operator.trim() === "" || input.reason.trim() === "") {

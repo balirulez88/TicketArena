@@ -52,7 +52,13 @@ and `num_redelivered` (of those, the ones delivered more than once: a current fi
 total), `null` for a consumer the broker does not know; for the DLQ stream its message count and the
 age of its first retained message (`null` while empty). The worker reports its own consumers.
 `status` stays `ok` and the response 200 whatever they report: a `FAILED` row is an operator alert, never a
-liveness failure.
+liveness failure. `/health` is also Fly's liveness check (5 s timeout), so the three probes (Redis,
+the Postgres outbox metrics, the NATS delivery figures) run concurrently, each with its own deadline
+(`health.deadlinesMs`, default `DEFAULT_HEALTH_PROBE_DEADLINE_MS` = 2 s): a probe that rejects or
+misses its deadline is reported `"unavailable"` and the others as usual, so a hung dependency (a
+JetStream API call alone may wait the client's 5 s default) costs at most one deadline, never the
+check. The web dashboard reads `/health` with an 800 ms timeout, so while a probe hangs it shows the
+NATS figures as unavailable.
 
 - **Relay** (`packages/messaging/src/outbox-relay.ts`): every 250 ms interval it claims a batch of 100 `PENDING`
   rows with `FOR UPDATE SKIP LOCKED` in one transaction, publishes each to `ta.<eventType>` with
@@ -90,8 +96,8 @@ liveness failure.
   no `BackOff`, `MaxDeliver` -1). Each message runs in one transaction that first inserts
   `processed_messages(consumer, messageId, streamSeq)` and then calls the handler. A unique violation of
   that insert is a duplicate and is acked; any handler error, including its own unique violation, rolls back
-  and `nak`s with the ADR 0011 delay (1 s, 5 s, 30 s, 2 min). A message without `Nats-Msg-Id` is `term`ed and
-  never processed. An optional `beforeTransaction(message)` step runs first, outside the transaction, on every
+  and `nak`s with the ADR 0011 delay (1 s, 5 s, 30 s, 2 min). A message without `Nats-Msg-Id` is never processed;
+  it is dead-lettered (below). An optional `beforeTransaction(message)` step runs first, outside the transaction, on every
   delivery (duplicates included); it is for slow work that must not hold the transaction (a provider's latency or
   call; it may commit its own short writes, never the dedupe row), must be safe to repeat, and a throw `nak`s like a
   handler failure. A handler may instead resolve to a `HandlerOutcome`
@@ -116,13 +122,28 @@ liveness failure.
   the budget. Every consumer in `createServiceConsumers` passes `schemas: { 1: envelopeSchema(<its subject's
   payload schema>) }` from `@ticketarena/contracts`, so in the worker a schema-invalid or unknown-version message
   is dead-lettered on its first delivery, before the payment provider step or any handler runs. A `poison` handler outcome is dead-lettered after the rollback
-  (`handler_poison`, with the handler's reason). Dead-lettering publishes a `DeadLetter` JSON body (`consumer`,
-  `subject`, `streamSeq`, `deliveryCount`, `error: { cause, message }`, and `envelope`: the original data byte
-  for byte) to `ta.dlq.<consumer>` with `Nats-Msg-Id = dlq:<consumer>:<envelope id>` (the message's
-  `Nats-Msg-Id`, which the relay sets to the envelope id), awaits the PubAck, logs `message dead-lettered` at
-  `error`, and only then `term`s. A crash between PubAck and `term` redelivers the message, which publishes the
-  same id again inside the DLQ's 10-minute duplicate window: no second copy (AT-28). A failed DLQ publish (stream
-  full, broker unreachable, any error) logs `DLQ publish failed; retrying` and `nak`s with 2 min, never `term`
+  (`handler_poison`, with the handler's reason). A message without `Nats-Msg-Id` has no safe dedupe key and is
+  dead-lettered too, on its first delivery and without running the handler (`missing_msg_id`).
+  **DLQ copy format** (`dead-letter.ts`): the copy is published to `ta.dlq.<consumer>` with the original data as
+  its body, unchanged, and the metadata in headers: `TA-DLQ-Consumer`, `TA-DLQ-Subject`, `TA-DLQ-Stream-Seq`,
+  `TA-DLQ-Delivery-Count`, `TA-DLQ-Cause` and `TA-DLQ-Reason` (one line, at most 1024 characters). There is no
+  wrapper around the body: a wrapper grows it, and a message that only just fitted the broker's `max_payload`
+  (headers count towards it) could then never be dead-lettered. When the original leaves less than 8 KiB under
+  `max_payload` (the bus reports it, `MessageBus.maxPayloadBytes`) the body is split on character boundaries into
+  parts that each fit, published one after another under `<dlq id>:part:<n>/<total>` with `TA-DLQ-Part:
+  <n>/<total>`; the split depends only on the data and the limit, so a redelivery publishes the same parts.
+  `readDeadLetters` turns copies back into `DeadLetter`s (`consumer`, `subject`, `streamSeq`, `deliveryCount`,
+  `error: { cause, message }`, `envelope`: the original data), joining parts. The DLQ id is
+  `dlq:<consumer>:<envelope id>` (the message's `Nats-Msg-Id`, which the relay sets to the envelope id); without
+  one it is `dlq:<consumer>:main:<stream seq>:<first 16 hex of the data's SHA-256>`, which a redelivery keeps and
+  which a recreated stream (its sequences restart) cannot give an unrelated message. The runner awaits the PubAck
+  of every part, logs `message dead-lettered` at `error`, and only then `term`s. A crash between PubAck and `term`
+  redelivers the message, which publishes the same ids again: no second copy (AT-28), **but only inside the DLQ
+  stream's 10-minute duplicate window**: the broker deduplicates by msg id within that window only, so a
+  redelivery later than that stores another copy (the redelivery after a crash comes after `AckWait`, 30 s, well
+  inside it; `readDeadLetters` then returns both). A
+  failed DLQ publish of any part (stream full, broker unreachable, too large, any error) logs `DLQ publish
+  failed; retrying` and `nak`s with 2 min, never `term`; the redelivery republishes every part
   (AT-29). `consumer-runner-dlq.test.ts` (AT-28, AT-30), `consumer-runner-dlq-failure.test.ts` (AT-29). A
   dead-lettered message is replayed by recreating its durable with `--ignore-ack-floor` once the cause is fixed
   (below); there is no separate DLQ replay tool.
@@ -142,13 +163,17 @@ liveness failure.
   service's `PUBLISHED` rows with `publishedAt` in `[from, to)` back to `PENDING` (`publishedAt` cleared,
   `permanentFailures` reset, a `PUBLISHED` -> `PENDING` history entry with operator and reason, in one statement);
   the relay publishes them again under their original ids and consumers deduplicate them. `FAILED` and `PENDING`
-  rows are never touched. `outbox-republish.test.ts` (including a lost stream).
+  rows are never touched. The script refuses a `--from` earlier than 14 days before now (the replay window, where
+  consumers still deduplicate). `outbox-republish.test.ts` (including a lost stream), `outbox-republish-main.test.ts`.
 - **Retention** (`outbox-retention.ts`): `pruneRetention({ prisma, now })` deletes, in every service schema and
   in batches of 1,000, the outbox rows `PUBLISHED` more than `RETENTION_MS` (14 days) ago and the
   `processed_messages` rows older than that. It never deletes a `PENDING` or `FAILED` row, a row with
   `outbox_event_history` (so the history's CASCADE never fires), or a booking `unknown_order`
   `payment.refund_requested` whose orphan refund obligation does not exist yet (the reconciler's cutover catch-up
-  still reads it). The worker runs it hourly (`RETENTION_INTERVAL_MS`). `outbox-retention.test.ts`.
+  still reads it). The DELETE re-checks `status` and `publishedAt` on the row it locks, so a row a concurrent
+  re-publish moved to `PENDING` while the DELETE waited survives with its history (READ COMMITTED re-evaluates the
+  condition on the committed row). The worker runs it hourly (`RETENTION_INTERVAL_MS`). `outbox-retention.test.ts`
+  (including both orders of that race).
 - **Port:** `MessageBus` hides the broker; `jetstream-message-bus.ts` is the only module importing
   `@nats-io/*` (a test enforces it). The adapter reconnects to the broker without limit (`maxReconnectAttempts: -1`;
   the client's default of 10 attempts would close the connection for good after about 20 s, stopping the

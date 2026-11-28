@@ -1,3 +1,5 @@
+import { jetstream } from "@nats-io/jetstream";
+import { connect } from "@nats-io/transport-node";
 import { envelopeSchema, orderPlacedPayloadSchema } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
 import { setupTestDatabase, setupTestNats } from "@ticketarena/test-infra";
@@ -8,6 +10,7 @@ import {
   type DeadLetter,
   type MessageBus,
   type ReceivedMessage,
+  readDeadLetters,
 } from "./index.js";
 
 // ADR 0011 DLQ routing against real NATS and Postgres: the DLQ gate before the handler, the
@@ -55,6 +58,7 @@ function recordingBus(settlements: Settlement[], dropTerms = 0): MessageBus {
   return {
     ensureTopology: () => bus.ensureTopology(),
     publish: (input) => bus.publish(input),
+    maxPayloadBytes: () => bus.maxPayloadBytes?.(),
     close: () => bus.close(),
     subscribe: async (spec) => {
       const subscription = await bus.subscribe(spec);
@@ -105,7 +109,11 @@ function parseLetter(copy: ReceivedMessage | undefined): DeadLetter {
   if (copy === undefined) {
     throw new Error("no DLQ copy");
   }
-  return JSON.parse(copy.data) as DeadLetter;
+  const [letter] = readDeadLetters([copy]);
+  if (letter === undefined) {
+    throw new Error("no dead letter in the DLQ copy");
+  }
+  return letter;
 }
 
 const orderPlacedSchemas = { 1: envelopeSchema(orderPlacedPayloadSchema) };
@@ -369,5 +377,116 @@ describe("the DLQ gate: poison messages (AT-30)", () => {
     });
     expect(await prisma.processedMessage.count({ where: { consumer: name } })).toBe(0);
     expect(await prisma.outboxEvent.count({ where: { id } })).toBe(0);
+  });
+});
+
+describe("preserving what the envelope id cannot name or a wrapper cannot fit", () => {
+  it("dead-letters a message without a Nats-Msg-Id under an id derived from its stream sequence, once across a crash before term", async () => {
+    const settlements: Settlement[] = [];
+    const { name, subject } = newConsumer();
+    let handled = 0;
+    const options = {
+      prisma,
+      consumer: name,
+      filterSubject: subject,
+      // Longer than the runner's 1 s fetch window, so an expiry cannot happen inside one poll.
+      ackWaitMs: 2_000,
+      handler: async () => {
+        handled += 1;
+        return undefined;
+      },
+    };
+    const crashing = await createConsumerRunner({ ...options, bus: recordingBus(settlements, 1) });
+    const connection = await connect({ servers: nats.url });
+    let streamSeq: number;
+    try {
+      const ack = await jetstream(connection).publish(
+        `${nats.subjectPrefix}.${subject}`,
+        "anonymous",
+      );
+      streamSeq = ack.seq;
+    } finally {
+      await connection.close();
+    }
+
+    await crashing.pollOnce();
+
+    expect(handled).toBe(0);
+    expect(settlements).toEqual([{ deliveryCount: 1, settled: "term" }]);
+    const first = await dlqCopies(name);
+    expect(first).toHaveLength(1);
+    const dlqId = first[0]?.msgId;
+    expect(dlqId).toMatch(new RegExp(`^dlq:${name}:main:${streamSeq}:[0-9a-f]+$`));
+    expect(parseLetter(first[0])).toEqual({
+      consumer: name,
+      subject,
+      streamSeq,
+      deliveryCount: 1,
+      error: { cause: "missing_msg_id", message: expect.stringContaining("Nats-Msg-Id") },
+      envelope: "anonymous",
+    });
+
+    // The lost term leaves the delivery unsettled; AckWait expires and a restarted runner gets it.
+    await new Promise((resolve) => setTimeout(resolve, 2_200));
+    const restarted = await createConsumerRunner({ ...options, bus: recordingBus(settlements) });
+    expect(await restarted.pollOnce()).toBe(1);
+
+    expect(settlements.at(-1)).toEqual({ deliveryCount: 2, settled: "term" });
+    const after = await dlqCopies(name);
+    expect(after.map((copy) => copy.msgId)).toEqual([dlqId]);
+    expect(handled).toBe(0);
+    expect(await restarted.pollOnce()).toBe(0);
+  });
+
+  it("preserves a message just under the broker's max_payload in full before term, once across a crash before term", async () => {
+    const settlements: Settlement[] = [];
+    const { name, subject } = newConsumer();
+    const options = {
+      prisma,
+      consumer: name,
+      filterSubject: subject,
+      ackWaitMs: 2_000,
+      handler: async () => ({ outcome: "poison" as const, reason: "unknown_order" }),
+    };
+    const crashing = await createConsumerRunner({ ...options, bus: recordingBus(settlements, 1) });
+    const connection = await connect({ servers: nats.url });
+    const maxPayload = connection.info?.max_payload ?? 0;
+    await connection.close();
+    expect(maxPayload).toBeGreaterThan(0);
+    const id = crypto.randomUUID();
+    // The original fits with its own `Nats-Msg-Id` header (about 60 bytes), with no room for any
+    // metadata beside it. Multi-byte characters, so a split must respect character boundaries.
+    const size = maxPayload - 100;
+    const head = JSON.stringify({ id, pad: "" });
+    const padBytes = size - Buffer.byteLength(head);
+    const pad =
+      "é".repeat(Math.floor(padBytes / 4)) + "x".repeat(padBytes - 2 * Math.floor(padBytes / 4));
+    const data = JSON.stringify({ id, pad });
+    expect(Buffer.byteLength(data)).toBe(size);
+    const published = await bus.publish({ subject, data, msgId: id });
+
+    await crashing.pollOnce();
+
+    expect(settlements).toEqual([{ deliveryCount: 1, settled: "term" }]);
+    const expected = {
+      consumer: name,
+      subject,
+      streamSeq: published.streamSeq,
+      deliveryCount: 1,
+      error: { cause: "handler_poison", message: "unknown_order" },
+      envelope: data,
+    };
+    const first = await dlqCopies(name);
+    expect(readDeadLetters(first)).toEqual([expected]);
+    expect(first.every((copy) => copy.msgId?.startsWith(`dlq:${name}:${id}`))).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 2_200));
+    const restarted = await createConsumerRunner({ ...options, bus: recordingBus(settlements) });
+    expect(await restarted.pollOnce()).toBe(1);
+
+    expect(settlements.at(-1)).toEqual({ deliveryCount: 2, settled: "term" });
+    const after = await dlqCopies(name);
+    expect(after.map((copy) => copy.msgId)).toEqual(first.map((copy) => copy.msgId));
+    expect(readDeadLetters(after)).toEqual([expected]);
   });
 });

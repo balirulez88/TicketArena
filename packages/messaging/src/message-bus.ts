@@ -10,6 +10,8 @@ export interface PublishInput {
   readonly data: string;
   /** Broker-side dedupe key (`Nats-Msg-Id`): the outbox row id for relayed events. */
   readonly msgId: string;
+  /** Extra message headers; values must not contain CR or LF. They count towards the limit. */
+  readonly headers?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -57,6 +59,8 @@ export interface ReceivedMessage {
   readonly data: string;
   /** `Nats-Msg-Id` header; undefined when the publisher did not set one. */
   readonly msgId: string | undefined;
+  /** Every header the message carries, `Nats-Msg-Id` included; the JetStream adapter sets it. */
+  readonly headers?: Readonly<Record<string, string>>;
   readonly streamSeq: number;
   /** JetStream's delivery counter; it also counts crashes and AckWait expiries. */
   readonly deliveryCount: number;
@@ -84,6 +88,11 @@ export interface MessageBus {
    * Rejects with `PermanentPublishError` when the message itself can never be published.
    */
   publish(input: PublishInput): Promise<PublishAck>;
+  /**
+   * The largest message, headers and data together, the broker accepts; omitted (or undefined)
+   * when the broker has no such limit or it is not known yet.
+   */
+  maxPayloadBytes?(): number | undefined;
   subscribe(spec: ConsumerSpec): Promise<MessageSubscription>;
   close(): Promise<void>;
 }

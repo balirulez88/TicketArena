@@ -1,3 +1,5 @@
+import { jetstream } from "@nats-io/jetstream";
+import { connect } from "@nats-io/transport-node";
 import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
 import { setupTestDatabase, setupTestNats } from "@ticketarena/test-infra";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -44,6 +46,7 @@ function recordingBus(settlements: Settlement[]): MessageBus {
   return {
     ensureTopology: () => bus.ensureTopology(),
     publish: (input) => bus.publish(input),
+    maxPayloadBytes: () => bus.maxPayloadBytes?.(),
     close: () => bus.close(),
     subscribe: async (spec) => {
       const subscription = await bus.subscribe(spec);
@@ -72,6 +75,40 @@ function recordingBus(settlements: Settlement[]): MessageBus {
 }
 
 describe("a failed DLQ publish (AT-29)", () => {
+  // Runs first: the test below restores the DLQ to its production size.
+  it("naks a message without a Nats-Msg-Id with 2 minutes and never terms it while its DLQ copy is unconfirmed", async () => {
+    const settlements: Settlement[] = [];
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const name = `dlq-fail-${suffix}`;
+    const subject = `ta.order.dlqfail${suffix}`;
+    let handled = 0;
+    const runner = await createConsumerRunner({
+      bus: recordingBus(settlements),
+      prisma,
+      consumer: name,
+      filterSubject: subject,
+      handler: async () => {
+        handled += 1;
+        return undefined;
+      },
+    });
+    const connection = await connect({ servers: nats.url });
+    try {
+      await jetstream(connection).publish(`${nats.subjectPrefix}.${subject}`, "anonymous");
+    } finally {
+      await connection.close();
+    }
+
+    await runner.pollOnce();
+    await runner.pollOnce();
+
+    expect(handled).toBe(0);
+    expect(settlements).toEqual([
+      { deliveryCount: 1, settled: "nak", delayMs: 120_000 },
+      { deliveryCount: 2, settled: "nak", delayMs: 120_000 },
+    ]);
+  });
+
   it("naks the message with 2 minutes and never terms it, so it is redelivered and dead-lettered once the DLQ accepts it", async () => {
     const settlements: Settlement[] = [];
     const suffix = crypto.randomUUID().slice(0, 8);

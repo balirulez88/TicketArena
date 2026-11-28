@@ -945,7 +945,7 @@ How are permanent failures counted and what is the cap?
 
 Assumed: New permanentFailures column (attempts still counts every failure), cap 5 (DEFAULT_MAX_PERMANENT_FAILURES, injectable); failedAt set exactly while FAILED (CHECK); requeue resets permanentFailures and clears failedAt; transient failures are not written to outbox_event_history
 
-Answer: (open)
+Answer: Decided (2026-11-28, PR #21 review): Cap at five permanent failures. attempts counts all failures, permanentFailures only permanent ones; a requeue resets permanentFailures and clears failedAt.
 
 ## 2026-11-27 12:29 ticket 59
 
@@ -953,7 +953,7 @@ How does the relay survive a long broker outage?
 
 Assumed: JetStream adapter reconnects without limit (maxReconnectAttempts -1) instead of the client default (~20 s then give up); production behaviour change
 
-Answer: (open)
+Answer: Decided (2026-11-28, PR #21 review): Reconnect to NATS indefinitely; every publish and JetStream API call is bounded by a timeout.
 
 ## 2026-11-27 12:29 ticket 59
 
@@ -961,7 +961,7 @@ How does /health expose outbox failures without breaking existing assertions?
 
 Assumed: Optional health.outbox probe (main.ts passes it) adds outbox: { alert, services } while status stays ok; reports unavailable if the metrics query fails; oldestFailedAgeMs from failedAt, null when none
 
-Answer: (open)
+Answer: Decided (2026-11-28, PR #21 review): Outbox diagnostics and the alert flag are accepted. A failed probe reports unavailable, oldestFailedAgeMs is null with no FAILED rows, and liveness stays responsive: each probe runs concurrently under its own deadline.
 
 ## 2026-11-27 12:29 ticket 59
 
@@ -969,7 +969,7 @@ History table shape?
 
 Assumed: Per-service outbox_event_history, insert-only, text columns with CHECK constraints, ON DELETE CASCADE from the outbox row (FAILED rows are never deleted)
 
-Answer: (open)
+Answer: Decided (2026-11-28, PR #21 review): Per-service append-only history is accepted. Audit records survive republish and retention running concurrently.
 
 ## 2026-11-27 12:55 ticket 25
 
@@ -977,7 +977,7 @@ Where do the envelope schemas for the DLQ gate come from?
 
 Assumed: Runner takes an optional schemas option (per version, safeParse-shaped); no worker consumer passes it yet, so their schema-invalid messages reach the DLQ via the delivery budget; wiring schemas into createServiceConsumers is a follow-up
 
-Answer: (open)
+Answer: Decided (2026-11-28, PR #21 review): Schemas for each supported version and for the event each consumer handles; production consumer registration already passes them, so the earlier assumption is superseded.
 
 ## 2026-11-27 12:55 ticket 25
 
@@ -985,7 +985,7 @@ DLQ body shape and failure delay?
 
 Assumed: DeadLetter {consumer, subject, streamSeq, deliveryCount, error {cause, message}, envelope as the raw data string}; envelope id = Nats-Msg-Id; a failed DLQ publish naks a fixed 2 min indefinitely; budget gate runs before the dedupe check per ADR 0011
 
-Answer: (open)
+Answer: Decided (2026-11-28, PR #21 review): Keep the original envelope, cause and delivery count. A failed DLQ publish naks with two minutes; term only after the DLQ copy is confirmed. Missing message ids and the size limit are covered, and the broker duplicate window is documented.
 
 ## 2026-11-27 13:40 ticket 27
 
@@ -993,7 +993,7 @@ What does outbox re-publish select and record?
 
 Assumed: Only PUBLISHED rows by publishedAt in [from, to), back to PENDING under original ids, publishedAt cleared, permanentFailures reset, a PUBLISHED->PENDING history entry with operator and reason; FAILED/PENDING untouched
 
-Answer: (open)
+Answer: Decided (2026-11-28, PR #21 review): PUBLISHED rows by publishedAt in [from, to), original ids kept, the transition recorded atomically. The automatic CLI path enforces the documented replay window.
 
 ## 2026-11-27 13:40 ticket 27
 
@@ -1001,7 +1001,7 @@ What does the 14-day retention keep?
 
 Assumed: Hourly pruneRetention ages outbox rows by publishedAt; never deletes PENDING/FAILED, any row with history (kept for good), or unknown_order refund requests without an orphan obligation; no new indexes
 
-Answer: (open)
+Answer: Decided (2026-11-28, PR #21 review): Prune hourly at 14 days by publishedAt. PENDING, FAILED, audited rows and unknown_order refund requests without a durable obligation are kept; the race with republish is covered.
 
 ## 2026-11-27 13:40 ticket 27
 
@@ -1009,7 +1009,7 @@ When is a processed_messages checkpoint reliable, and how is a dead-lettered mes
 
 Assumed: Reliable when the stream's first retained message is newer than the 14-day retention; an ack floor under another filter is ignored; --ignore-ack-floor replays a terminated (dead-lettered) message
 
-Answer: (open)
+Answer: Decided (2026-11-28, PR #21 review): The ack floor for the same filter; when unavailable, a reliable checkpoint scan for the first unprocessed matching message, or replay from the earliest retained one. --ignore-ack-floor serves DLQ replay while the original is still in the main stream.
 
 ## 2026-11-27 16:25 ticket 36
 
@@ -1017,7 +1017,7 @@ What does admin.feed return without a cursor, and does it include payloads?
 
 Assumed: Newest limit entries (default 50, max 200) of all three outboxes by (createdAt, id); nextCursor echoes input when nothing new; never the payload (buyer PII); correlationId from the envelope, nullable; new (createdAt, id) index
 
-Answer: (open)
+Answer: Decided (2026-11-28, PR #21 review): Default 50, max 200, cursor-based polling that keeps the cursor on an empty result; no payloads or buyer PII. Late commits can fall behind the operator feed cursor, and the docs say so.
 
 ## 2026-11-27 16:25 ticket 36
 
@@ -1025,7 +1025,7 @@ How does the web dashboard get NATS delivery health from a private worker?
 
 Assumed: Optional WORKER_HEALTH_URL (zod, 800 ms timeout); unset in documented prod so NATS figures show unavailable; outbox lag read from Postgres; redeliveries = current num_redelivered
 
-Answer: (open)
+Answer: Decided (2026-11-28, PR #21 review): Optional WORKER_HEALTH_URL and the 800 ms web timeout are accepted; production without private connectivity shows NATS figures as unavailable. Redeliveries are labelled as a current count.
 
 ## 2026-11-27 16:25 ticket 36
 
@@ -1033,4 +1033,4 @@ retryRefund error mapping and stuckRefunds scope?
 
 Assumed: NOT_FOUND without an obligation, PRECONDITION_FAILED (REFUND_NOT_IN_MANUAL_REVIEW) otherwise, both naming the payment; stuckRefunds lists all open obligations (default 100, max 500) aged from the first request; no rate limit on retry
 
-Answer: (open)
+Answer: Decided (2026-11-28, PR #21 review): NOT_FOUND without an obligation, PRECONDITION_FAILED for an obligation outside MANUAL_REVIEW. Both open states are listed, aged from the first request; admin authentication and the transactional state check stay. No separate retry rate limit.

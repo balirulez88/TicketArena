@@ -76,15 +76,18 @@ export interface WorkerOptions {
     readonly reapIntervalMs?: number;
   };
   /**
-   * Dependencies `/health` reports on separately, each a bounded probe that rejects when the
-   * dependency is unreachable. Redis is reported, never required: the worker runs without it.
+   * Dependencies `/health` reports on separately, each a probe that rejects when the dependency is
+   * unreachable. Redis is reported, never required: the worker runs without it.
    * `outbox` reads the FAILED outbox metrics (`measureOutboxFailures`) for the alert flag;
    * `delivery` reads the broker's consumer and DLQ figures (`deliveryHealth`) for the dashboard.
+   * `deadlinesMs` bounds each probe; one that misses its deadline is reported `unavailable`.
+   * Each defaults to `DEFAULT_HEALTH_PROBE_DEADLINE_MS`.
    */
   readonly health?: {
     readonly redis?: () => Promise<unknown>;
     readonly outbox?: () => Promise<Record<ServiceName, OutboxFailureMetrics>>;
     readonly delivery?: () => Promise<DeliveryHealth>;
+    readonly deadlinesMs?: Partial<Record<HealthProbeName, number>>;
   };
   /**
    * The deadline for stopping what a failed start already started, after which the start error
@@ -94,45 +97,70 @@ export interface WorkerOptions {
   readonly stopBudget?: StopBudget;
 }
 
+export type HealthProbeName = "redis" | "outbox" | "delivery";
+
+/**
+ * The default deadline of each `/health` probe. `/health` is the Fly liveness check, whose timeout
+ * is 5 s (infra/fly/worker/fly.toml); the probes run concurrently, so the whole answer takes at
+ * most one deadline, well inside it. Without it a hung dependency (a JetStream API call waits 5 s
+ * by default) would make the platform fail the check and restart a worker that is fine.
+ */
+export const DEFAULT_HEALTH_PROBE_DEADLINE_MS = 2000;
+
+const UNAVAILABLE = Symbol("unavailable");
+
+/** Settles with the probe's value, or `UNAVAILABLE` when it rejects, throws or misses `deadlineMs`. */
+function withinDeadline<T>(
+  probe: () => Promise<T>,
+  deadlineMs: number,
+): Promise<T | typeof UNAVAILABLE> {
+  return new Promise((resolve) => {
+    // A probe that settles after its deadline is ignored; its late rejection is still handled.
+    const timer = setTimeout(() => resolve(UNAVAILABLE), deadlineMs);
+    Promise.resolve()
+      .then(probe)
+      .then(
+        (value) => resolve(value),
+        () => resolve(UNAVAILABLE),
+      )
+      .finally(() => clearTimeout(timer));
+  });
+}
+
 /**
  * `/health`: the worker itself is up (`status` is always `ok`, so neither a dependency nor a FAILED
  * outbox row ever fails liveness); Redis, when probed, is `ok` or `unavailable`; the outbox, when
  * measured, carries the FAILED metrics per service and `alert`, set while any row is FAILED; the
  * delivery figures, when probed, are the broker's consumer lag, pending acks, redeliveries and DLQ
  * size and age, or `unavailable`. Every part is optional and added, never changed, so existing
- * readers of `/health` keep working.
+ * readers of `/health` keep working. The probes run concurrently, each bounded by its own deadline.
  */
 async function healthReport(health: WorkerOptions["health"]): Promise<object> {
-  const redis =
+  const deadlineOf = (name: HealthProbeName): number =>
+    health?.deadlinesMs?.[name] ?? DEFAULT_HEALTH_PROBE_DEADLINE_MS;
+  const [redis, outbox, delivery] = await Promise.all([
     health?.redis === undefined
       ? {}
-      : {
-          redis: await health.redis().then(
-            () => "ok",
-            () => "unavailable",
-          ),
-        };
-  const outbox =
+      : withinDeadline(health.redis, deadlineOf("redis")).then((answer) => ({
+          redis: answer === UNAVAILABLE ? "unavailable" : "ok",
+        })),
     health?.outbox === undefined
       ? {}
-      : {
-          outbox: await health.outbox().then(
-            (services) => ({
-              alert: Object.values(services).some((metrics) => metrics.failed > 0),
-              services,
-            }),
-            () => "unavailable",
-          ),
-        };
-  const delivery =
+      : withinDeadline(health.outbox, deadlineOf("outbox")).then((services) => ({
+          outbox:
+            services === UNAVAILABLE
+              ? "unavailable"
+              : {
+                  alert: Object.values(services).some((metrics) => metrics.failed > 0),
+                  services,
+                },
+        })),
     health?.delivery === undefined
       ? {}
-      : {
-          delivery: await health.delivery().then(
-            (figures): DeliveryHealth | "unavailable" => figures,
-            () => "unavailable",
-          ),
-        };
+      : withinDeadline(health.delivery, deadlineOf("delivery")).then((figures) => ({
+          delivery: figures === UNAVAILABLE ? "unavailable" : figures,
+        })),
+  ]);
   return { status: "ok", ...redis, ...outbox, ...delivery };
 }
 

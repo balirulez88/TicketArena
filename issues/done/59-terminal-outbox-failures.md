@@ -40,6 +40,15 @@ TD-038 (a permanently unpublishable row blocks its whole aggregate):
 - `apps/worker/src/failed-outbox-consumer-flow.test.ts` :: "applies ${later.type} while order.placed is FAILED, then the requeued order.placed, ending as in-order delivery with every effect once"
 - `apps/worker/src/failed-outbox-consumer-flow.test.ts` :: "refuses payment.refunded without any change while payment.succeeded is FAILED, then ends as in-order delivery with every effect once"
 
+## Review fix (PR #21): liveness stays responsive
+
+`/health` runs its diagnostic probes (Redis, the Postgres outbox metrics, the NATS delivery figures) concurrently, each with its own injectable deadline (`health.deadlinesMs`, default `DEFAULT_HEALTH_PROBE_DEADLINE_MS` = 2 s); a probe that rejects or misses it is `unavailable`, so a hung dependency never makes Fly's 5 s check time out.
+
+- `apps/worker/src/health-deadline.test.ts` :: "reports a probe that never resolves as unavailable within its deadline, and the others normally"
+- `apps/worker/src/health-deadline.test.ts` :: "runs the probes concurrently: three hung probes cost one deadline, not three"
+- `apps/worker/src/health-deadline.test.ts` :: "answers well within Fly's 5 s check timeout with the default deadlines"
+- `apps/worker/src/deploy-config.test.ts` :: "bounds the /health probes well inside the check's timeout, so a hung probe never fails it"
+
 **Documentation deliverable (reviewed, not test-verified):**
 
 - [ADR 0022](../docs/adr/0022-terminal-failed-outbox-events.md) already records the decided policy (accepted 2026-11-14, before this ticket's implementation); this ticket completes it and keeps it true: what counts as permanent, the cap, the `FAILED` state and what it preserves, that a `FAILED` row releases its aggregate (the consumer-side DLQ in ADR 0011 already accepts the same gap), and that failed events are never discarded or marked delivered. It lists, per aggregate with more than one event type, what each consumer does when a later event arrives before an earlier one; a new multi-event aggregate adds a row there.

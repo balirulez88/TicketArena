@@ -25,6 +25,9 @@ kill_timeout = "30s"
   ADMIT_RATE_PER_SECOND = "10"
   MAX_ACTIVE = "100"
 
+# /health is liveness: it always answers `ok` while the process serves. Its diagnostic probes
+# (Redis, Postgres, NATS) run concurrently, each bounded by DEFAULT_HEALTH_PROBE_DEADLINE_MS (2 s,
+# apps/worker/src/worker.ts), so a hung dependency is reported `unavailable` inside this timeout.
 [checks]
   [checks.health]
     type = "http"

@@ -526,9 +526,10 @@ service schema, `outbox_events` rows `PUBLISHED` more than 14 days ago (by `publ
 deletes a `PENDING` or `FAILED` row, nor a row with any `outbox_event_history` entry, so the
 history's `ON DELETE CASCADE` never removes an audit trail; and it keeps a booking `unknown_order`
 `payment.refund_requested` row until its `orphan_refund_obligations` row exists (the reconciler's
-cutover catch-up reads it). Ledger rows, orphan obligations and refunds are never touched: they do
-not depend on the outbox. Events published more than 14 days ago can no longer be re-published
-([runbook](../messaging/consumer-recovery.md#the-14-day-limit)).
+cutover catch-up reads it). The DELETE re-checks `status` and `publishedAt` on each row it locks, so
+a row that a concurrent `outbox:republish` moved to `PENDING` first keeps its row and its history. Ledger rows, orphan obligations and refunds are never touched: they do
+not depend on the outbox. Events published more than 14 days ago can no longer be re-published, and
+`outbox:republish` refuses such a range ([runbook](../messaging/consumer-recovery.md#the-14-day-limit)).
 
 ## Rules
 

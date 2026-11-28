@@ -18,12 +18,16 @@ export {
   type ConsumerRunner,
   type ConsumerRunnerOptions,
   createConsumerRunner,
-  type DeadLetter,
-  type DeadLetterCause,
   type HandlerContext,
   type HandlerOutcome,
   type MessageSchema,
 } from "./consumer-runner.js";
+export {
+  DEAD_LETTER_HEADERS,
+  type DeadLetter,
+  type DeadLetterCause,
+  readDeadLetters,
+} from "./dead-letter.js";
 export type {
   ConsumerDeliveryHealth,
   DeliveryHealth,

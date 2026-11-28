@@ -14,3 +14,9 @@
 - [ ] The worker health endpoint reports consumer lag, pending acks, redeliveries, DLQ size and oldest DLQ age; the dashboard shows them alongside outbox lag.
 - [ ] `admin.stuckRefunds` lists `REFUND_REQUESTED` and `MANUAL_REVIEW` rows with their age; `admin.retryRefund` triggers the retry.
 - [ ] The snapshot includes `late_delivery_refund`, `deadlock_retry`, `booking_busy`, `limit_exceeded` and `refund_pending_age_max`.
+
+## Review fix (PR #21): redeliveries are a current count
+
+The consumer table labels the column "Redeliveries (current)": `num_redelivered` counts the messages being redelivered now, not a running total.
+
+- `apps/web/src/components/admin/admin.test.tsx` :: "labels redeliveries as the broker's current count, not a running total"

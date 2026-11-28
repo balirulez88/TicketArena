@@ -19,6 +19,7 @@ import {
   connect,
   InvalidArgumentError,
   type NatsConnection,
+  headers as natsHeaders,
   RequestError,
 } from "@nats-io/transport-node";
 import type {
@@ -245,11 +246,18 @@ class JetStreamMessageBus implements MessageBus, DeliveryHealthProbe {
   async publish(input: PublishInput): Promise<PublishAck> {
     const subject = this.subjectPrefix + input.subject;
     try {
-      const ack = await this.client.publish(subject, input.data, { msgID: input.msgId });
+      const ack = await this.client.publish(subject, input.data, {
+        msgID: input.msgId,
+        ...(input.headers === undefined ? {} : { headers: toNatsHeaders(input.headers) }),
+      });
       return { streamSeq: ack.seq, duplicate: ack.duplicate };
     } catch (error) {
       throw await this.classifyPublishFailure(subject, error);
     }
+  }
+
+  maxPayloadBytes(): number | undefined {
+    return this.connection.info?.max_payload;
   }
 
   /** The permanent failure `error` proves, or `error` itself (transient). See the constants. */
@@ -508,12 +516,25 @@ function isNoResponders(error: unknown): boolean {
   return error instanceof RequestError && error.isNoResponders();
 }
 
+function toNatsHeaders(values: Readonly<Record<string, string>>) {
+  const result = natsHeaders();
+  for (const [key, value] of Object.entries(values)) {
+    result.set(key, value);
+  }
+  return result;
+}
+
 function toReceived(message: JsMsg, subjectPrefix: string): ReceivedMessage {
   const msgId = message.headers?.get(MSG_ID_HEADER);
+  const received: Record<string, string> = {};
+  for (const key of message.headers?.keys() ?? []) {
+    received[key] = message.headers?.get(key) ?? "";
+  }
   return {
     subject: message.subject.slice(subjectPrefix.length),
     data: new TextDecoder().decode(message.data),
     msgId: msgId === undefined || msgId === "" ? undefined : msgId,
+    headers: received,
     streamSeq: message.info.streamSequence,
     deliveryCount: message.info.deliveryCount,
     ack: () => message.ack(),

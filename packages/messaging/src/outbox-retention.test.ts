@@ -1,7 +1,7 @@
 import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
 import { setupTestDatabase } from "@ticketarena/test-infra";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { pruneRetention, RETENTION_MS, readOutboxHistory } from "./index.js";
+import { pruneRetention, RETENTION_MS, readOutboxHistory, republishOutboxEvents } from "./index.js";
 
 // The 14-day retention job (ADR 0011 retention invariant) against real Postgres.
 const database = setupTestDatabase();
@@ -51,6 +51,84 @@ function outboxRow(overrides: {
     ...(overrides.failedAt === undefined ? {} : { failedAt: overrides.failedAt }),
   };
 }
+
+/**
+ * Resolves once a statement matching `queryPattern` (SQL `LIKE`) waits on a row lock in this test's
+ * database, so a race test knows the other side is really blocked before it lets go.
+ */
+async function untilWaitingOnLock(queryPattern: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const waiting = await prisma.$queryRawUnsafe<{ count: bigint }[]>(
+      `SELECT count(*) AS count FROM pg_stat_activity
+       WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE $1`,
+      queryPattern,
+    );
+    if ((waiting[0]?.count ?? 0n) > 0n) {
+      return;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`no statement like ${queryPattern} started waiting on a lock`);
+    }
+    await new Promise((wake) => setTimeout(wake, 20));
+  }
+}
+
+describe("pruneRetention racing republishOutboxEvents", () => {
+  const republishOld = {
+    service: "booking" as const,
+    publishedFrom: new Date(OLD.getTime() - 60_000),
+    publishedTo: new Date(OLD.getTime() + 60_000),
+    operator: "alice",
+    reason: "stream lost",
+    at: NOW,
+  };
+
+  it("keeps a row whose republish commits while retention waits on it: it stays PENDING with its history", async () => {
+    const old = outboxRow({ status: "PUBLISHED", createdAt: OLD, publishedAt: OLD });
+    await prisma.outboxEvent.create({ data: old });
+
+    let pruning: ReturnType<typeof pruneRetention> | undefined;
+    // The republish holds the row lock until this callback returns; retention starts meanwhile,
+    // selects the row (its snapshot still says PUBLISHED, no history) and waits on the lock.
+    await prisma.$transaction(
+      async (tx) => {
+        expect(await republishOutboxEvents(tx, republishOld)).toBe(1);
+        pruning = pruneRetention({ prisma, now: NOW });
+        await untilWaitingOnLock('DELETE FROM "public"."outbox_events"%');
+      },
+      { timeout: 20_000 },
+    );
+    const pruned = await pruning;
+
+    expect(pruned?.booking.outbox).toBe(0);
+    expect((await prisma.outboxEvent.findUniqueOrThrow({ where: { id: old.id } })).status).toBe(
+      "PENDING",
+    );
+    expect(await readOutboxHistory(prisma, "booking", old.id)).toEqual([
+      expect.objectContaining({ fromStatus: "PUBLISHED", toStatus: "PENDING", operator: "alice" }),
+    ]);
+  }, 30_000);
+
+  it("re-publishes nothing and records no history for a row retention deleted first", async () => {
+    const old = outboxRow({ status: "PUBLISHED", createdAt: OLD, publishedAt: OLD });
+    await prisma.outboxEvent.create({ data: old });
+
+    let republishing: Promise<number> | undefined;
+    await prisma.$transaction(
+      async (tx) => {
+        expect((await pruneRetention({ prisma: tx, now: NOW })).booking.outbox).toBe(1);
+        republishing = republishOutboxEvents(prisma, republishOld);
+        await untilWaitingOnLock("WITH moved AS (%");
+      },
+      { timeout: 20_000 },
+    );
+
+    expect(await republishing).toBe(0);
+    expect(await prisma.outboxEvent.count()).toBe(0);
+    expect(await prisma.outboxEventHistory.count()).toBe(0);
+  }, 30_000);
+});
 
 describe("pruneRetention", () => {
   it("deletes every service's PUBLISHED outbox rows published more than 14 days ago and keeps the rest", async () => {

@@ -50,18 +50,40 @@ describe("deliveryHealth", () => {
       redeliveries: 0,
     });
 
-    first?.nak();
-    const [again] = await subscription.fetch({ maxMessages: 1, expiresMs: 2000 });
-    expect(again?.deliveryCount).toBe(2);
-    const afterRedelivery = await bus.deliveryHealth([consumer.name], new Date());
-    expect(afterRedelivery.consumers[consumer.name]).toEqual({
-      lag: 2,
-      pendingAcks: 1,
-      redeliveries: 1,
-    });
+    if (first === undefined) {
+      throw new Error("the first message was not delivered");
+    }
+    // A nak is fire-and-forget: a fetch sent before the broker applied it gets the next new
+    // message (delivery count 1) instead. Wait for the first message itself, by its stream
+    // sequence, and hold anything delivered in between unacked; the counters below account for it.
+    first.nak();
+    const held: Awaited<ReturnType<typeof subscription.fetch>> = [];
+    let again: (typeof held)[number] | undefined;
+    while (again === undefined) {
+      const [next] = await subscription.fetch({ maxMessages: 1, expiresMs: 2000 });
+      if (next === undefined) {
+        throw new Error("the nak'd message was not redelivered");
+      }
+      if (next.streamSeq === first.streamSeq) {
+        again = next;
+      } else {
+        held.push(next);
+      }
+    }
+    expect(again.deliveryCount).toBe(2);
+    await expect
+      .poll(async () => (await bus.deliveryHealth([consumer.name], new Date())).consumers, {
+        timeout: 5000,
+      })
+      .toEqual({
+        [consumer.name]: { lag: 2 - held.length, pendingAcks: 1 + held.length, redeliveries: 1 },
+      });
 
-    again?.ack();
-    const rest = await subscription.fetch({ maxMessages: 2, expiresMs: 2000 });
+    again.ack();
+    for (const message of held) {
+      message.ack();
+    }
+    const rest = await subscription.fetch({ maxMessages: 2 - held.length, expiresMs: 2000 });
     for (const message of rest) {
       message.ack();
     }

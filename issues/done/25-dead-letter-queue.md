@@ -29,3 +29,17 @@ each seen failing first against real NATS:
 - `packages/messaging/src/consumer-runner-dlq.test.ts` :: "dead-letters a message without a Nats-Msg-Id under an id derived from its stream sequence, once across a crash before term"
 - `packages/messaging/src/consumer-runner-dlq.test.ts` :: "preserves a message just under the broker's max_payload in full before term, once across a crash before term"
 - `packages/messaging/src/consumer-runner-dlq-failure.test.ts` :: "naks a message without a Nats-Msg-Id with 2 minutes and never terms it while its DLQ copy is unconfirmed"
+
+## Review fix (PR #21, second round): part layouts
+
+A HIGH review finding: part ids held only `<n>/<total>` while the split offsets depend on `max_payload`, so
+a retry after a limit change could get a duplicate PubAck for the old part 1, store a new part 2 and term
+the original, joining bytes of two layouts. Part ids are now `<dlq id>:part:<layout>:<n>/<total>`, each
+part carries `TA-DLQ-Layout` and `TA-DLQ-Digest`, and `readDeadLetters` joins per layout, checks the
+digest and ignores an incomplete layout beside a complete one. New tests:
+
+- `packages/messaging/src/consumer-runner-dlq.test.ts` :: "reconstructs the exact original when only part 1 was stored and max_payload changed before the retry, with the same number of parts" (seen failing first)
+- `packages/messaging/src/dead-letter.test.ts` :: the four "split DLQ copies" tests
+
+`delivery-health.test.ts` no longer assumes the fetch after a `nak` returns the nak'd message: it waits
+for that message by stream sequence and polls the broker counters.

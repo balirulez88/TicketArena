@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { PublishInput, ReceivedMessage } from "./message-bus.js";
 
 /** Why a message was dead-lettered. */
@@ -42,6 +43,10 @@ export const DEAD_LETTER_HEADERS = {
   reason: "TA-DLQ-Reason",
   /** `<n>/<total>`, only on a copy split into parts. */
   part: "TA-DLQ-Part",
+  /** The part size in bytes the copy was split with, only on a split copy. */
+  layout: "TA-DLQ-Layout",
+  /** SHA-256 (hex) of the whole original, only on a split copy: checked when parts are joined. */
+  digest: "TA-DLQ-Digest",
 } as const;
 
 // Room kept for the headers of each part of a split copy. The reason is capped below so every
@@ -54,8 +59,14 @@ const PART_SEPARATOR = ":part:";
  * The publishes that make up the DLQ copy of `letter` under `dlqId`. One publish when the original
  * leaves room for the headers under `maxPayloadBytes` (or no limit is known); otherwise the
  * original is split, on character boundaries, into parts that each fit, published under
- * `<dlqId>:part:<n>/<total>`. The split depends only on the data and the limit, so a redelivery
- * after a crash republishes the same ids and the broker's duplicate window drops every part.
+ * `<dlqId>:part:<layout>:<n>/<total>`, where the layout is the part size.
+ *
+ * The layout is in the id because the split offsets depend on the limit. With the same limit a
+ * redelivery after a crash republishes the same ids and the broker's duplicate window drops every
+ * part. With a changed limit the parts are cut elsewhere, and under layout-free ids a retry could
+ * get a duplicate PubAck for an old part 1 and store a new part 2 beside it, joining bytes of two
+ * layouts. A new layout therefore gets new ids and is stored whole; the reader joins parts per
+ * layout and checks the whole original's digest.
  */
 export function deadLetterCopies(
   letter: DeadLetter,
@@ -78,51 +89,77 @@ export function deadLetterCopies(
     return [{ subject, data: letter.envelope, msgId: dlqId, headers }];
   }
   const parts = splitByBytes(letter.envelope, room);
+  const layout = String(room);
+  const digest = sha256(letter.envelope);
   return parts.map((data, index) => {
     const part = `${index + 1}/${parts.length}`;
     return {
       subject,
       data,
-      msgId: `${dlqId}${PART_SEPARATOR}${part}`,
-      headers: { ...headers, [DEAD_LETTER_HEADERS.part]: part },
+      msgId: `${dlqId}${PART_SEPARATOR}${layout}:${part}`,
+      headers: {
+        ...headers,
+        [DEAD_LETTER_HEADERS.part]: part,
+        [DEAD_LETTER_HEADERS.layout]: layout,
+        [DEAD_LETTER_HEADERS.digest]: digest,
+      },
     };
   });
 }
 
 /**
  * The dead letters a set of DLQ copies (one consumer's `ta.dlq.<consumer>`) holds, in the order
- * their copies complete. The parts of a split copy are joined back into the original. Throws on a
- * message that is not a DLQ copy and on a split copy whose parts are not all present.
+ * their copies complete. The parts of a split copy are joined per layout and checked against the
+ * original's digest. An incomplete layout is ignored when another layout of the same copy is
+ * complete (a retry after a `max_payload` change stores a whole new layout). Throws on a message
+ * that is not a DLQ copy, on a joined copy whose digest does not match, and on a split copy with no
+ * complete layout.
  */
 export function readDeadLetters(copies: readonly ReceivedMessage[]): DeadLetter[] {
   const letters: DeadLetter[] = [];
-  const pending = new Map<string, { total: number; parts: Map<number, string> }>();
+  const pending = new Map<string, { base: string; total: number; parts: Map<number, string> }>();
+  const completed = new Set<string>();
   for (const copy of copies) {
     const part = copy.headers?.[DEAD_LETTER_HEADERS.part];
     if (part === undefined) {
       letters.push(readLetter(copy, copy.data));
       continue;
     }
-    const [index, total] = part.split("/").map(Number);
     const msgId = copy.msgId ?? "";
-    const base = msgId.slice(0, msgId.lastIndexOf(PART_SEPARATOR));
+    const [index, total] = part.split("/").map(Number);
     if (index === undefined || total === undefined || !(index >= 1 && index <= total)) {
       throw new Error(`DLQ copy ${msgId} has an invalid ${DEAD_LETTER_HEADERS.part}: ${part}`);
     }
-    const group = pending.get(base) ?? { total, parts: new Map<number, string>() };
+    const base = msgId.slice(0, msgId.lastIndexOf(PART_SEPARATOR));
+    const layout = copy.headers?.[DEAD_LETTER_HEADERS.layout] ?? "";
+    const groupKey = `${base}\u0000${layout}`;
+    const group = pending.get(groupKey) ?? { base, total, parts: new Map<number, string>() };
     group.parts.set(index, copy.data);
-    pending.set(base, group);
+    pending.set(groupKey, group);
     if (group.parts.size === group.total) {
-      pending.delete(base);
-      const data = Array.from({ length: group.total }, (_, i) => group.parts.get(i + 1) ?? "");
-      letters.push(readLetter(copy, data.join("")));
+      pending.delete(groupKey);
+      completed.add(base);
+      letters.push(readLetter(copy, joinParts(group, copy, layout)));
     }
   }
-  const [incomplete] = pending.keys();
+  const incomplete = [...pending.values()].find((group) => !completed.has(group.base));
   if (incomplete !== undefined) {
-    throw new Error(`DLQ copy ${incomplete} is missing parts`);
+    throw new Error(`DLQ copy ${incomplete.base} is missing parts`);
   }
   return letters;
+}
+
+/** The parts of one layout joined in order, refused unless they hash to the original's digest. */
+function joinParts(
+  group: { base: string; total: number; parts: Map<number, string> },
+  copy: ReceivedMessage,
+  layout: string,
+): string {
+  const data = Array.from({ length: group.total }, (_, i) => group.parts.get(i + 1) ?? "").join("");
+  if (copy.headers?.[DEAD_LETTER_HEADERS.digest] !== sha256(data)) {
+    throw new Error(`DLQ copy ${group.base} (layout ${layout}) does not match its digest`);
+  }
+  return data;
 }
 
 function readLetter(copy: ReceivedMessage, envelope: string): DeadLetter {
@@ -171,4 +208,8 @@ function splitByBytes(data: string, maxBytes: number): string[] {
   }
   parts.push(data.slice(start));
   return parts;
+}
+
+function sha256(data: string): string {
+  return createHash("sha256").update(data).digest("hex");
 }

@@ -130,10 +130,14 @@ NATS figures as unavailable.
   wrapper around the body: a wrapper grows it, and a message that only just fitted the broker's `max_payload`
   (headers count towards it) could then never be dead-lettered. When the original leaves less than 8 KiB under
   `max_payload` (the bus reports it, `MessageBus.maxPayloadBytes`) the body is split on character boundaries into
-  parts that each fit, published one after another under `<dlq id>:part:<n>/<total>` with `TA-DLQ-Part:
-  <n>/<total>`; the split depends only on the data and the limit, so a redelivery publishes the same parts.
-  `readDeadLetters` turns copies back into `DeadLetter`s (`consumer`, `subject`, `streamSeq`, `deliveryCount`,
-  `error: { cause, message }`, `envelope`: the original data), joining parts. The DLQ id is
+  parts that each fit, published one after another under `<dlq id>:part:<layout>:<n>/<total>` with `TA-DLQ-Part:
+  <n>/<total>`, `TA-DLQ-Layout` (the part size in bytes) and `TA-DLQ-Digest` (SHA-256 hex of the whole original).
+  The split offsets depend on the limit, so the layout is in the id: with the same limit a redelivery publishes
+  the same ids, and after a `max_payload` change it stores a whole new layout instead of mixing new parts with an
+  old part the broker deduplicates. `readDeadLetters` turns copies back into `DeadLetter`s (`consumer`, `subject`,
+  `streamSeq`, `deliveryCount`, `error: { cause, message }`, `envelope`: the original data), joining parts per
+  layout and checking the digest; an incomplete layout is ignored when the same copy has a complete one
+  (`dead-letter.test.ts`). The DLQ id is
   `dlq:<consumer>:<envelope id>` (the message's `Nats-Msg-Id`, which the relay sets to the envelope id); without
   one it is `dlq:<consumer>:main:<stream seq>:<first 16 hex of the data's SHA-256>`, which a redelivery keeps and
   which a recreated stream (its sequences restart) cannot give an unrelated message. The runner awaits the PubAck

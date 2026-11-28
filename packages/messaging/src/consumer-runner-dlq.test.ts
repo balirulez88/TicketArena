@@ -545,4 +545,65 @@ describe("preserving what the envelope id cannot name or a wrapper cannot fit", 
       },
     ]);
   });
+
+  it("reads exactly one DLQ copy with the original bytes when only part 1 was stored and the retry, after max_payload grew, stored it unsplit", async () => {
+    const settlements: Settlement[] = [];
+    const { name, subject } = newConsumer();
+    // The limit the bus reports, standing in for a broker whose max_payload was reconfigured
+    // between deliveries. The first limit splits this message into two parts; the second fits it whole.
+    let reportedLimit = 8 * 1024 + 12_000;
+    let failPart2 = true;
+    const recording = recordingBus(settlements);
+    const flakyBus: MessageBus = {
+      ...recording,
+      maxPayloadBytes: () => reportedLimit,
+      publish: async (input) => {
+        if (failPart2 && input.headers?.[DEAD_LETTER_HEADERS.part]?.startsWith("2/")) {
+          failPart2 = false;
+          throw new Error("broker unavailable while publishing part 2");
+        }
+        return bus.publish(input);
+      },
+    };
+    const runner = await createConsumerRunner({
+      bus: flakyBus,
+      prisma,
+      consumer: name,
+      filterSubject: subject,
+      handler: async () => ({ outcome: "poison" as const, reason: "unknown_order" }),
+    });
+    const id = crypto.randomUUID();
+    const data = JSON.stringify({ id, pad: "é".repeat(4_000) + "x".repeat(12_000) });
+    expect(Buffer.byteLength(data)).toBeGreaterThan(15_000);
+    expect(Buffer.byteLength(data)).toBeLessThan(24_000);
+    const published = await bus.publish({ subject, data, msgId: id });
+
+    await runner.pollOnce();
+    expect(settlements).toEqual([{ deliveryCount: 1, settled: "nak", delayMs: 120_000 }]);
+    expect((await dlqCopies(name)).map((copy) => copy.headers?.[DEAD_LETTER_HEADERS.part])).toEqual(
+      ["1/2"],
+    );
+
+    reportedLimit = 8 * 1024 + 30_000;
+    await runner.pollOnce();
+
+    expect(settlements.at(-1)).toEqual({ deliveryCount: 2, settled: "term" });
+    const copies = await dlqCopies(name);
+    expect(copies.map((copy) => copy.headers?.[DEAD_LETTER_HEADERS.part])).toEqual([
+      "1/2",
+      undefined,
+    ]);
+    const letters = readDeadLetters(copies);
+    expect(Buffer.from(letters[0]?.envelope ?? "").equals(Buffer.from(data))).toBe(true);
+    expect(letters).toEqual([
+      {
+        consumer: name,
+        subject,
+        streamSeq: published.streamSeq,
+        deliveryCount: 2,
+        error: { cause: "handler_poison", message: "unknown_order" },
+        envelope: data,
+      },
+    ]);
+  });
 });

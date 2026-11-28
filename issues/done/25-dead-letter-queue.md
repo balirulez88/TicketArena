@@ -43,3 +43,14 @@ digest and ignores an incomplete layout beside a complete one. New tests:
 
 `delivery-health.test.ts` no longer assumes the fetch after a `nak` returns the nak'd message: it waits
 for that message by stream sequence and polls the broker counters.
+
+## Review fix (PR #21, third round): an unsplit retry
+
+A HIGH review finding: when the first attempt stored only part 1 and `max_payload` then grew enough for
+the retry to store the original unsplit, `readDeadLetters` still threw "missing parts", because only a
+completed split layout marked a DLQ id complete. An unsplit copy now marks its DLQ id complete too; the
+missing-parts error stays for a DLQ id with no complete copy, and split copies are still digest-checked.
+New tests, each seen failing first:
+
+- `packages/messaging/src/consumer-runner-dlq.test.ts` :: "reads exactly one DLQ copy with the original bytes when only part 1 was stored and the retry, after max_payload grew, stored it unsplit"
+- `packages/messaging/src/dead-letter.test.ts` :: "reads the whole copy a retry stored unsplit after max_payload grew, ignoring the older part 1"

@@ -62,6 +62,20 @@ describe("split DLQ copies", () => {
     );
   });
 
+  it("reads the whole copy a retry stored unsplit after max_payload grew, ignoring the older part 1", () => {
+    const [oldPart1] = deadLetterCopies(letter, "dlq:unit:x", 8 * 1024 + 9_000);
+    const whole = deadLetterCopies(letter, "dlq:unit:x", 8 * 1024 * 1024);
+    if (oldPart1 === undefined) {
+      throw new Error("no part 1");
+    }
+    expect(whole).toHaveLength(1);
+
+    const letters = readDeadLetters([oldPart1, ...whole].map(received));
+
+    expect(letters).toEqual([letter]);
+    expect(Buffer.from(letters[0]?.envelope ?? "").equals(Buffer.from(letter.envelope))).toBe(true);
+  });
+
   it("still reports a split copy with no complete layout as missing parts", () => {
     const [part1] = deadLetterCopies(letter, "dlq:unit:x", 8 * 1024 + 9_000);
     if (part1 === undefined) {

@@ -111,7 +111,8 @@ export function deadLetterCopies(
  * The dead letters a set of DLQ copies (one consumer's `ta.dlq.<consumer>`) holds, in the order
  * their copies complete. The parts of a split copy are joined per layout and checked against the
  * original's digest. An incomplete layout is ignored when another layout of the same copy is
- * complete (a retry after a `max_payload` change stores a whole new layout). Throws on a message
+ * complete, or when the copy was also stored unsplit (a retry after a `max_payload` change stores a
+ * whole new layout, or the whole original once it fits). Throws on a message
  * that is not a DLQ copy, on a joined copy whose digest does not match, and on a split copy with no
  * complete layout.
  */
@@ -122,6 +123,9 @@ export function readDeadLetters(copies: readonly ReceivedMessage[]): DeadLetter[
   for (const copy of copies) {
     const part = copy.headers?.[DEAD_LETTER_HEADERS.part];
     if (part === undefined) {
+      // An unsplit copy is complete for its DLQ id: a retry after `max_payload` grew stores the
+      // whole original under the bare id, beside any part a smaller limit left behind.
+      completed.add(copy.msgId ?? "");
       letters.push(readLetter(copy, copy.data));
       continue;
     }

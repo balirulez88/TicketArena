@@ -136,8 +136,8 @@ NATS figures as unavailable.
   the same ids, and after a `max_payload` change it stores a whole new layout instead of mixing new parts with an
   old part the broker deduplicates. `readDeadLetters` turns copies back into `DeadLetter`s (`consumer`, `subject`,
   `streamSeq`, `deliveryCount`, `error: { cause, message }`, `envelope`: the original data), joining parts per
-  layout and checking the digest; an incomplete layout is ignored when the same copy has a complete one
-  (`dead-letter.test.ts`). The DLQ id is
+  layout and checking the digest; an incomplete layout is ignored when the same copy has a complete one or
+  was also stored unsplit (a retry once the original fits under a grown limit) (`dead-letter.test.ts`). The DLQ id is
   `dlq:<consumer>:<envelope id>` (the message's `Nats-Msg-Id`, which the relay sets to the envelope id); without
   one it is `dlq:<consumer>:main:<stream seq>:<first 16 hex of the data's SHA-256>`, which a redelivery keeps and
   which a recreated stream (its sequences restart) cannot give an unrelated message. The runner awaits the PubAck

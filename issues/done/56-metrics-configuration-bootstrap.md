@@ -1,6 +1,6 @@
 # 56: Metrics configuration bootstrap
 
-**What to build:** the web app can reach Upstash Redis for booking metrics, with its configuration validated at the boundary, and a missing or invalid metrics configuration can never break requests that do not use metrics (health check, session). Spec: Admin dashboard (metrics); ADR 0012, ADR 0013. Remediation split from ticket 12 (part 3 of 4, see `issues/12-lock-timeout-and-deadlock-retry.md`): its second rejected attempt made every tRPC request fail when the Upstash variables were absent.
+**What to build:** the web app can reach Upstash Redis for booking metrics, with its configuration validated at the boundary, and a missing or invalid metrics configuration can never break requests that do not use metrics (health check, session). Spec: Admin dashboard (metrics); ADR 0012, ADR 0013. Remediation split from ticket 12 (part 3 of 4, see `issues/done/12-lock-timeout-and-deadlock-retry.md`): its second rejected attempt made every tRPC request fail when the Upstash variables were absent.
 
 **Blocked by:** None (can start immediately)
 

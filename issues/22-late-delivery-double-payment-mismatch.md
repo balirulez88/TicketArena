@@ -14,3 +14,9 @@
 - [ ] AT-21: second payment on a confirmed order → refunded; exactly one `APPLIED`.
 - [ ] AT-22: amount or currency mismatch → refund, not confirmation.
 - [ ] The best-effort nature of the grace period is documented.
+
+Regression coverage (each test seen failing first, or named as already green with the reason):
+
+- [ ] A late successful payment: a `payment.succeeded` captured on time but delivered after the order expired leaves the order `EXPIRED`, requests exactly one refund for that payment and increments `late_delivery_refund` once; captured on time and delivered within grace confirms the order.
+- [ ] Two distinct successful payments for the same order (two payment ids): exactly one is `APPLIED` and confirms the order, the other is refunded exactly once, whichever is delivered first.
+- [ ] Duplicate delivery of the same payment event (same payment id and event id, redelivered by the broker): the order is confirmed once, no refund is requested, no counter increments twice and no second outbox event is emitted.

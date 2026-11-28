@@ -8,7 +8,9 @@
 
 **Blocked by:** 54, 55, 56, 57 (its replacements)
 
-**Status:** blocked
+**Status:** done
+
+**Completed:** 2026-11-28, archived as done by its replacements, all done: [54](54-transaction-timeouts-and-retries.md), [55](55-deterministic-transaction-tests.md), [56](56-metrics-configuration-bootstrap.md), [57](57-production-booking-metrics.md). No work was done under this ticket.
 
 Ground rules
 

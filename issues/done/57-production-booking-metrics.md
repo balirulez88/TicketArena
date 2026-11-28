@@ -1,6 +1,6 @@
 # 57: Production booking metrics
 
-**What to build:** the running web app counts booking outcomes in Upstash Redis: `hold_ok`, `booking_busy` and `deadlock_retry` (and the existing refusal counters) reach the per-event hash for both `holdSeats` and `placeOrder`, best-effort, without ever failing a booking. Spec: Holding seats (steps 3–4), Admin dashboard (story 39); ADR 0005. Split from ticket 12 (part 4 of 4, see `issues/12-lock-timeout-and-deadlock-retry.md`). Owns TD-070 in `docs/technical-debt.md`.
+**What to build:** the running web app counts booking outcomes in Upstash Redis: `hold_ok`, `booking_busy` and `deadlock_retry` (and the existing refusal counters) reach the per-event hash for both `holdSeats` and `placeOrder`, best-effort, without ever failing a booking. Spec: Holding seats (steps 3–4), Admin dashboard (story 39); ADR 0005. Split from ticket 12 (part 4 of 4, see `issues/done/12-lock-timeout-and-deadlock-retry.md`). Owns TD-070 in `docs/technical-debt.md`.
 
 **Blocked by:** 54, 55, 56
 

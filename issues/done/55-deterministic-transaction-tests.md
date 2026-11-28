@@ -1,6 +1,6 @@
 # 55: Deterministic transaction tests
 
-**What to build:** the booking and router tests that exercise locking, saturation and rollback are deterministic: they synchronise on Postgres state instead of time, give every test its own database clients, and prove that a booking transaction which fails after its writes have begun, on a first or a retried attempt, leaves nothing behind. Spec: Holding seats; ADR 0005, ADR 0010. Split from ticket 12 (part 2 of 4, see `issues/12-lock-timeout-and-deadlock-retry.md`). Owns TD-006, TD-016, TD-018, TD-071, TD-076 and TD-079 in `docs/technical-debt.md`.
+**What to build:** the booking and router tests that exercise locking, saturation and rollback are deterministic: they synchronise on Postgres state instead of time, give every test its own database clients, and prove that a booking transaction which fails after its writes have begun, on a first or a retried attempt, leaves nothing behind. Spec: Holding seats; ADR 0005, ADR 0010. Split from ticket 12 (part 2 of 4, see `issues/done/12-lock-timeout-and-deadlock-retry.md`). Owns TD-006, TD-016, TD-018, TD-071, TD-076 and TD-079 in `docs/technical-debt.md`.
 
 **Reference only:** two rejected attempts of ticket 12 (branches `rejected/12-lock-timeout-and-deadlock-retry-20261106-132615` and `-20261106-165157`) may be read; their code and reviews count for nothing here. Both were rejected because a test pattern was fixed in one file and left in another: every rule below applies to every file in scope, not only to files a review names.
 

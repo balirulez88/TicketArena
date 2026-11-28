@@ -1,6 +1,6 @@
 # 54: Transaction timeouts and retries
 
-**What to build:** under heavy contention a booking request never hangs and never fails with an opaque internal error: booking transactions run under bounded lock and statement timeouts, retryable conflicts retry the whole transaction, and contention the retry cannot absorb becomes a retryable `BOOKING_BUSY`, while failures that are not contention stay visible as internal errors. Spec: Holding seats (step 3); ADR 0005. Split from ticket 12 (part 1 of 4, see `issues/12-lock-timeout-and-deadlock-retry.md`). Owns TD-020 and TD-067 in `docs/technical-debt.md`.
+**What to build:** under heavy contention a booking request never hangs and never fails with an opaque internal error: booking transactions run under bounded lock and statement timeouts, retryable conflicts retry the whole transaction, and contention the retry cannot absorb becomes a retryable `BOOKING_BUSY`, while failures that are not contention stay visible as internal errors. Spec: Holding seats (step 3); ADR 0005. Split from ticket 12 (part 1 of 4, see `issues/done/12-lock-timeout-and-deadlock-retry.md`). Owns TD-020 and TD-067 in `docs/technical-debt.md`.
 
 **Reference only:** two rejected attempts of ticket 12 (branches `rejected/12-lock-timeout-and-deadlock-retry-20261106-132615` and `-20261106-165157`) may be read; their code and reviews count for nothing here.
 

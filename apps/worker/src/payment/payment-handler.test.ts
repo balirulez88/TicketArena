@@ -326,6 +326,59 @@ describe("mock Payment handler", () => {
     ).toBe(1);
   });
 
+  it("captures twice with two payment ids for a +double@ buyer, as attempts 1 and 2", async () => {
+    const placed = await deliver("buyer+double@example.com");
+
+    const attempts = await prisma.paymentAttempt.findMany({
+      where: { orderId: placed.orderId },
+      orderBy: { attemptNo: "asc" },
+    });
+    expect(attempts).toMatchObject([
+      { attemptNo: 1, status: "CAPTURED", capturedAt: CAPTURE_TIME, amount: 12_500 },
+      { attemptNo: 2, status: "CAPTURED", capturedAt: CAPTURE_TIME, amount: 12_500 },
+    ]);
+    expect(new Set(attempts.map((attempt) => attempt.paymentId)).size).toBe(2);
+    const events = await prisma.paymentOutboxEvent.findMany({
+      where: {
+        eventType: "payment.succeeded",
+        payload: { path: ["orderId"], equals: placed.orderId },
+      },
+    });
+    expect(
+      events
+        .map((event) => {
+          const { paymentId, attemptNo } = (
+            event.payload as { payload: { paymentId: string; attemptNo: number } }
+          ).payload;
+          return [attemptNo, paymentId, event.aggregateId];
+        })
+        .sort(),
+    ).toEqual(attempts.map((attempt) => [attempt.attemptNo, attempt.paymentId, attempt.paymentId]));
+  });
+
+  it("captures a +double@ buyer twice even when the injected Random draws a failure", async () => {
+    const placed = await deliver("buyer+double@example.com", { random: 0.9, successRate: 0 });
+
+    expect(await succeededEventsFor(placed.orderId)).toBe(2);
+    expect(await failedEventsFor(placed.orderId)).toEqual([]);
+  });
+
+  it("captures a +double@ order only twice when its order.placed is repeated under a new event id", async () => {
+    const placed = await deliver("buyer+double@example.com");
+    const repeatId = randomUUID();
+
+    await bus.publish({
+      subject: placed.subject,
+      data: JSON.stringify({ ...placed.envelope, id: repeatId }),
+      msgId: repeatId,
+    });
+    await placed.runner.pollOnce();
+
+    expect(await prisma.paymentProcessedMessage.count({ where: { messageId: repeatId } })).toBe(1);
+    expect(await prisma.paymentAttempt.count({ where: { orderId: placed.orderId } })).toBe(2);
+    expect(await succeededEventsFor(placed.orderId)).toBe(2);
+  });
+
   it("waits a latency drawn from the injected Random before capturing", async () => {
     const sleeps: number[] = [];
 

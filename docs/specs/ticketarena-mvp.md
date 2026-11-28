@@ -312,6 +312,14 @@ A success whose amount or currency differs from the order total is always refund
 
 Every refund caused by an on-time payment delivered after expiry increments `late_delivery_refund`.
 
+The settlement grace is **best-effort**, not a guarantee. On time depends only on `capturedAt`, so
+an on-time capture delivered late confirms as long as the order is still `PENDING_PAYMENT`, which
+the sweeper (every 15 s, skipping locked orders) ends at some point after `paymentDeadline + 60s`.
+A delivery delayed beyond that (broker backlog, a stopped consumer, retries) is refunded although
+the buyer paid on time; `late_delivery_refund` makes that trade-off visible (best-effort itself:
+a rolled-back, retried message can over-count it). A provider status query before expiry is
+phase 2.
+
 ### Refund obligations and reconciliation
 
 - **Guarantee: eventual financial consistency.** Every capture on an order that cannot be fulfilled
@@ -341,14 +349,17 @@ Every refund caused by an on-time payment delivered after expiry increments `lat
 - Consumes `order.placed` and `payment.refund_requested`.
 - Skips (acks, logs) an `order.placed` whose `paymentDeadline` has already passed at processing
   time; this limits side effects of large replays.
-- One attempt per order in the MVP. Outcome by magic email, else random via injected `Random`
+- One attempt per order in the MVP (`+double@` adds a second). Outcome by magic email, else random via injected `Random`
   with configurable success rate and latency:
   - `+fail@` → `payment.failed` with `final: true`
   - `+late@` → capture after the deadline (demonstrates the late-payment refund): the attempt
     always captures and `capturedAt` is the order's `paymentDeadline` plus 1 s (provider time);
     the event is delivered at once, so booking sees a late capture on a still-open order
   - `+dup@` → publishes its result twice (demonstrates dedupe)
-  - `+double@` → captures twice with two payment ids (demonstrates refund of the extra charge)
+  - `+double@` → captures twice with two payment ids (demonstrates refund of the extra charge):
+    the attempt always captures and, in the same transaction, a second `CAPTURED` attempt
+    (`attemptNo` 2, same `capturedAt`) emits its own `payment.succeeded`; only the transaction
+    that wrote attempt 1 writes attempt 2, so a repeated `order.placed` never adds a third
 - Invariant (tested in the module): never emits `final: true` while another attempt for the order
   is in flight or captured.
 - Events carry `capturedAt` (provider time), distinct from delivery time. Clock skew between

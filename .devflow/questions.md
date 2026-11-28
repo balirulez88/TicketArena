@@ -1034,3 +1034,35 @@ retryRefund error mapping and stuckRefunds scope?
 Assumed: NOT_FOUND without an obligation, PRECONDITION_FAILED (REFUND_NOT_IN_MANUAL_REVIEW) otherwise, both naming the payment; stuckRefunds lists all open obligations (default 100, max 500) aged from the first request; no rate limit on retry
 
 Answer: Decided (2026-11-28, PR #21 review): NOT_FOUND without an obligation, PRECONDITION_FAILED for an obligation outside MANUAL_REVIEW. Both open states are listed, aged from the first request; admin authentication and the transactional state check stay. No separate retry rate limit.
+
+## 2026-11-28 17:17 ticket 22
+
+Are +double@'s two charges two attempts?
+
+Assumed: Yes: attempts 1 and 2, each its own paymentId, both CAPTURED, written in one order.placed transaction; only the tx whose attempt-1 insert wins writes attempt 2, so no lock per order is needed; real retries must still serialize attempts per order
+
+Answer: (open)
+
+## 2026-11-28 17:17 ticket 22
+
+Does +double@ override a random failure?
+
+Assumed: Yes, it always captures, like +late@
+
+Answer: (open)
+
+## 2026-11-28 17:17 ticket 22
+
+What occurredAt/capturedAt does the second +double@ capture use?
+
+Assumed: The same provider time as the first
+
+Answer: (open)
+
+## 2026-11-28 17:17 ticket 22
+
+Does an on-time capture delivered after deadline+grace but before the sweeper ran still confirm?
+
+Assumed: Yes, per ADR 0006; documented as part of the best-effort grace, no code change
+
+Answer: (open)

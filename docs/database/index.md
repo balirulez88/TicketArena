@@ -226,7 +226,9 @@ claims `PENDING_PAYMENT` orders with `paymentDeadline + 60 s` (settlement grace)
 order with the contact. Invariant: `IN_CHECKOUT` seats are freed only in the transaction that ends
 the checkout; lazy expiry and the hold sweeper never free them, so checkout outlives the hold's own
 expiry (AT-10). The only other such transactions are the payment saga's cancellation on a final payment failure (order `CANCELLED`, seats `AVAILABLE`, `order.cancelled`) and its expiry on a capture after the deadline (order `EXPIRED`, seats `AVAILABLE`, `order.expired`, a `REFUND_REQUESTED` ledger row and `payment.refund_requested`); the late payment never reclaims the seats. An order the payment saga has locked is skipped and re-checked next sweep. The hold
-stays `ORDERED`. `apps/worker` runs it every 15 s.
+stays `ORDERED`. The grace is best-effort: an on-time capture delivered before this sweep expires the
+order confirms it, one delivered after is refunded (`late_delivery`,
+[messaging](../messaging/index.md#payment-saga)). `apps/worker` runs it every 15 s.
 
 ### Transaction timeouts, retries and `BOOKING_BUSY`
 
@@ -454,12 +456,12 @@ validated; an unknown event id is `NOT_FOUND`. The tRPC context carries `db`.
 The mock Payment service ([ADR 0009](../adr/0009-per-service-schemas.md)) owns tables in the
 `payment` schema; booking never reads them and they carry no foreign keys to `public`.
 
-| Table                        | Purpose                                                                                                                                                                                          |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `payment.outbox_events`      | Payment's own outbox, same shape as `public.outbox_events`; the relay drains both                                                                                                                |
-| `payment.processed_messages` | Payment consumer dedupe, same shape as `public.processed_messages`                                                                                                                               |
-| `payment.payment_attempts`   | One row per provider attempt (`CAPTURED`, or `FAILED` with its `failureReason`): unique `(orderId, attemptNo)`; CHECKs `CAPTURED ⇔ capturedAt IS NOT NULL`, `FAILED ⇔ failureReason IS NOT NULL` |
-| `payment.refunds`            | One executed refund per payment: `paymentId` PK (the once-only guard, AT-23), `orderId`, `amount`, `currency`, `reason` (from the request), `refundedAt`                                         |
+| Table                        | Purpose                                                                                                                                                                                                                                                 |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `payment.outbox_events`      | Payment's own outbox, same shape as `public.outbox_events`; the relay drains both                                                                                                                                                                       |
+| `payment.processed_messages` | Payment consumer dedupe, same shape as `public.processed_messages`                                                                                                                                                                                      |
+| `payment.payment_attempts`   | One row per provider attempt (`CAPTURED`, or `FAILED` with its `failureReason`; attempt 1, plus a `CAPTURED` attempt 2 for `+double@`): unique `(orderId, attemptNo)`; CHECKs `CAPTURED ⇔ capturedAt IS NOT NULL`, `FAILED ⇔ failureReason IS NOT NULL` |
+| `payment.refunds`            | One executed refund per payment: `paymentId` PK (the once-only guard, AT-23), `orderId`, `amount`, `currency`, `reason` (from the request), `refundedAt`                                                                                                |
 
 ### `notification` schema
 

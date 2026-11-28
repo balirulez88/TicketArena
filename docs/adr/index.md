@@ -28,7 +28,7 @@ number sequentially, and never rewrite an accepted decision; supersede it with a
 | [0019](0019-readiness-checks-for-the-lead-driver.md)            | Readiness checks for the lead driver                            | Accepted                             |
 | [0020](0020-global-fail-closed-debt-hold.md)                    | Global, fail-closed debt hold (amends 0016)                     | Superseded in part by 0024           |
 | [0021](0021-rejected-work-is-not-published-by-default.md)       | Rejected work is not published by default                       | Accepted                             |
-| [0022](0022-terminal-failed-outbox-events.md)                   | Terminal FAILED outbox events release their aggregate           | Accepted (ticket 59 implements it)   |
+| [0022](0022-terminal-failed-outbox-events.md)                   | Terminal FAILED outbox events release their aggregate           | Accepted (implemented by ticket 59)  |
 | [0023](0023-quarantine-replay-namespaces-and-recovery-holds.md) | Quarantine replay namespaces and recovery holds                 | Accepted                             |
 | [0024](0024-frozen-debt-register-check.md)                      | Frozen debt register is checked for changes                     | Accepted                             |
 | [0025](0025-node-redis-over-tls-for-the-queue.md)               | Queue and worker counters use node-redis over TLS (amends 0013) | Accepted                             |

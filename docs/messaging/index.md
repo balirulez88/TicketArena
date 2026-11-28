@@ -40,14 +40,51 @@ subject another stream owns, the broker unreachable) propagates with its origina
 update is attempted (TD-036). The two streams' subjects are disjoint, so every message lands in
 exactly one of them. It never waits for Redis: the relay, the consumers and the sweeper
 run during a Redis outage (see [waiting room](../architecture/waiting-room.md#redis-outage)). It serves
-`GET /health`, which reports Redis separately (`"redis": "ok" | "unavailable"`).
+`GET /health`, which reports Redis separately (`"redis": "ok" | "unavailable"`) and the outbox's
+`FAILED` rows (`"outbox": { "alert": boolean, "services": { booking, payment, notification } }`, each
+`{ failed, oldestFailedAgeMs, failedTransitions }`, or `"unavailable"` when the database cannot be read)
+and the broker's delivery figures for the admin dashboard (`"delivery": { "consumers": { <durable>:
+{ lag, pendingAcks, redeliveries } | null }, "dlq": { size, oldestAgeMs } }`, or `"unavailable"` when
+JetStream cannot answer). They come from `deliveryHealth(consumers, now)`, which the JetStream adapter
+implements next to `MessageBus` (`DeliveryHealthProbe`): per durable consumer of the main stream
+`num_pending` (lag: matching messages not yet delivered), `num_ack_pending` (delivered, not settled)
+and `num_redelivered` (of those, the ones delivered more than once: a current figure, not a running
+total), `null` for a consumer the broker does not know; for the DLQ stream its message count and the
+age of its first retained message (`null` while empty). The worker reports its own consumers.
+`status` stays `ok` and the response 200 whatever they report: a `FAILED` row is an operator alert, never a
+liveness failure. `/health` is also Fly's liveness check (5 s timeout), so the three probes (Redis,
+the Postgres outbox metrics, the NATS delivery figures) run concurrently, each with its own deadline
+(`health.deadlinesMs`, default `DEFAULT_HEALTH_PROBE_DEADLINE_MS` = 2 s): a probe that rejects or
+misses its deadline is reported `"unavailable"` and the others as usual, so a hung dependency (a
+JetStream API call alone may wait the client's 5 s default) costs at most one deadline, never the
+check. The web dashboard reads `/health` with an 800 ms timeout, so while a probe hangs it shows the
+NATS figures as unavailable.
 
 - **Relay** (`packages/messaging/src/outbox-relay.ts`): every 250 ms interval it claims a batch of 100 `PENDING`
   rows with `FOR UPDATE SKIP LOCKED` in one transaction, publishes each to `ta.<eventType>` with
   `Nats-Msg-Id = outbox id`, awaits the PubAck and marks the row `PUBLISHED`. A failed publish increments
   `attempts`, stores `lastError` and leaves the row `PENDING`. Only the oldest `PENDING` row of an aggregate is
   claimable (`NOT EXISTS` an older `PENDING` row), so order per aggregate holds across concurrent relays: later
-  rows wait for a failed or in-flight earlier one, at one row per aggregate per tick. Rows of a rolled-back transaction never exist for the relay.
+  rows wait for an in-flight earlier one, or one whose publish failed transiently, at one row per aggregate per tick.
+  Rows of a rolled-back transaction never exist for the relay.
+  **Terminal failures** ([ADR 0022](../adr/0022-terminal-failed-outbox-events.md)): a publish failure is
+  _permanent_ when it is specific to the row: the adapter throws `PermanentPublishError` with `reason`
+  `no_stream` (no stream captures `ta.<eventType>`), `payload_too_large` (over the broker's `max_payload`) or
+  `unserialisable`; everything else (connection lost, PubAck timeout, JetStream unavailable, stream full) is
+  _transient_. A permanent failure also counts in `permanentFailures` and appends a `PUBLISH_FAILED` entry to
+  `outbox_event_history`; when `permanentFailures` reaches the relay's cap (`maxPermanentFailures`, default
+  `DEFAULT_MAX_PERMANENT_FAILURES` = 5) the row becomes `FAILED` (`failedAt` set, a `PENDING` → `FAILED`
+  history entry), all in the claim transaction. A `FAILED` row keeps its payload and id, is never published,
+  deleted or claimed again, and so **releases its aggregate**: later rows of that aggregate are published
+  after it (consumers tolerate the gap, see ADR 0022's table). Transient failures never count, so a broker
+  outage of any length never fails a row. After the transaction commits, the transition is logged once at
+  `error` (`outbox event FAILED: permanent publish failures reached the cap`, with `service`, `outboxId`,
+  `aggregateType`, `aggregateId`, `eventType`, `attempts`, `lastError`, never the payload); permanent
+  failures before the cap log at `warn`. Recovery is the operator's requeue
+  ([runbook](failed-outbox-event.md)): `requeueFailedOutboxEvent` (script `outbox:requeue`) moves one `FAILED`
+  row back to `PENDING` under its original id. `measureOutboxFailures({ prisma, now })` returns per service
+  the `FAILED` count, the oldest one's age and the transitions to `FAILED` in the history; `/health` reports
+  them with an `alert` flag.
   A tick that fails outside a row's publish (claim query, mark or commit; e.g. the database is unreachable)
   rolls back, leaves its rows `PENDING`, and the loop retries on the next tick. It is logged at `error` with the
   cause (`outbox relay tick failed`), rate-limited by `failure-reporter.ts` per cause: the first failure of each
@@ -59,27 +96,93 @@ run during a Redis outage (see [waiting room](../architecture/waiting-room.md#re
   no `BackOff`, `MaxDeliver` -1). Each message runs in one transaction that first inserts
   `processed_messages(consumer, messageId, streamSeq)` and then calls the handler. A unique violation of
   that insert is a duplicate and is acked; any handler error, including its own unique violation, rolls back
-  and `nak`s with the ADR 0011 delay (1 s, 5 s, 30 s, 2 min). A message without `Nats-Msg-Id` is `term`ed and
-  never processed. An optional `beforeTransaction(message)` step runs first, outside the transaction, on every
+  and `nak`s with the ADR 0011 delay (1 s, 5 s, 30 s, 2 min). A message without `Nats-Msg-Id` is never processed;
+  it is dead-lettered (below). An optional `beforeTransaction(message)` step runs first, outside the transaction, on every
   delivery (duplicates included); it is for slow work that must not hold the transaction (a provider's latency or
   call; it may commit its own short writes, never the dedupe row), must be safe to repeat, and a throw `nak`s like a
   handler failure. A handler may instead resolve to a `HandlerOutcome`
   (`{ outcome: "retry" | "poison", reason }`): the transaction rolls back (no `processed_messages` row, no
-  outbox writes) and the message is `nak`ed with the same delay; `poison` is logged as an error. Until the DLQ
-  exists, poison is redelivered rather than `term`ed, because ADR 0011 forbids `term` without a DLQ copy.
+  outbox writes); `retry` is `nak`ed with the same delay, `poison` is dead-lettered (below).
   A handler (or `beforeTransaction`) failure is logged at `error` with the error, `deliveryCount` and the chosen
   `delayMs` before the `nak`.
   **Retry schedule:** every failed delivery ends in a delayed `nak` (a bare `nak` would redeliver immediately), with the
   delay picked by JetStream's `deliveryCount`, the only attempt counter (it also counts crashes and `AckWait`
-  expiries and survives restarts): 1 s, 5 s, 30 s, 2 min, and 2 min for every later delivery until the DLQ gate
-  ends retries. The policy lives in code, not in a consumer `BackOff`. A handler (or `beforeTransaction` step) that
+  expiries and survives restarts): 1 s, 5 s, 30 s, 2 min, and 2 min for the 5th delivery; the 6th goes to the
+  DLQ. The policy lives in code, not in a consumer `BackOff`. A handler (or `beforeTransaction` step) that
   can outlast `AckWait` calls `message.working()` to keep the delivery from expiring and being redelivered to
   another worker. AT-27, `consumer-runner-retry.test.ts`. A failed poll (the broker is unreachable for `fetch`, or anything else escapes a batch) is logged at
   `error` with the cause (`consumer poll failed`, same rate limit and `consumer poll recovered` line as the
   relay) and the loop polls again after 1 s.
-  The DLQ gate (ticket 25), which would end the endless redelivery of a poison message, and recovery from ADR 0011 are not built yet.
+  **DLQ gate and routing** ([ADR 0011](../adr/0011-delivery-retry-dlq-recovery.md)): before `beforeTransaction` and the
+  handler, a delivery past the retry budget (`deliveryCount > 5`, cause `retry_budget_exhausted`) is dead-lettered
+  without running any consumer code, so a message that crashes the process every time still ends there. A runner
+  given `schemas` (envelope schema per `version`, structurally a zod `safeParse`) also dead-letters, on the first
+  delivery and without running the handler, a message that is not JSON or fails its version's schema
+  (`schema_invalid`) or whose `version` has no schema (`unknown_version`); without `schemas` the gate checks only
+  the budget. Every consumer in `createServiceConsumers` passes `schemas: { 1: envelopeSchema(<its subject's
+  payload schema>) }` from `@ticketarena/contracts`, so in the worker a schema-invalid or unknown-version message
+  is dead-lettered on its first delivery, before the payment provider step or any handler runs. A `poison` handler outcome is dead-lettered after the rollback
+  (`handler_poison`, with the handler's reason). A message without `Nats-Msg-Id` has no safe dedupe key and is
+  dead-lettered too, on its first delivery and without running the handler (`missing_msg_id`).
+  **DLQ copy format** (`dead-letter.ts`): the copy is published to `ta.dlq.<consumer>` with the original data as
+  its body, unchanged, and the metadata in headers: `TA-DLQ-Consumer`, `TA-DLQ-Subject`, `TA-DLQ-Stream-Seq`,
+  `TA-DLQ-Delivery-Count`, `TA-DLQ-Cause` and `TA-DLQ-Reason` (one line, at most 1024 characters). There is no
+  wrapper around the body: a wrapper grows it, and a message that only just fitted the broker's `max_payload`
+  (headers count towards it) could then never be dead-lettered. When the original leaves less than 8 KiB under
+  `max_payload` (the bus reports it, `MessageBus.maxPayloadBytes`) the body is split on character boundaries into
+  parts that each fit, published one after another under `<dlq id>:part:<layout>:<n>/<total>` with `TA-DLQ-Part:
+  <n>/<total>`, `TA-DLQ-Layout` (the part size in bytes) and `TA-DLQ-Digest` (SHA-256 hex of the whole original).
+  The split offsets depend on the limit, so the layout is in the id: with the same limit a redelivery publishes
+  the same ids, and after a `max_payload` change it stores a whole new layout instead of mixing new parts with an
+  old part the broker deduplicates. `readDeadLetters` turns copies back into `DeadLetter`s (`consumer`, `subject`,
+  `streamSeq`, `deliveryCount`, `error: { cause, message }`, `envelope`: the original data), joining parts per
+  layout and checking the digest; an incomplete layout is ignored when the same copy has a complete one or
+  was also stored unsplit (a retry once the original fits under a grown limit) (`dead-letter.test.ts`). The DLQ id is
+  `dlq:<consumer>:<envelope id>` (the message's `Nats-Msg-Id`, which the relay sets to the envelope id); without
+  one it is `dlq:<consumer>:main:<stream seq>:<first 16 hex of the data's SHA-256>`, which a redelivery keeps and
+  which a recreated stream (its sequences restart) cannot give an unrelated message. The runner awaits the PubAck
+  of every part, logs `message dead-lettered` at `error`, and only then `term`s. A crash between PubAck and `term`
+  redelivers the message, which publishes the same ids again: no second copy (AT-28), **but only inside the DLQ
+  stream's 10-minute duplicate window**: the broker deduplicates by msg id within that window only, so a
+  redelivery later than that stores another copy (the redelivery after a crash comes after `AckWait`, 30 s, well
+  inside it; `readDeadLetters` then returns both). A
+  failed DLQ publish of any part (stream full, broker unreachable, too large, any error) logs `DLQ publish
+  failed; retrying` and `nak`s with 2 min, never `term`; the redelivery republishes every part
+  (AT-29). `consumer-runner-dlq.test.ts` (AT-28, AT-30), `consumer-runner-dlq-failure.test.ts` (AT-29). A
+  dead-lettered message is replayed by recreating its durable with `--ignore-ack-floor` once the cause is fixed
+  (below); there is no separate DLQ replay tool.
+- **Consumer recovery** ([runbook](consumer-recovery.md), ADR 0011): `recreateConsumer` (`consumer-recovery.ts`,
+  script `consumer:recover --consumer <name>`) deletes and recreates a durable of the main stream with the
+  runner's settings, starting where the first applicable rule says: the ack floor + 1 when the durable exists
+  with the same filter; otherwise, when `processed_messages` is a reliable checkpoint (the stream's first
+  retained message is newer than its 14-day retention), the first retained message matching the filter that has
+  no row for the consumer (a scan, because messages are processed out of order); otherwise the earliest retained
+  message. Never a timestamp, never "highest processed minus a margin". The ack floor counts terminated
+  (dead-lettered) messages as settled, so `ignoreAckFloor` skips rule 1 to replay them. It talks to the broker
+  through the `ConsumerAdmin` port (`consumer-admin.ts`; adapter `connectJetStreamConsumerAdmin` in
+  `jetstream-message-bus.ts`). The worker's `subscribe` accepts a durable recreated at a start sequence: when
+  the broker answers "consumer already exists" it updates only the settings that may change (`AckWait`,
+  `MaxDeliver`, filter) and keeps the position. AT-32, AT-33, AT-34, `consumer-recovery.test.ts`.
+- **Outbox re-publish** (`outbox-republish.ts`, script `outbox:republish`): `republishOutboxEvents` moves one
+  service's `PUBLISHED` rows with `publishedAt` in `[from, to)` back to `PENDING` (`publishedAt` cleared,
+  `permanentFailures` reset, a `PUBLISHED` -> `PENDING` history entry with operator and reason, in one statement);
+  the relay publishes them again under their original ids and consumers deduplicate them. `FAILED` and `PENDING`
+  rows are never touched. The script refuses a `--from` earlier than 14 days before now (the replay window, where
+  consumers still deduplicate). `outbox-republish.test.ts` (including a lost stream), `outbox-republish-main.test.ts`.
+- **Retention** (`outbox-retention.ts`): `pruneRetention({ prisma, now })` deletes, in every service schema and
+  in batches of 1,000, the outbox rows `PUBLISHED` more than `RETENTION_MS` (14 days) ago and the
+  `processed_messages` rows older than that. It never deletes a `PENDING` or `FAILED` row, a row with
+  `outbox_event_history` (so the history's CASCADE never fires), or a booking `unknown_order`
+  `payment.refund_requested` whose orphan refund obligation does not exist yet (the reconciler's cutover catch-up
+  still reads it). The DELETE re-checks `status` and `publishedAt` on the row it locks, so a row a concurrent
+  re-publish moved to `PENDING` while the DELETE waited survives with its history (READ COMMITTED re-evaluates the
+  condition on the committed row). The worker runs it hourly (`RETENTION_INTERVAL_MS`). `outbox-retention.test.ts`
+  (including both orders of that race).
 - **Port:** `MessageBus` hides the broker; `jetstream-message-bus.ts` is the only module importing
-  `@nats-io/*` (a test enforces it). `message-bus.contract.ts` is the contract suite run against real NATS.
+  `@nats-io/*` (a test enforces it). The adapter reconnects to the broker without limit (`maxReconnectAttempts: -1`;
+  the client's default of 10 attempts would close the connection for good after about 20 s, stopping the
+  relay until a restart), and takes optional `requestTimeoutMs` (PubAck and JetStream API, client default 5 s)
+  and `reconnectTimeWaitMs` (client default 2 s) for tests. `message-bus.contract.ts` is the contract suite run against real NATS.
 
 ## Delivery guarantee and its bounds
 
@@ -91,13 +194,19 @@ recovery source. The bounds:
   exceeded`) instead of discarding stored messages. The relay records the failure (`attempts`,
   `lastError`) and the row stays `PENDING`; it is published on a later tick once space frees
   (messages age out or are purged). AT-35, `stream-backpressure.test.ts`.
+- **A permanently unpublishable event waits for an operator.** A row that fails permanently up to the
+  cap becomes `FAILED` and is not delivered until it is requeued; later events of its aggregate are
+  delivered before it (ADR 0022). It is never dropped: the row, its payload and its history stay in the
+  outbox, `/health` raises its alert, and the requeue publishes it under its original id
+  ([runbook](failed-outbox-event.md)). `outbox-failed.test.ts`, `outbox-outage.test.ts`.
 - **7-day `max_age`.** A consumer more than 7 days behind loses the messages that aged out of
-  `TICKETARENA` (30 days for the DLQ). Outbox rows outlive it (no retention deletes them yet; the spec's
-  14 days is longer than `max_age`), so recovery can reach beyond the stream.
+  `TICKETARENA` (30 days for the DLQ). Outbox rows outlive it (the retention job keeps `PUBLISHED` rows 14
+  days after `publishedAt`), so `outbox:republish` can reach beyond the stream. Events published more than 14
+  days ago cannot be recovered automatically ([runbook](consumer-recovery.md#the-14-day-limit)).
 - **Single-node disk loss.** JetStream runs on one node and one volume (`sync_interval: always`
   protects against an OS crash, not against losing the disk). Losing the disk loses in-flight
   messages; they are recovered from the outbox
-  ([ADR 0011](../adr/0011-delivery-retry-dlq-recovery.md)).
+  ([ADR 0011](../adr/0011-delivery-retry-dlq-recovery.md), [runbook](consumer-recovery.md#3-beyond-the-stream-re-publish-from-the-outbox)).
 
 **Outbox lag** is the age of the oldest `PENDING` row: `measureOutboxLag({ prisma, service, now })`
 (`outbox-lag.ts`) returns it in ms for one service's outbox, 0 when nothing is `PENDING`. It grows
@@ -232,8 +341,12 @@ result twice under distinct event ids. An `order.placed` repeated under a new ev
 `processed_messages`; the attempt insert skips the existing `(orderId, attemptNo)` row instead, so the
 repeat is acked as handled with no second attempt and no second result (the first attempt's result
 already went out with it). A concurrent repeat waits on the uncommitted row, then skips it. An
-`order.placed` whose payload fails its schema writes nothing and is `nak`ed on the ADR 0011 delay
-schedule, redelivered without end until the DLQ gate exists.
+`order.placed` that fails its envelope schema, or carries a version other than 1, is dead-lettered by
+the DLQ gate on its first delivery (`schema_invalid` / `unknown_version`) without running the provider
+latency step or the handler, so it writes nothing. An `order.placed` whose `paymentDeadline` has passed at
+processing time (the injected clock) is skipped: acked as handled (its `processed_messages` row commits), logged
+`order.placed skipped: its payment deadline has passed`, no attempt and no result; this limits the side effects
+of a recovery replay (ADR 0011), and the sweeper expires the order.
 
 **Provider latency runs outside the transaction**, in the runner's `beforeTransaction` step, i.e.
 before dedupe-and-capture (TD-051). Awaited inside the runner's transaction it would hold a pooled
@@ -299,7 +412,8 @@ Relay and runner take a `service` (`booking` default, `payment` or `notification
 
 ## Decided, not yet built
 
-The DLQ gate and consumer recovery script are still to come. Broker: NATS JetStream behind a `MessageBus` port ([ADR 0004](../adr/0004-nats-jetstream-message-bus.md)).
+A dedicated DLQ replay tool is not built; a dead-lettered message is replayed by recreating its consumer
+([runbook](consumer-recovery.md#replaying-a-dead-lettered-message)). Broker: NATS JetStream behind a `MessageBus` port ([ADR 0004](../adr/0004-nats-jetstream-message-bus.md)).
 Retries, DLQ and consumer recovery: [ADR 0011](../adr/0011-delivery-retry-dlq-recovery.md).
 Planned subjects and the envelope: [MVP spec, Messaging](../specs/ticketarena-mvp.md#messaging).
 The catalogue above is filled in as slices emit events.

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Logger } from "@ticketarena/contracts";
 import { createPrismaClient, type PrismaClient } from "@ticketarena/db";
 import {
   connectJetStreamMessageBus,
@@ -71,6 +72,7 @@ interface DeliveryDeps {
   runnerBus?: MessageBus;
   ackWaitMs?: number;
   retryDelayMs?: (deliveryCount: number) => number;
+  logger?: Logger;
 }
 
 /** Builds a payment consumer from the given deps on a fresh durable name and subject. */
@@ -98,6 +100,7 @@ async function paymentRunner(deps: DeliveryDeps = {}) {
       newId: randomUUID,
       ...(deps.latencyMs === undefined ? {} : { latencyMs: deps.latencyMs }),
       ...(deps.successRate === undefined ? {} : { successRate: deps.successRate }),
+      ...(deps.logger === undefined ? {} : { logger: deps.logger }),
     }),
   });
   return { runner, subject };
@@ -186,7 +189,62 @@ function succeededEventsFor(orderId: string) {
   });
 }
 
+type Line = Record<string, unknown> & { level: string; msg?: string };
+
+function recordingLogger() {
+  const lines: Line[] = [];
+  const make = (bound: Record<string, unknown>): Logger => {
+    const writer =
+      (level: string) =>
+      (fields: object, msg?: string): void => {
+        lines.push({ ...bound, ...fields, level, ...(msg === undefined ? {} : { msg }) });
+      };
+    return {
+      info: writer("info"),
+      warn: writer("warn"),
+      error: writer("error"),
+      child: (bindings) => make({ ...bound, ...bindings }),
+    };
+  };
+  return { logger: make({}), lines };
+}
+
 describe("mock Payment handler", () => {
+  it("skips an order.placed whose paymentDeadline has passed at processing time: acked and logged, no attempt and no result", async () => {
+    const placed = orderPlaced("buyer@example.com");
+    // The handler's clock reads CAPTURE_TIME: one millisecond after this deadline.
+    placed.envelope.payload.paymentDeadline = new Date(CAPTURE_TIME.getTime() - 1).toISOString();
+    const settlements: Settlement[] = [];
+    const { logger, lines } = recordingLogger();
+
+    await deliver("buyer@example.com", { runnerBus: observedBus(settlements), logger }, placed);
+
+    expect(settlements).toMatchObject([{ msgId: placed.envelope.id, settled: "ack" }]);
+    expect(await prisma.paymentAttempt.count({ where: { orderId: placed.orderId } })).toBe(0);
+    expect(
+      await prisma.paymentOutboxEvent.count({
+        where: { payload: { path: ["orderId"], equals: placed.orderId } },
+      }),
+    ).toBe(0);
+    expect(lines).toContainEqual(
+      expect.objectContaining({
+        level: "info",
+        orderId: placed.orderId,
+        paymentDeadline: placed.envelope.payload.paymentDeadline,
+        msg: "order.placed skipped: its payment deadline has passed",
+      }),
+    );
+  });
+
+  it("still captures an order.placed processed exactly at its paymentDeadline", async () => {
+    const placed = orderPlaced("buyer@example.com");
+    placed.envelope.payload.paymentDeadline = CAPTURE_TIME.toISOString();
+
+    await deliver("buyer@example.com", {}, placed);
+
+    expect(await prisma.paymentAttempt.count({ where: { orderId: placed.orderId } })).toBe(1);
+  });
+
   it("records one CAPTURED attempt and emits payment.succeeded through its own outbox", async () => {
     const placed = await deliver("buyer@example.com");
 

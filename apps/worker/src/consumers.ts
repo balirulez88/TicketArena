@@ -1,7 +1,18 @@
 import { createPaymentSagaHandler, type SagaMetrics } from "@ticketarena/booking";
-import type { Logger } from "@ticketarena/contracts";
+import {
+  envelopeSchema,
+  type Logger,
+  orderCancelledPayloadSchema,
+  orderConfirmedPayloadSchema,
+  orderExpiredPayloadSchema,
+  orderPlacedPayloadSchema,
+  paymentFailedPayloadSchema,
+  paymentRefundedPayloadSchema,
+  paymentRefundRequestedPayloadSchema,
+  paymentSucceededPayloadSchema,
+} from "@ticketarena/contracts";
 import type { PrismaClient } from "@ticketarena/db";
-import type { ConsumerRunnerOptions } from "@ticketarena/messaging";
+import type { ConsumerRunnerOptions, MessageSchema } from "@ticketarena/messaging";
 import {
   createMockNotificationProvider,
   createNotificationHandler,
@@ -13,6 +24,28 @@ import {
   type PaymentRandom,
 } from "./payment/payment-handler.js";
 import { createRefundHandler } from "./payment/refund-handler.js";
+
+/**
+ * The envelope versions each subject's consumers understand. Every consumer passes them so the
+ * runner's DLQ gate dead-letters a schema-invalid or unknown-version message on its first delivery,
+ * before `beforeTransaction` (e.g. the payment provider call) or the handler can act on it (ADR 0011).
+ */
+const ENVELOPE_SCHEMAS = {
+  "ta.order.placed": { 1: envelopeSchema(orderPlacedPayloadSchema) },
+  "ta.order.confirmed": { 1: envelopeSchema(orderConfirmedPayloadSchema) },
+  "ta.order.cancelled": { 1: envelopeSchema(orderCancelledPayloadSchema) },
+  "ta.order.expired": { 1: envelopeSchema(orderExpiredPayloadSchema) },
+  "ta.payment.succeeded": { 1: envelopeSchema(paymentSucceededPayloadSchema) },
+  "ta.payment.failed": { 1: envelopeSchema(paymentFailedPayloadSchema) },
+  "ta.payment.refund_requested": { 1: envelopeSchema(paymentRefundRequestedPayloadSchema) },
+  "ta.payment.refunded": { 1: envelopeSchema(paymentRefundedPayloadSchema) },
+} satisfies Record<string, Readonly<Record<number, MessageSchema>>>;
+
+type ConsumedSubject = keyof typeof ENVELOPE_SCHEMAS;
+
+function subscribedTo(filterSubject: ConsumedSubject) {
+  return { filterSubject, schemas: ENVELOPE_SCHEMAS[filterSubject] };
+}
 
 export interface ServiceConsumerDeps {
   readonly prisma: PrismaClient;
@@ -55,7 +88,7 @@ export function createServiceConsumers(
     {
       service: "payment",
       consumer: "payment",
-      filterSubject: "ta.order.placed",
+      ...subscribedTo("ta.order.placed"),
       ...createPaymentHandler({
         clock: deps.clock,
         random: deps.random,
@@ -68,56 +101,56 @@ export function createServiceConsumers(
     {
       service: "payment",
       consumer: "payment-refund",
-      filterSubject: "ta.payment.refund_requested",
+      ...subscribedTo("ta.payment.refund_requested"),
       handler: createRefundHandler({ clock: deps.clock, newId: deps.newId, ...loggerOption }),
     },
     {
       service: "booking",
       consumer: "booking-saga",
-      filterSubject: "ta.payment.succeeded",
+      ...subscribedTo("ta.payment.succeeded"),
       handler: sagaHandler,
     },
     // A durable consumer takes one filter subject; a second one keeps the first's config intact.
     {
       service: "booking",
       consumer: "booking-saga-failed",
-      filterSubject: "ta.payment.failed",
+      ...subscribedTo("ta.payment.failed"),
       handler: sagaHandler,
     },
     {
       service: "booking",
       consumer: "booking-saga-refunded",
-      filterSubject: "ta.payment.refunded",
+      ...subscribedTo("ta.payment.refunded"),
       handler: sagaHandler,
     },
     {
       service: "notification",
       consumer: "notification",
-      filterSubject: "ta.order.confirmed",
+      ...subscribedTo("ta.order.confirmed"),
       ...notificationSteps,
     },
     {
       service: "notification",
       consumer: "notification-cancelled",
-      filterSubject: "ta.order.cancelled",
+      ...subscribedTo("ta.order.cancelled"),
       ...notificationSteps,
     },
     {
       service: "notification",
       consumer: "notification-expired",
-      filterSubject: "ta.order.expired",
+      ...subscribedTo("ta.order.expired"),
       ...notificationSteps,
     },
     {
       service: "notification",
       consumer: "notification-refund-requested",
-      filterSubject: "ta.payment.refund_requested",
+      ...subscribedTo("ta.payment.refund_requested"),
       ...notificationSteps,
     },
     {
       service: "notification",
       consumer: "notification-refunded",
-      filterSubject: "ta.payment.refunded",
+      ...subscribedTo("ta.payment.refunded"),
       ...notificationSteps,
     },
   ];

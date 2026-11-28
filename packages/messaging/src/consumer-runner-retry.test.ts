@@ -101,7 +101,8 @@ function recordingLogger() {
 const sleepMs = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("consumer runner retry schedule (ADR 0011)", () => {
-  it("naks a transient handler failure with 1s, 5s, 30s, 2m by deliveryCount and keeps 2m after that", async () => {
+  // The 6th delivery is past the budget and goes to the DLQ instead (consumer-runner-dlq.test.ts).
+  it("naks a transient handler failure with 1s, 5s, 30s, 2m by deliveryCount and keeps 2m for the 5th", async () => {
     const naks: Nak[] = [];
     const { name, subject } = newConsumer();
     const runner = await createConsumerRunner({
@@ -113,7 +114,7 @@ describe("consumer runner retry schedule (ADR 0011)", () => {
     });
     await bus.publish({ subject, data: "{}", msgId: crypto.randomUUID() });
 
-    for (let delivery = 0; delivery < 6; delivery += 1) {
+    for (let delivery = 0; delivery < 5; delivery += 1) {
       await runner.pollOnce();
     }
 
@@ -123,7 +124,6 @@ describe("consumer runner retry schedule (ADR 0011)", () => {
       { deliveryCount: 3, delayMs: 30_000 },
       { deliveryCount: 4, delayMs: 120_000 },
       { deliveryCount: 5, delayMs: 120_000 },
-      { deliveryCount: 6, delayMs: 120_000 },
     ]);
   });
 

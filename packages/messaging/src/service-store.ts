@@ -24,6 +24,10 @@ export interface ProcessedMessageInput {
 export interface ServiceStore {
   /** Schema-qualified outbox table for the relay's raw claim query; a constant, never input. */
   readonly outboxTable: string;
+  /** Schema-qualified append-only history of the outbox rows (ADR 0022); a constant too. */
+  readonly historyTable: string;
+  /** Schema-qualified consumer checkpoint (`processed_messages`); a constant too. */
+  readonly processedTable: string;
   insertOutbox(tx: TransactionClient, row: OutboxRowInput): Promise<void>;
   markPublished(tx: TransactionClient, id: string): Promise<void>;
   recordPublishFailure(tx: TransactionClient, id: string, error: string): Promise<void>;
@@ -34,6 +38,8 @@ export interface ServiceStore {
 
 const bookingStore: ServiceStore = {
   outboxTable: '"public"."outbox_events"',
+  historyTable: '"public"."outbox_event_history"',
+  processedTable: '"public"."processed_messages"',
   async insertOutbox(tx, data) {
     await tx.outboxEvent.create({ data });
   },
@@ -64,6 +70,8 @@ const bookingStore: ServiceStore = {
 
 const paymentStore: ServiceStore = {
   outboxTable: '"payment"."outbox_events"',
+  historyTable: '"payment"."outbox_event_history"',
+  processedTable: '"payment"."processed_messages"',
   async insertOutbox(tx, data) {
     await tx.paymentOutboxEvent.create({ data });
   },
@@ -94,6 +102,8 @@ const paymentStore: ServiceStore = {
 
 const notificationStore: ServiceStore = {
   outboxTable: '"notification"."outbox_events"',
+  historyTable: '"notification"."outbox_event_history"',
+  processedTable: '"notification"."processed_messages"',
   async insertOutbox(tx, data) {
     await tx.notificationOutboxEvent.create({ data });
   },

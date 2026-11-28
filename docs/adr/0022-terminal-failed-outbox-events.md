@@ -1,6 +1,6 @@
 # 0022: Terminal FAILED outbox events release their aggregate
 
-- **Status:** Accepted (implementation: ticket 59, not yet implemented)
+- **Status:** Accepted (implemented by ticket 59)
 - **Date:** 2026-11-14
 - **Extends:** [0003](0003-transactional-outbox.md), [0011](0011-delivery-retry-dlq-recovery.md)
 
@@ -27,8 +27,55 @@ parts below that are marked as its own.
   the transition is logged once at `error` and exposed through health metrics; an operator
   requeues a `FAILED` row by a documented procedure, with their name and a reason.
 
-Ticket 59 adds, here: what counts as a permanent failure, the cap's value, and the table of what
-each consumer does when a later event of a multi-event aggregate arrives before an earlier one.
+### What ticket 59 built
+
+- **Permanent vs transient.** A failure is permanent only when it is specific to the row, and the
+  JetStream adapter (`jetstream-message-bus.ts`) says so by throwing `PermanentPublishError`:
+  `no_stream` (no stream's subjects capture `ta.<eventType>`: the PubAck request has no responder
+  _and_ the JetStream API answers a stream lookup for the subject with "no stream matches subject",
+  code 10059; a no-responders answer alone also means JetStream is down, so it stays transient),
+  `payload_too_large` (the NATS client refuses a message over the server's `max_payload`), and
+  `unserialisable` (the relay cannot `JSON.stringify` the payload; a `jsonb` payload always can, so
+  this is a guard). Everything else is transient: connection lost, PubAck timeout, JetStream
+  unavailable, stream full (`maximum bytes exceeded`). The errors that tell them apart are pinned
+  against real NATS by `publish-failure-classification.test.ts`.
+- **The cap.** `DEFAULT_MAX_PERMANENT_FAILURES` = 5 permanent failures, injectable per relay
+  (`maxPermanentFailures`). Counted in `permanentFailures`, separate from `attempts` (which counts
+  every failure) and reset by a requeue. Five deterministic failures are a few seconds of relay
+  ticks: enough to ride out a stream being redeclared during a deploy, short enough that the
+  aggregate is not held for long.
+- **The `FAILED` state and what it keeps.** `status = 'FAILED'` with `failedAt`, `attempts` and
+  `lastError`; the payload (unchanged, byte for byte), outbox id, aggregate and event type are kept;
+  `publishedAt` stays null. The relay claims only `PENDING` rows, so a `FAILED` row is never claimed
+  again and no longer counts as "an earlier row of the aggregate": the aggregate is released.
+- **History.** `outbox_event_history` (one per service schema) gets an insert-only entry for every
+  permanent failure and every status change (`PENDING` → `FAILED`, `FAILED` → `PENDING` with
+  operator and reason), with time, attempt number and error.
+- **Alert, metrics, recovery.** One `error` line per transition (after commit, without the payload);
+  `measureOutboxFailures` and the worker's `/health` (`outbox.alert`); `requeueFailedOutboxEvent` and
+  the `outbox:requeue` script, which refuse any row that is not `FAILED`. Runbook:
+  [docs/messaging/failed-outbox-event.md](../messaging/failed-outbox-event.md).
+
+### When a later event arrives before an earlier one
+
+Per aggregate with more than one event type in one outbox, what each consumer does when the later
+event is delivered while the earlier one is `FAILED`. A new multi-event aggregate, or a new consumer
+of one of these events, adds a row here and a test in
+`apps/worker/src/failed-outbox-consumer-flow.test.ts`.
+
+Amended by ticket 25 (2026-11-27): the `payment` row now records that a `poison` refusal is
+dead-lettered on its first delivery and applies after the operator's replay, no longer redelivered.
+
+| Outbox, aggregate        | Earlier → later events                                                   | Consumer of the later event                                                                                                                                                          | Consumer of the earlier event, when requeued                                                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| booking, `order`         | `order.placed` → `order.confirmed` / `order.cancelled` / `order.expired` | `notification*`: applies it (each notification depends only on its own event)                                                                                                        | `payment`: applies it (captures; it reads no booking state). A capture for an order already final is then refunded by the saga, as for any late capture         |
+| booking, `hold`          | `seat.held` → `hold.released` / `hold.expired`                           | none (no consumer yet)                                                                                                                                                               | none                                                                                                                                                            |
+| payment, `payment`       | `payment.succeeded` / `payment.failed` → `payment.refunded`              | `booking-saga-refunded`: refuses it (`poison`: the payment is not in the ledger; rolled back and dead-lettered on its first delivery, ADR 0011); `notification-refunded`: applies it | `booking-saga`: applies it; the dead-lettered `payment.refunded` then applies when the operator replays it (recreating the durable, ADR 0011 consumer recovery) |
+| booking, `order_payment` | `payment.refund_requested` → its re-emits (one event type)               | `payment-refund`, `notification-refund-requested`: apply it once per `paymentId`                                                                                                     | the same consumers deduplicate it by `paymentId` (one refund, one notification per step)                                                                        |
+
+Proved for `order` (with `order.confirmed` and `order.expired`) and `payment` by
+`failed-outbox-consumer-flow.test.ts`: the end state equals in-order delivery, each effect once
+(for `payment`, after the replay of the dead-lettered `payment.refunded`).
 
 ## Alternatives considered
 

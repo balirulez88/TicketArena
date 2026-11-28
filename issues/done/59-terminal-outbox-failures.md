@@ -8,7 +8,9 @@
 
 **Blocked by:** 45 (worker loop error reporting), 49 (Prisma schema drift)
 
-**Status:** ready-for-agent
+**Status:** done
+
+**Completed:** 2026-11-27 on devflow/run-202611271130 (run 202611271130)
 
 **Status reason:** hardening, after the MVP (scope cut 2026-11-18)
 
@@ -26,7 +28,26 @@ Scope: the relay (`packages/messaging/src/outbox-relay.ts`), every service's out
 - [ ] Manual recovery: an exported operation, with a script that calls it, requeues one `FAILED` row by service and outbox id, given the operator's name and a reason: the row becomes `PENDING` with its permanent-failure count reset and a history entry added. It refuses a row that is not `FAILED` (for example `PUBLISHED` or `PENDING`) and an unknown id, changing nothing, with a message naming the row and its status. Tests for the requeue and both refusals. Sabotage: allowing a `PUBLISHED` row to be requeued turns the refusal test red.
 - [ ] Alerting: the transition to `FAILED` is logged exactly once at `error`, with the service, outbox id, aggregate type and id, event type, attempts and last error, and without the payload (ticket 51's redaction applies); repeated ticks before the cap do not log at `error`. Test counts the log lines. Sabotage: logging on every tick turns it red.
 - [ ] Health metrics: an exported function returns, per service, the number of `FAILED` rows, the age of the oldest and the number of transitions to `FAILED` recorded in the history. The worker's `GET /health` body includes them and an alert flag that is set while any `FAILED` row exists, without failing its liveness status. Tests for the function (zero, one, several services) and for the health response with and without a `FAILED` row. Sabotage: dropping the flag or reporting a fixed zero turns them red.
-- [ ] Every entry in `docs/technical-debt.md` whose Target is ticket 59 (TD-038) is `RESOLVED`, with the tests that prove it named in `Verification` (the host refuses the merge otherwise).
+- [x] ~~Every entry in `docs/technical-debt.md` whose Target is ticket 59 (TD-038) is `RESOLVED`, with the tests that prove it named in `Verification` (the host refuses the merge otherwise).~~ Superseded by [ADR 0024](../../docs/adr/0024-frozen-debt-register-check.md): `docs/technical-debt.md` is frozen and never edited; the evidence is recorded below instead.
+
+## Evidence (ADR 0024: TD-038)
+
+TD-038 (a permanently unpublishable row blocks its whole aggregate):
+
+- `packages/messaging/src/outbox-failed.test.ts` :: "publishes the later rows of a failed row's aggregate in order, and other aggregates throughout"
+- `packages/messaging/src/outbox-failed.test.ts` :: "marks a ${service} outbox row FAILED once its permanent failures reach the cap, and never claims it again" (booking and payment)
+- `packages/messaging/src/outbox-outage.test.ts` :: "never makes a row FAILED, however many ticks it lasts; once the broker is back every row is published in order per aggregate"
+- `apps/worker/src/failed-outbox-consumer-flow.test.ts` :: "applies ${later.type} while order.placed is FAILED, then the requeued order.placed, ending as in-order delivery with every effect once"
+- `apps/worker/src/failed-outbox-consumer-flow.test.ts` :: "refuses payment.refunded without any change while payment.succeeded is FAILED, then ends as in-order delivery with every effect once"
+
+## Review fix (PR #21): liveness stays responsive
+
+`/health` runs its diagnostic probes (Redis, the Postgres outbox metrics, the NATS delivery figures) concurrently, each with its own injectable deadline (`health.deadlinesMs`, default `DEFAULT_HEALTH_PROBE_DEADLINE_MS` = 2 s); a probe that rejects or misses it is `unavailable`, so a hung dependency never makes Fly's 5 s check time out.
+
+- `apps/worker/src/health-deadline.test.ts` :: "reports a probe that never resolves as unavailable within its deadline, and the others normally"
+- `apps/worker/src/health-deadline.test.ts` :: "runs the probes concurrently: three hung probes cost one deadline, not three"
+- `apps/worker/src/health-deadline.test.ts` :: "answers well within Fly's 5 s check timeout with the default deadlines"
+- `apps/worker/src/deploy-config.test.ts` :: "bounds the /health probes well inside the check's timeout, so a hung probe never fails it"
 
 **Documentation deliverable (reviewed, not test-verified):**
 

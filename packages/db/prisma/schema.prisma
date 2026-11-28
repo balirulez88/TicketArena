@@ -27,23 +27,57 @@ enum OutboxStatus {
 /// the broker, giving at-least-once delivery; consumers must therefore be idempotent and
 /// deduplicate on `id`.
 model OutboxEvent {
-  id            String       @id @default(uuid()) @db.Uuid
+  id                String               @id @default(uuid()) @db.Uuid
   /// Aggregate type + id identify the stream; the relay preserves order per aggregate.
-  aggregateType String
-  aggregateId   String
+  aggregateType     String
+  aggregateId       String
   /// Broker subject/topic name, e.g. "booking.confirmed".
-  eventType     String
-  payload       Json
-  status        OutboxStatus @default(PENDING)
-  attempts      Int          @default(0)
-  lastError     String?
-  createdAt     DateTime     @default(now())
-  publishedAt   DateTime?
+  eventType         String
+  payload           Json
+  status            OutboxStatus         @default(PENDING)
+  /// Every failed publish, transient or permanent; `lastError` is the latest one's reason.
+  attempts          Int                  @default(0)
+  lastError         String?
+  createdAt         DateTime             @default(now())
+  publishedAt       DateTime?
+  /// Permanent publish failures since the row was written or last requeued; the relay marks the
+  /// row FAILED when they reach its cap (ADR 0022). Transient failures (broker down) never count.
+  permanentFailures Int                  @default(0)
+  /// When the row became FAILED; null while it is PENDING or PUBLISHED.
+  failedAt          DateTime?            @db.Timestamptz(3)
+  history           OutboxEventHistory[]
 
   // Supports the relay's hot query: "oldest PENDING events first".
   @@index([status, createdAt])
   @@index([aggregateType, aggregateId])
+  /// The admin live feed's cursor order (ADR 0009).
+  @@index([createdAt, id])
   @@map("outbox_events")
+  @@schema("public")
+}
+
+/// Append-only audit of an outbox row (ADR 0022): every permanent publish failure and every status
+/// change, readable per outbox id in `id` order. Rows are only ever inserted; transient failures
+/// (a broker outage) are not recorded here, only in `attempts` and `lastError`.
+model OutboxEventHistory {
+  id         BigInt      @id @default(autoincrement())
+  outboxId   String      @db.Uuid
+  outbox     OutboxEvent @relation(fields: [outboxId], references: [id], onDelete: Cascade)
+  /// `PUBLISH_FAILED` (a permanent publish failure) or `STATUS_CHANGED` (CHECK in the migration).
+  kind       String
+  /// Set for `STATUS_CHANGED` only: `PENDING` -> `FAILED` by the relay, `FAILED` -> `PENDING` by a requeue.
+  fromStatus String?
+  toStatus   String?
+  /// The row's `attempts` when the entry was written.
+  attempt    Int
+  error      String?
+  /// Who requeued the row and why; set only on a requeue.
+  operator   String?
+  reason     String?
+  at         DateTime    @db.Timestamptz(3)
+
+  @@index([outboxId, id])
+  @@map("outbox_event_history")
   @@schema("public")
 }
 
@@ -176,21 +210,21 @@ enum OrderStatus {
 /// `(sessionId, idempotencyKey)` makes `placeOrder` retry-safe (ADR 0007); `requestHash`
 /// detects a key reused for a different request. `holdId` is unique: one order per hold.
 model Order {
-  id              String      @id @default(uuid()) @db.Uuid
-  holdId          String      @unique @db.Uuid
-  hold            Hold        @relation(fields: [holdId], references: [id])
+  id              String         @id @default(uuid()) @db.Uuid
+  holdId          String         @unique @db.Uuid
+  hold            Hold           @relation(fields: [holdId], references: [id])
   sessionId       String
   buyerKey        String
   contactEmail    String
   contactPhone    String?
   totalMinor      Int
   currency        String
-  status          OrderStatus @default(PENDING_PAYMENT)
-  paymentDeadline DateTime    @db.Timestamptz(3)
+  status          OrderStatus    @default(PENDING_PAYMENT)
+  paymentDeadline DateTime       @db.Timestamptz(3)
   idempotencyKey  String
   requestHash     String
-  correlationId   String      @db.Uuid
-  createdAt       DateTime    @db.Timestamptz(3)
+  correlationId   String         @db.Uuid
+  createdAt       DateTime       @db.Timestamptz(3)
   lines           OrderLine[]
   payments        OrderPayment[]
 
@@ -215,7 +249,8 @@ model OrderLine {
 
 /// Consumer-side idempotency checkpoint (ADR 0007). A consumer inserts a row in the SAME
 /// transaction as the state change it causes; a unique violation here means the message was
-/// already handled. Kept 14 days, longer than the 7-day stream, so it can serve recovery.
+/// already handled. Kept 14 days, longer than the 7-day stream, so it can serve recovery: the
+/// worker's retention job (`pruneRetention`) deletes older rows.
 model ProcessedMessage {
   consumer    String
   /// The `Nats-Msg-Id` header (the outbox row id for relayed events).
@@ -328,20 +363,49 @@ enum PaymentAttemptStatus {
 
 /// The Payment service's own outbox: same shape and rules as the booking one, separate table.
 model PaymentOutboxEvent {
-  id            String              @id @default(uuid()) @db.Uuid
-  aggregateType String
-  aggregateId   String
-  eventType     String
-  payload       Json
-  status        PaymentOutboxStatus @default(PENDING)
-  attempts      Int                 @default(0)
-  lastError     String?
-  createdAt     DateTime            @default(now())
-  publishedAt   DateTime?
+  id                String                      @id @default(uuid()) @db.Uuid
+  aggregateType     String
+  aggregateId       String
+  eventType         String
+  payload           Json
+  status            PaymentOutboxStatus         @default(PENDING)
+  attempts          Int                         @default(0)
+  lastError         String?
+  createdAt         DateTime                    @default(now())
+  publishedAt       DateTime?
+  /// As on the booking outbox: permanent failures towards the FAILED cap, and when it was reached.
+  permanentFailures Int                         @default(0)
+  failedAt          DateTime?                   @db.Timestamptz(3)
+  history           PaymentOutboxEventHistory[]
 
   @@index([status, createdAt])
   @@index([aggregateType, aggregateId])
+  /// The admin live feed's cursor order (ADR 0009).
+  @@index([createdAt, id])
   @@map("outbox_events")
+  @@schema("payment")
+}
+
+/// The same append-only audit as `outbox_event_history` in `public`, for this service's outbox.
+model PaymentOutboxEventHistory {
+  id         BigInt             @id @default(autoincrement())
+  outboxId   String             @db.Uuid
+  outbox     PaymentOutboxEvent @relation(fields: [outboxId], references: [id], onDelete: Cascade)
+  /// `PUBLISH_FAILED` (a permanent publish failure) or `STATUS_CHANGED` (CHECK in the migration).
+  kind       String
+  /// Set for `STATUS_CHANGED` only: `PENDING` -> `FAILED` by the relay, `FAILED` -> `PENDING` by a requeue.
+  fromStatus String?
+  toStatus   String?
+  /// The row's `attempts` when the entry was written.
+  attempt    Int
+  error      String?
+  /// Who requeued the row and why; set only on a requeue.
+  operator   String?
+  reason     String?
+  at         DateTime           @db.Timestamptz(3)
+
+  @@index([outboxId, id])
+  @@map("outbox_event_history")
   @@schema("payment")
 }
 
@@ -417,20 +481,49 @@ enum NotificationStatus {
 
 /// The Notification service's own outbox: same shape and rules as the booking one, separate table.
 model NotificationOutboxEvent {
-  id            String                   @id @default(uuid()) @db.Uuid
-  aggregateType String
-  aggregateId   String
-  eventType     String
-  payload       Json
-  status        NotificationOutboxStatus @default(PENDING)
-  attempts      Int                      @default(0)
-  lastError     String?
-  createdAt     DateTime                 @default(now())
-  publishedAt   DateTime?
+  id                String                           @id @default(uuid()) @db.Uuid
+  aggregateType     String
+  aggregateId       String
+  eventType         String
+  payload           Json
+  status            NotificationOutboxStatus         @default(PENDING)
+  attempts          Int                              @default(0)
+  lastError         String?
+  createdAt         DateTime                         @default(now())
+  publishedAt       DateTime?
+  /// As on the booking outbox: permanent failures towards the FAILED cap, and when it was reached.
+  permanentFailures Int                              @default(0)
+  failedAt          DateTime?                        @db.Timestamptz(3)
+  history           NotificationOutboxEventHistory[]
 
   @@index([status, createdAt])
   @@index([aggregateType, aggregateId])
+  /// The admin live feed's cursor order (ADR 0009).
+  @@index([createdAt, id])
   @@map("outbox_events")
+  @@schema("notification")
+}
+
+/// The same append-only audit as `outbox_event_history` in `public`, for this service's outbox.
+model NotificationOutboxEventHistory {
+  id         BigInt                  @id @default(autoincrement())
+  outboxId   String                  @db.Uuid
+  outbox     NotificationOutboxEvent @relation(fields: [outboxId], references: [id], onDelete: Cascade)
+  /// `PUBLISH_FAILED` (a permanent publish failure) or `STATUS_CHANGED` (CHECK in the migration).
+  kind       String
+  /// Set for `STATUS_CHANGED` only: `PENDING` -> `FAILED` by the relay, `FAILED` -> `PENDING` by a requeue.
+  fromStatus String?
+  toStatus   String?
+  /// The row's `attempts` when the entry was written.
+  attempt    Int
+  error      String?
+  /// Who requeued the row and why; set only on a requeue.
+  operator   String?
+  reason     String?
+  at         DateTime                @db.Timestamptz(3)
+
+  @@index([outboxId, id])
+  @@map("outbox_event_history")
   @@schema("notification")
 }
 

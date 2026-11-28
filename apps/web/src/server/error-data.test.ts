@@ -10,6 +10,7 @@ import {
   MixedCurrencyError,
   NotDemoEventError,
   NotOnSaleError,
+  RefundNotInManualReviewError,
   ResetBlockedError,
   SeatUnavailableError,
 } from "@ticketarena/booking";
@@ -84,6 +85,12 @@ const mapped = {
       code: "PRECONDITION_FAILED",
       message: "x",
       cause: new NotDemoEventError(HOLD_ID),
+    }),
+  REFUND_NOT_IN_MANUAL_REVIEW: () =>
+    new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "x",
+      cause: new RefundNotInManualReviewError(HOLD_ID, "REFUND_REQUESTED"),
     }),
 } as const;
 

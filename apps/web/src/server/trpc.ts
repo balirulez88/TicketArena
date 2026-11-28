@@ -30,6 +30,7 @@ import {
   createLazyMetricsReader,
   createLazyMetricsReset,
 } from "./upstash-metrics";
+import { createLazyWorkerHealth, type WorkerHealthReader } from "./worker-health";
 
 /**
  * Per-request context. Infrastructure (clock, and later db/redis/outbox) is injected here
@@ -68,6 +69,11 @@ export interface TRPCContext {
   readonly metricsReset: () => BookingMetricsReset;
   /** Limits the destructive admin actions globally; resolved lazily like `metrics`. */
   readonly rateLimiter: () => RateLimiter;
+  /**
+   * Reads the worker's `/health` for the dashboard's NATS figures; resolved on first call and
+   * cached per process, so `WORKER_HEALTH_URL` is read only by the admin snapshot.
+   */
+  readonly workerHealth: () => WorkerHealthReader;
   /**
    * The waiting-room queue store, connected on first call and shared per process, so `REDIS_URL`
    * is read only by the queue procedures; rejects when that configuration is invalid.
@@ -179,7 +185,13 @@ export function bookingServiceFor(
  */
 export type ContextServices = Pick<
   TRPCContext,
-  "logger" | "metrics" | "metricsReader" | "metricsReset" | "rateLimiter" | "queueStore"
+  | "logger"
+  | "metrics"
+  | "metricsReader"
+  | "metricsReset"
+  | "rateLimiter"
+  | "workerHealth"
+  | "queueStore"
 >;
 
 export interface ContextServicesConfig {
@@ -201,6 +213,7 @@ export function createContextServices({
     metricsReader: createLazyMetricsReader({ readEnv, logger }),
     metricsReset: createLazyMetricsReset({ readEnv, logger }),
     rateLimiter: createLazyAdminRateLimiter({ readEnv, logger }),
+    workerHealth: createLazyWorkerHealth({ readEnv, logger }),
     queueStore: createLazyQueueStore({ readEnv, logger, prefix: queuePrefix }),
   };
 }

@@ -6,7 +6,12 @@ import { connectJetStreamMessageBus, type MessageBus } from "@ticketarena/messag
 import { setupTestDatabase, setupTestNats } from "@ticketarena/test-infra";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { parseWorkerEnv } from "./env.js";
-import { RECONCILE_INTERVAL_MS, SWEEP_INTERVAL_MS, startWorker } from "./worker.js";
+import {
+  RECONCILE_INTERVAL_MS,
+  RETENTION_INTERVAL_MS,
+  SWEEP_INTERVAL_MS,
+  startWorker,
+} from "./worker.js";
 
 const database = setupTestDatabase();
 const nats = setupTestNats();
@@ -336,6 +341,52 @@ describe("worker refund reconciler", () => {
       await expect.poll(() => calls, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
     } finally {
       await worker.stop();
+    }
+  });
+});
+
+describe("worker retention job", () => {
+  const NOW = new Date("2027-05-01T00:00:00.000Z");
+  const FIFTEEN_DAYS_MS = 15 * 86_400_000;
+
+  it("deletes PUBLISHED outbox rows and processed_messages older than 14 days, at start and then every hour", async () => {
+    expect(RETENTION_INTERVAL_MS).toBe(60 * 60_000);
+    const old = new Date(NOW.getTime() - FIFTEEN_DAYS_MS);
+    const outboxId = randomUUID();
+    await prisma.outboxEvent.create({
+      data: {
+        id: outboxId,
+        aggregateType: "order",
+        aggregateId: randomUUID(),
+        eventType: "order.placed",
+        payload: {},
+        status: "PUBLISHED",
+        createdAt: old,
+        publishedAt: old,
+      },
+    });
+    const messageId = randomUUID();
+    await prisma.processedMessage.create({
+      data: { consumer: "retention", messageId, streamSeq: 1n, processedAt: old },
+    });
+
+    const worker = await startWorker({ bus, prisma, port: 0, retention: { now: () => NOW } });
+    try {
+      await expect
+        .poll(
+          async () =>
+            (await prisma.outboxEvent.count({ where: { id: outboxId } })) +
+            (await prisma.processedMessage.count({ where: { messageId } })),
+          { timeout: 10_000 },
+        )
+        .toBe(0);
+      expect(worker.components.flat().map((component) => component.name)).toContain(
+        "retention job",
+      );
+    } finally {
+      const stopping = Date.now();
+      await worker.stop();
+      expect(Date.now() - stopping).toBeLessThan(5_000);
     }
   });
 });

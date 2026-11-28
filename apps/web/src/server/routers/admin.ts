@@ -4,11 +4,14 @@ import {
   type BookingMetricCounts,
   type HoldView,
   NotDemoEventError,
+  RefundNotInManualReviewError,
+  RefundObligationNotFoundError,
   ResetBlockedError,
   SeatUnavailableError,
 } from "@ticketarena/booking";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
+import { measureOutboxLags, OUTBOX_SERVICES, readOutboxFeed } from "../admin/outbox-feed";
 import {
   adminProcedure,
   bookingServiceFor,
@@ -16,6 +19,7 @@ import {
   optionalMetrics,
   type TRPCContext,
 } from "../trpc";
+import { type DeliveryFigures, deliveryFiguresSchema } from "../worker-health";
 
 const count = z.number().int().nonnegative();
 
@@ -38,8 +42,12 @@ const bookingMetrics = z.object({
   seat_unavailable: count,
   race_lost: count,
   booking_busy: count,
+  deadlock_retry: count,
   limit_exceeded: count,
+  late_delivery_refund: count,
 });
+
+const perService = z.object({ booking: count, payment: count, notification: count });
 
 const snapshotOutput = z.object({
   takenAt: z.date(),
@@ -59,6 +67,17 @@ const snapshotOutput = z.object({
       metrics: bookingMetrics.nullable(),
     }),
   ),
+  messageHealth: z.object({
+    /** Oldest `PENDING` age per service outbox, in ms, read from Postgres. */
+    outboxLagMs: perService,
+    /**
+     * Consumer lag, pending acks, redeliveries and the DLQ's size and oldest age, from the
+     * worker's `/health`; `null` when the worker cannot be read or is not configured.
+     */
+    delivery: deliveryFiguresSchema.nullable(),
+  }),
+  /** `refund_pending_age_max`: ms since the oldest open refund obligation's first request. */
+  refundPendingAgeMaxMs: count,
 });
 
 export type AdminSnapshot = z.infer<typeof snapshotOutput>;
@@ -85,8 +104,78 @@ const emptyMetrics: BookingMetricCounts = {
   seat_unavailable: 0,
   race_lost: 0,
   booking_busy: 0,
+  deadlock_retry: 0,
   limit_exceeded: 0,
+  late_delivery_refund: 0,
 };
+
+/** Best-effort like the counters: the worker being away never fails the snapshot. */
+async function readDelivery(
+  ctx: Pick<TRPCContext, "workerHealth" | "logger">,
+): Promise<DeliveryFigures | null> {
+  try {
+    return await ctx.workerHealth().read();
+  } catch (error) {
+    ctx.logger.warn(
+      { err: error instanceof Error ? error.message : String(error) },
+      "admin snapshot: worker health unavailable",
+    );
+    return null;
+  }
+}
+
+const FEED_MAX_LIMIT = 200;
+
+const feedCursor = z.object({ createdAt: z.date(), id: z.uuid() });
+
+const feedInput = z.object({
+  /** Entries strictly after it; without one, the newest `limit` entries. */
+  cursor: feedCursor.optional(),
+  limit: z.number().int().min(1).max(FEED_MAX_LIMIT).default(50),
+  /** Only one booking's saga. */
+  correlationId: z.uuid().optional(),
+});
+
+const feedOutput = z.object({
+  entries: z.array(
+    z.object({
+      id: z.uuid(),
+      service: z.enum(OUTBOX_SERVICES),
+      eventType: z.string(),
+      aggregateType: z.string(),
+      aggregateId: z.string(),
+      correlationId: z.string().nullable(),
+      status: z.enum(["PENDING", "PUBLISHED", "FAILED"]),
+      createdAt: z.date(),
+      publishedAt: z.date().nullable(),
+    }),
+  ),
+  /** Pass it back to read what came after; the input cursor again when nothing did. */
+  nextCursor: feedCursor.nullable(),
+});
+
+export type AdminFeedPage = z.infer<typeof feedOutput>;
+
+const STUCK_REFUNDS_MAX_LIMIT = 500;
+
+const openRefund = z.object({
+  paymentId: z.uuid(),
+  orderId: z.uuid(),
+  amount: count,
+  currency: z.string(),
+  status: z.enum(["REFUND_REQUESTED", "MANUAL_REVIEW"]),
+  refundAttempts: count,
+  refundRequestedAt: z.date(),
+  refundLastRequestedAt: z.date(),
+  orphan: z.boolean(),
+  ageMs: count,
+});
+
+export type StuckRefund = z.infer<typeof openRefund>;
+
+const retriedRefund = openRefund.omit({ orphan: true, ageMs: true }).extend({
+  status: z.literal("REFUND_REQUESTED"),
+});
 
 /** The spec's race size: synthetic buyers that try to hold the same seat at once. */
 export const RACE_BUYERS = 100;
@@ -167,9 +256,12 @@ export const adminRouter = createTRPCRouter({
       ctx.queueStore(),
     ]);
     const eventIds = events.map((event) => event.id);
-    const [queueCounts, metrics] = await Promise.all([
+    const [queueCounts, metrics, outboxLagMs, delivery, refundPendingAgeMaxMs] = await Promise.all([
       Promise.all(eventIds.map((eventId) => store.counts(eventId))),
       readMetrics(ctx, eventIds),
+      measureOutboxLags(ctx.db(), takenAt),
+      readDelivery(ctx),
+      bookingServiceFor(ctx).refundPendingAgeMax(),
     ]);
 
     const orders = { PENDING_PAYMENT: 0, CONFIRMED: 0, CANCELLED: 0, EXPIRED: 0 };
@@ -198,8 +290,67 @@ export const adminRouter = createTRPCRouter({
           metrics: metrics?.get(event.id) ?? null,
         };
       }),
+      messageHealth: { outboxLagMs, delivery },
+      refundPendingAgeMaxMs,
     };
   }),
+
+  /**
+   * The live feed: every service's outbox rows by `(createdAt, id)` (ADR 0009), metadata only.
+   * The dashboard polls it with the last `nextCursor` and groups entries by `correlationId`.
+   */
+  feed: adminProcedure
+    .input(feedInput.default({ limit: 50 }))
+    .output(feedOutput)
+    .query(async ({ ctx, input }) => {
+      const entries = await readOutboxFeed(ctx.db(), {
+        after: input.cursor,
+        limit: input.limit,
+        correlationId: input.correlationId,
+      });
+      const last = entries.at(-1);
+      return {
+        entries,
+        nextCursor:
+          last === undefined ? (input.cursor ?? null) : { createdAt: last.createdAt, id: last.id },
+      };
+    }),
+
+  /** Open refund obligations, oldest first request first, each with its age. */
+  stuckRefunds: adminProcedure
+    .input(
+      z
+        .object({ limit: z.number().int().min(1).max(STUCK_REFUNDS_MAX_LIMIT).default(100) })
+        .default({ limit: 100 }),
+    )
+    .output(z.array(openRefund))
+    .query(({ ctx, input }) => bookingServiceFor(ctx).openRefunds(input.limit)),
+
+  /**
+   * The operator's "retry refund" for a `MANUAL_REVIEW` obligation (`BookingService.retryRefund`):
+   * re-emitted through the outbox with a fresh re-emit budget, its first request time kept.
+   */
+  retryRefund: adminProcedure
+    .input(z.object({ paymentId: z.uuid() }))
+    .output(retriedRefund)
+    .mutation(async ({ ctx, input }) => {
+      try {
+        const retried = await bookingServiceFor(ctx).retryRefund(input.paymentId);
+        return { ...retried, status: "REFUND_REQUESTED" as const };
+      } catch (error) {
+        if (error instanceof RefundObligationNotFoundError) {
+          throw new TRPCError({ code: "NOT_FOUND", message: error.message, cause: error });
+        }
+        if (error instanceof RefundNotInManualReviewError) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: error.message,
+            cause: error,
+          });
+        }
+        throw error;
+      }
+    }),
 
   /**
    * 100 synthetic sessions call `BookingService.holdSeats` on one free demo seat at once,

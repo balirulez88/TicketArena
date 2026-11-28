@@ -128,13 +128,47 @@ Decision: [ADR 0012](../adr/0012-identity-service-seam.md). Code: `apps/web/src/
 `admin.snapshot` (`routers/admin.ts`, `adminProcedure`) returns, at `takenAt`: orders by status
 and `pendingPayments` (orders in `PENDING_PAYMENT`; booking never reads the payment schema,
 ADR 0009), and per event (all events, by `onSaleAt`) seats by stored status, `queueLength` and
-`activeShoppers` (`QueueStore.counts`) and the booking counters (`hold_ok`, `seat_unavailable`,
-`race_lost`, `booking_busy`, `limit_exceeded`) read through `ctx.metricsReader()`
-(`createRedisBookingMetricsReader` over the Upstash client's `HGETALL`). Counters are best-effort:
-when they cannot be read the event's `metrics` is `null` and the rest is still returned. A `HELD`
-seat whose hold lapsed counts as held until the sweeper expires it. The figures are separate reads,
-not one transaction. Outbox, consumer and NATS figures, the live feed and stuck refunds are not
-built yet.
+`activeShoppers` (`QueueStore.counts`) and the counters (`hold_ok`, `seat_unavailable`,
+`race_lost`, `booking_busy`, `deadlock_retry`, `limit_exceeded`, and the saga's
+`late_delivery_refund`) read through `ctx.metricsReader()` (`createRedisBookingMetricsReader` over
+the Upstash client's `HGETALL`). Counters are best-effort: when they cannot be read the event's
+`metrics` is `null` and the rest is still returned. A `HELD` seat whose hold lapsed counts as held
+until the sweeper expires it. `messageHealth.outboxLagMs` is each service outbox's oldest `PENDING`
+age, read from Postgres (`admin/outbox-feed.ts`, `measureOutboxLags`); `messageHealth.delivery` is
+the worker's `/health` `delivery` block (consumer lag, pending acks, redeliveries, DLQ size and
+oldest age), read through `ctx.workerHealth()` (`worker-health.ts`: GET `WORKER_HEALTH_URL` with an
+800 ms timeout, validated with zod), and `null` when the URL is unset, the worker cannot be read or
+it reports `unavailable`; `refundPendingAgeMaxMs` is `BookingService.refundPendingAgeMax()`. The
+figures are separate reads, not one transaction.
+
+**Live feed.** `admin.feed({ cursor?, limit = 50 (1 to 200), correlationId? })` reads the union of
+the three service outboxes (`readOutboxFeed`, one indexed branch per table, ADR 0009) in
+`(createdAt, id)` order, oldest first. Without a cursor it returns the newest `limit` entries; with
+one, only the entries strictly after it. `nextCursor` is the last entry's `(createdAt, id)`, or the
+input cursor when nothing new came (`null` for an empty log). Each entry carries `id`, `service`,
+`eventType`, `aggregateType`, `aggregateId`, the envelope's `correlationId`, `status` (`PENDING`,
+`PUBLISHED` or `FAILED`), `createdAt` and `publishedAt`, never the payload, which holds buyer
+contact details. `correlationId` filters to one booking's saga; the dashboard groups by it in the
+browser. A row stamped before the cursor but committed after a poll read past it is not shown:
+`createdAt` is the writing transaction's start, and the feed is a view for people, not a delivery
+log.
+
+**Stuck refunds.** `admin.stuckRefunds({ limit = 100 (1 to 500) })` lists every open refund
+obligation (`BookingService.openRefunds`: ledger rows and orphan obligations in `REFUND_REQUESTED`
+or `MANUAL_REVIEW`), oldest first request first, each with `paymentId`, `orderId`, amount,
+`status`, `refundAttempts`, both request times, `orphan` and `ageMs` (from the first request, as
+`refund_pending_age_max`). `admin.retryRefund({ paymentId })` calls `BookingService.retryRefund`
+(re-emit through the outbox from `MANUAL_REVIEW`, attempts back to 0, first request time kept); a
+payment without an obligation (an `APPLIED` one included) is `NOT_FOUND`, an obligation in another
+state `PRECONDITION_FAILED` with domain code `REFUND_NOT_IN_MANUAL_REVIEW`, both naming the payment.
+
+**Dashboard.** `/admin` shows, below the per-event table, a message-health card (outbox lag per
+service; the consumer table, its redeliveries column labelled "Redeliveries (current)" because it is
+the broker's count of messages being redelivered now, not a running total; DLQ size and oldest age;
+oldest open refund; a note when the NATS figures are unavailable), the stuck refunds (polled every
+5 s, a "Retry refund" button on `MANUAL_REVIEW` rows only) and the live feed (polled every 1 s after
+its cursor, the newest 300 entries kept in the
+browser, a "Group by correlation id" toggle).
 
 **Demo actions.** Both take no input: the server picks the one event flagged `demo` (anything but
 exactly one is `PRECONDITION_FAILED`), so no request can aim them at a real event. Both are limited
@@ -149,8 +183,8 @@ taken first, so a refused call has no effect. The same limiter guards the admin 
   `BookingService.holdSeats` on it concurrently, in-process, bypassing admission by design. Returns
   `buyers`, `successes`, `seatUnavailable`, `bookingBusy`, `otherErrors`, `durationMs` (injected
   clock) and the `winner` (`holdId`, `correlationId`). Only the winner writes an outbox event, its
-  normal `seat.held`; that row is the race's entry for the live feed (ticket 36), found by the
-  winner's `correlationId`. Counters go to `ctx.metrics()` when configured.
+  normal `seat.held`; that row is the race's entry for the live feed, found by the winner's
+  `correlationId`. Counters go to `ctx.metrics()` when configured.
 - `admin.resetDemo`: `BookingService.resetEvent(demoId)` (see
   [database](../database/index.md#demo-reset): frees every demo seat and deletes holds without an
   order, keeps every order, order line and ledger row; returns `holdsDeleted`, `ordersKept`,
@@ -285,7 +319,7 @@ Code: `apps/worker/src/`; decision: [ADR 0013](../adr/0013-deployment-topology.m
 the JetStream topology first, binds the `/health` port (a port in use rejects naming the port, before anything has started), then starts the outbox **relay** (polls every 250 ms, batch of 100) and one
 **consumer runner** per registered consumer, and the **sweeper** (`sweeper.ts`: calls
 `BookingService.sweepExpired()`, which expires holds and then overdue orders, at start and then 15 s after each sweep ends, `SWEEP_INTERVAL_MS`; a
-failed sweep is logged and retried next time; `stop()` cancels the wait at once), the **refund reconciler** (`BookingService.reconcileRefunds()` at start and then 5 min after each pass ends, `RECONCILE_INTERVAL_MS`, on `periodic-loop.ts`; see [database](../database/index.md#refund-reconciler)), the waiting-room **admission ticker** (every 1 s, `ADMIT_INTERVAL_MS`) and **slot reaper** (every 15 s, `REAP_INTERVAL_MS`) in `admission.ts` on the generic `periodic-loop.ts` (same run-then-wait, log-and-retry, prompt-stop behaviour), each a pass over every event (see [waiting room](waiting-room.md#admission-and-slots)), and serves `GET /health` (`{ status: "ok", redis: "ok" | "unavailable" }`, Redis probed with a bounded `PING`). Redis is never awaited at start: its client (`redis.ts`, `createWorkerRedis`) connects on first use with bounded connects and commands, so an outage pauses only the ticker and reaper ([waiting room](waiting-room.md#redis-outage)). Configuration is validated once in
+failed sweep is logged and retried next time; `stop()` cancels the wait at once), the **refund reconciler** (`BookingService.reconcileRefunds()` at start and then 5 min after each pass ends, `RECONCILE_INTERVAL_MS`, on `periodic-loop.ts`; see [database](../database/index.md#refund-reconciler)), the waiting-room **admission ticker** (every 1 s, `ADMIT_INTERVAL_MS`) and **slot reaper** (every 15 s, `REAP_INTERVAL_MS`) in `admission.ts` on the generic `periodic-loop.ts` (same run-then-wait, log-and-retry, prompt-stop behaviour), each a pass over every event (see [waiting room](waiting-room.md#admission-and-slots)), and serves `GET /health` (`{ status: "ok", redis: "ok" | "unavailable" }`, Redis probed with a bounded `PING`, plus the outbox `FAILED` metrics and the broker's delivery figures, see [messaging](../messaging/index.md)). Redis is never awaited at start: its client (`redis.ts`, `createWorkerRedis`) connects on first use with bounded connects and commands, so an outage pauses only the ticker and reaper ([waiting room](waiting-room.md#redis-outage)). Configuration is validated once in
 `parseWorkerEnv` (`DATABASE_URL`, `NATS_URL`, `REDIS_URL`, `REDIS_CONNECT_TIMEOUT_MS` default 2000, `REDIS_COMMAND_TIMEOUT_MS` default 1000, `PORT`, `ADMIT_RATE_PER_SECOND` default 10, `MAX_ACTIVE` default 100) and injected. Details: [messaging](../messaging/index.md).
 
 **Start and stop** (`lifecycle.ts`, TD-034, TD-035). If any start step fails after a loop has

@@ -19,6 +19,7 @@ import {
 import {
   createRefundReconciler,
   DEFAULT_REFUND_RECONCILER_LIMITS,
+  type OpenRefundView,
   type ReconcileResult,
   type RefundObligationView,
   type RefundReconcilerLimits,
@@ -178,6 +179,12 @@ export interface BookingService {
    * (`REFUND_REQUESTED` or `MANUAL_REVIEW`) refund obligation at `T`; 0 when none is open.
    */
   refundPendingAgeMax(): Promise<number>;
+  /**
+   * The dashboard's stuck refunds: every open (`REFUND_REQUESTED` or `MANUAL_REVIEW`) refund
+   * obligation, ledger and orphan alike, oldest first request first, at most `limit`, each with
+   * its age at `T`.
+   */
+  openRefunds(limit: number): Promise<OpenRefundView[]>;
 }
 
 export interface ResetResult {
@@ -1070,6 +1077,7 @@ export function createBookingService({
     reconcileRefunds: () => refunds.reconcileRefunds(),
     retryRefund: (paymentId) => refunds.retryRefund(paymentId),
     refundPendingAgeMax: () => refunds.refundPendingAgeMax(),
+    openRefunds: (limit) => refunds.openRefunds(limit),
 
     async holdSeats(buyer, eventId, seatIds) {
       try {

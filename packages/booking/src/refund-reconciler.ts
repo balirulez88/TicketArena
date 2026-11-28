@@ -48,6 +48,15 @@ export interface RefundObligationView {
   readonly refundLastRequestedAt: Date;
 }
 
+/** An open refund obligation for the dashboard's stuck refunds, with its age at the caller's `T`. */
+export interface OpenRefundView extends RefundObligationView {
+  readonly status: "REFUND_REQUESTED" | "MANUAL_REVIEW";
+  /** An orphan refund obligation: booking has no order for the capture (`unknown_order`). */
+  readonly orphan: boolean;
+  /** ms since `refundRequestedAt` (the first request), as `refund_pending_age_max` measures it. */
+  readonly ageMs: number;
+}
+
 /** No refund obligation, in the ledger or orphaned, exists for the payment. */
 export class RefundObligationNotFoundError extends Error {
   readonly code = "NOT_FOUND";
@@ -75,6 +84,7 @@ export interface RefundReconciler {
   reconcileRefunds(): Promise<ReconcileResult>;
   retryRefund(paymentId: string): Promise<RefundObligationView>;
   refundPendingAgeMax(): Promise<number>;
+  openRefunds(limit: number): Promise<OpenRefundView[]>;
 }
 
 interface ReconcilerDeps {
@@ -454,6 +464,39 @@ export function createRefundReconciler({
         refundRequestedAt: row.refundRequestedAt,
         refundLastRequestedAt: T,
       };
+    },
+
+    async openRefunds(limit) {
+      // A ledger row the previous worker wrote may lack its request times until the next pass's
+      // cutover catch-up; it falls back to the capture, as the catch-up itself does.
+      const rows = await db.$queryRaw<
+        (Omit<OpenRefundView, "ageMs" | "refundRequestedAt" | "refundLastRequestedAt"> & {
+          refundRequestedAt: Date;
+          refundLastRequestedAt: Date;
+        })[]
+      >`
+        SELECT * FROM (
+          SELECT "paymentId"::text AS "paymentId", "orderId"::text AS "orderId", amount, currency,
+                 disposition::text AS status, "refundAttempts",
+                 COALESCE("refundRequestedAt", "capturedAt") AS "refundRequestedAt",
+                 COALESCE("refundLastRequestedAt", "refundRequestedAt", "capturedAt")
+                   AS "refundLastRequestedAt",
+                 false AS orphan
+          FROM order_payments
+          WHERE disposition IN ('REFUND_REQUESTED', 'MANUAL_REVIEW')
+          UNION ALL
+          SELECT "paymentId"::text, "orderId"::text, amount, currency, status::text,
+                 "refundAttempts", "refundRequestedAt", "refundLastRequestedAt", true
+          FROM orphan_refund_obligations
+          WHERE status IN ('REFUND_REQUESTED', 'MANUAL_REVIEW')
+        ) open
+        ORDER BY "refundRequestedAt", "paymentId"
+        LIMIT ${limit}`;
+      const now = clock.now().getTime();
+      return rows.map((row) => ({
+        ...row,
+        ageMs: Math.max(0, now - row.refundRequestedAt.getTime()),
+      }));
     },
 
     async refundPendingAgeMax() {
